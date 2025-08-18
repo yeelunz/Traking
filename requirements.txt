@@ -1,0 +1,8 @@
+numpy
+opencv-python
+pyyaml
+PySide6
+matplotlib
+
+# If you plan to use the CSRT tracker, replace opencv-python with:
+# opencv-contrib-python
