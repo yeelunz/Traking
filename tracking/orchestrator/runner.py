@@ -110,6 +110,8 @@ class PipelineRunner:
 
             def run_on_dataset(dataset, out_dir_base: str, models_list=None):
                 predictions_all = {}
+                # aggregate across entire dataset (all videos) per model
+                dataset_agg = {}
                 met_dir = os.path.join(out_dir_base, "metrics")
                 os.makedirs(met_dir, exist_ok=True)
                 for video_item in dataset:
@@ -120,12 +122,67 @@ class PipelineRunner:
                     pv_predictions = {}
                     use_models = models_list or models
                     for model_name, model in use_models:
-                        preds = model.predict(vp)
+                        try:
+                            preds = model.predict(vp)
+                        except Exception as e:
+                            # Log the failure and continue to next model/video
+                            self._log(f"[ERROR] Predict failed | model={model_name} video={os.path.basename(vp)} error={e}")
+                            preds = []
                         pv_predictions[model_name] = preds
                         predictions_all.setdefault(model_name, []).extend(preds)
                     if evaluator:
-                        evaluator.evaluate(pv_predictions, gt, met_dir)
-                        self._log(f"Evaluated metrics written to: {met_dir}")
+                        # per-video evaluation directory to avoid overwriting
+                        vid_stem = os.path.splitext(os.path.basename(vp))[0]
+                        vid_met_dir = os.path.join(met_dir, vid_stem)
+                        os.makedirs(vid_met_dir, exist_ok=True)
+                        res = evaluator.evaluate(pv_predictions, gt, vid_met_dir)
+                        # accumulate for dataset-level summary
+                        for model_name, sm in res.items():
+                            agg = dataset_agg.setdefault(model_name, {
+                                "count": 0,
+                                "sum_iou": 0.0, "sum_iou_sq": 0.0,
+                                "sum_ce": 0.0, "sum_ce_sq": 0.0,
+                                # detection aggregation
+                                "tp_50": 0, "fp_50": 0, "fn_50": 0,
+                                "tp_75": 0, "fp_75": 0, "fn_75": 0,
+                            })
+                            agg["count"] += int(sm.get("count", 0))
+                            agg["sum_iou"] += float(sm.get("sum_iou", 0.0))
+                            agg["sum_iou_sq"] += float(sm.get("sum_iou_sq", 0.0))
+                            agg["sum_ce"] += float(sm.get("sum_ce", 0.0))
+                            agg["sum_ce_sq"] += float(sm.get("sum_ce_sq", 0.0))
+                            agg["tp_50"] += int(sm.get("tp_50", 0))
+                            agg["fp_50"] += int(sm.get("fp_50", 0))
+                            agg["fn_50"] += int(sm.get("fn_50", 0))
+                            agg["tp_75"] += int(sm.get("tp_75", 0))
+                            agg["fp_75"] += int(sm.get("fp_75", 0))
+                            agg["fn_75"] += int(sm.get("fn_75", 0))
+                        self._log(f"Evaluated metrics written to: {vid_met_dir}")
+                # dataset-level summary across all videos
+                if evaluator and dataset_agg:
+                    summary_out = {}
+                    for model_name, a in dataset_agg.items():
+                        n = max(1, int(a.get("count", 0)))
+                        i_mu = a["sum_iou"] / n
+                        # E[X^2] - (E[X])^2, guard non-negative
+                        i_var = max(0.0, a["sum_iou_sq"] / n - i_mu * i_mu)
+                        i_sd = i_var ** 0.5
+                        c_mu = a["sum_ce"] / n
+                        c_var = max(0.0, a["sum_ce_sq"] / n - c_mu * c_mu)
+                        c_sd = c_var ** 0.5
+                        # micro-precision as AP at single threshold
+                        tp50, fp50 = int(a.get("tp_50", 0)), int(a.get("fp_50", 0))
+                        tp75, fp75 = int(a.get("tp_75", 0)), int(a.get("fp_75", 0))
+                        map50 = (tp50 / (tp50 + fp50)) if (tp50 + fp50) > 0 else 0.0
+                        map75 = (tp75 / (tp75 + fp75)) if (tp75 + fp75) > 0 else 0.0
+                        summary_out[model_name] = {
+                            "frames_count": n,
+                            "iou_mean": i_mu, "iou_std": i_sd,
+                            "ce_mean": c_mu, "ce_std": c_sd,
+                            "mAP_50": map50, "mAP_75": map75,
+                        }
+                    with open(os.path.join(met_dir, "summary.json"), "w", encoding="utf-8") as f:
+                        json.dump(summary_out, f, ensure_ascii=False, indent=2)
                 pred_dir = os.path.join(out_dir_base, "predictions")
                 os.makedirs(pred_dir, exist_ok=True)
                 for model_name, preds in predictions_all.items():
@@ -172,9 +229,13 @@ class PipelineRunner:
                 agg = {}
                 for sm in fold_summaries:
                     for model_name, m in sm.items():
-                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": []})
+                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "mAP_50": [], "mAP_75": []})
                         agg[model_name]["iou_mean"].append(m.get("iou_mean", 0.0))
                         agg[model_name]["ce_mean"].append(m.get("ce_mean", 0.0))
+                        if "mAP_50" in m:
+                            agg[model_name]["mAP_50"].append(m.get("mAP_50", 0.0))
+                        if "mAP_75" in m:
+                            agg[model_name]["mAP_75"].append(m.get("mAP_75", 0.0))
                 comp_dir = os.path.join(out_dir, "comparison")
                 os.makedirs(comp_dir, exist_ok=True)
                 agg_out = {}
@@ -190,6 +251,10 @@ class PipelineRunner:
                     agg_out[model_name] = {
                         "iou_mean_mean": i_mu, "iou_mean_std": i_sd,
                         "ce_mean_mean": c_mu, "ce_mean_std": c_sd,
+                        "mAP_50_mean": mean_std(vals.get("mAP_50", []))[0],
+                        "mAP_50_std": mean_std(vals.get("mAP_50", []))[1],
+                        "mAP_75_mean": mean_std(vals.get("mAP_75", []))[0],
+                        "mAP_75_std": mean_std(vals.get("mAP_75", []))[1],
                     }
                 with open(os.path.join(comp_dir, "kfold_summary.json"), "w", encoding="utf-8") as f:
                     json.dump(agg_out, f, ensure_ascii=False, indent=2)

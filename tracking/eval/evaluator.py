@@ -44,15 +44,55 @@ class BasicEvaluator:
         # Assume gt: {"frames": {fi: [bbox,...]}, ...}
         frames_gt = gt.get("frames", {})
         results = {}
+
+        def _det_counts_ap(preds: List[FramePrediction], frames_gt: Dict[int, List[Tuple[float, float, float, float]]], thr: float):
+            # Single-object per frame. Match first GT box if present.
+            pred_map = {}
+            for p in preds:
+                # if multiple preds at same frame, keep the first
+                pred_map.setdefault(p.frame_index, p.bbox)
+            gt_frames = {fi for fi, boxes in frames_gt.items() if boxes}
+            all_frames = gt_frames | set(pred_map.keys())
+            tp = fp = fn = 0
+            for fi in all_frames:
+                has_gt = fi in gt_frames
+                has_pred = fi in pred_map
+                if has_gt and has_pred:
+                    gtb = frames_gt.get(fi, [None])[0]
+                    if gtb is None:
+                        fp += 1
+                    else:
+                        iou = bbox_iou(pred_map[fi], gtb)
+                        if iou >= thr:
+                            tp += 1
+                        else:
+                            fp += 1
+                elif has_gt and not has_pred:
+                    fn += 1
+                elif has_pred and not has_gt:
+                    fp += 1
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            # With single operating point, we report AP as precision at this point.
+            ap = precision
+            return {
+                "tp": tp, "fp": fp, "fn": fn,
+                "precision": precision, "recall": recall, "ap": ap,
+            }
         for model_name, preds in predictions.items():
             ious: List[float] = []
             ces: List[float] = []
             per_frame_rows: List[List[Any]] = [["frame_index", "iou", "center_error"]]
+            # For displacement plot (center magnitude vs. time)
+            centers_mag: List[Tuple[int, float]] = []  # (frame_index, |center|)
             for p in preds:
                 gt_boxes = frames_gt.get(p.frame_index, [])
                 if not gt_boxes:
                     # no GT for this frame -> skip metrics row but still record NA (optional)
                     per_frame_rows.append([p.frame_index, None, None])
+                    # still record center displacement magnitude
+                    cx, cy = p.center
+                    centers_mag.append((p.frame_index, float((cx ** 2 + cy ** 2) ** 0.5)))
                     continue
                 # use first GT box for now
                 gtb = gt_boxes[0]
@@ -61,11 +101,29 @@ class BasicEvaluator:
                 ious.append(i)
                 ces.append(c)
                 per_frame_rows.append([p.frame_index, i, c])
+                # center displacement relative to origin (0,0)
+                cx, cy = p.center
+                centers_mag.append((p.frame_index, float((cx ** 2 + cy ** 2) ** 0.5)))
+            # detection-style metrics (single object) at IoU thresholds
+            det50 = _det_counts_ap(preds, frames_gt, 0.5)
+            det75 = _det_counts_ap(preds, frames_gt, 0.75)
             summary = {
                 "iou_mean": sum(ious) / len(ious) if ious else 0.0,
                 "iou_std": (sum((x - (sum(ious) / len(ious))) ** 2 for x in ious) / len(ious)) ** 0.5 if ious else 0.0,
                 "ce_mean": sum(ces) / len(ces) if ces else 0.0,
                 "ce_std": (sum((x - (sum(ces) / len(ces))) ** 2 for x in ces) / len(ces)) ** 0.5 if ces else 0.0,
+                # aggregation helpers for cross-video/global stats (over frames)
+                "count": len(ious),
+                "sum_iou": float(sum(ious)),
+                "sum_iou_sq": float(sum(x * x for x in ious)),
+                "sum_ce": float(sum(ces)),
+                "sum_ce_sq": float(sum(x * x for x in ces)),
+                # mAP-like metrics (single-object precision at IoU threshold)
+                "mAP_50": det50["ap"],
+                "mAP_75": det75["ap"],
+                # raw counts for aggregation
+                "tp_50": det50["tp"], "fp_50": det50["fp"], "fn_50": det50["fn"],
+                "tp_75": det75["tp"], "fp_75": det75["fp"], "fn_75": det75["fn"],
             }
             results[model_name] = summary
             os.makedirs(out_dir, exist_ok=True)
@@ -101,6 +159,19 @@ class BasicEvaluator:
                         plt.xlabel("Pixels"); plt.ylabel("Count")
                         plt.tight_layout()
                         plt.savefig(os.path.join(out_dir, f"{model_name}_ce_hist.png"))
+                        plt.close()
+                    # Center displacement (|center|) over time curve for this video
+                    if centers_mag:
+                        centers_mag.sort(key=lambda t: t[0])
+                        xs = [fi for fi, _ in centers_mag]
+                        ys = [mag for _, mag in centers_mag]
+                        plt.figure()
+                        plt.plot(xs, ys, linewidth=1.5)
+                        plt.title(f"Center displacement vs Time - {model_name}")
+                        plt.xlabel("Frame index")
+                        plt.ylabel("|center| (pixels)")
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(out_dir, f"{model_name}_center_displacement.png"))
                         plt.close()
                 except Exception:
                     pass
