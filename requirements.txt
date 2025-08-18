@@ -1,8 +1,9 @@
-numpy
+numpy<2
 opencv-python
 pyyaml
 PySide6
 matplotlib
+pillow
 
 # For Faster R-CNN model
 torch

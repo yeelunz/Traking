@@ -12,9 +12,11 @@ from ..preproc import clahe  # noqa: F401
 from ..models import template_matching  # noqa: F401
 from ..models import csrt  # noqa: F401
 from ..models import optical_flow_lk  # noqa: F401
+from ..models import faster_rcnn  # noqa: F401
 from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
+import traceback as _tb
 
 
 class PipelineRunner:
@@ -114,6 +116,11 @@ class PipelineRunner:
                 dataset_agg = {}
                 met_dir = os.path.join(out_dir_base, "metrics")
                 os.makedirs(met_dir, exist_ok=True)
+                eval_cfg = self.cfg.get("evaluation", {}) or {}
+                restrict_to_gt_frames = bool(eval_cfg.get("restrict_to_gt_frames", True))
+                viz_cfg = eval_cfg.get("visualize", {}) or {}
+                viz_enabled = bool(viz_cfg.get("enabled", False))
+                viz_samples = int(viz_cfg.get("samples", 10) or 10)
                 for video_item in dataset:
                     vp = video_item["video_path"]
                     gt_json = os.path.splitext(vp)[0] + ".json"
@@ -131,11 +138,20 @@ class PipelineRunner:
                         pv_predictions[model_name] = preds
                         predictions_all.setdefault(model_name, []).extend(preds)
                     if evaluator:
+                        # Filter predictions to GT frames only for evaluation (avoid penalizing unannotated frames)
+                        if restrict_to_gt_frames:
+                            gt_frames_set = {int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes}
+                            eval_pv_predictions = {
+                                mn: [p for p in pl if int(getattr(p, 'frame_index', -1)) in gt_frames_set]
+                                for mn, pl in pv_predictions.items()
+                            }
+                        else:
+                            eval_pv_predictions = pv_predictions
                         # per-video evaluation directory to avoid overwriting
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
                         vid_met_dir = os.path.join(met_dir, vid_stem)
                         os.makedirs(vid_met_dir, exist_ok=True)
-                        res = evaluator.evaluate(pv_predictions, gt, vid_met_dir)
+                        res = evaluator.evaluate(eval_pv_predictions, gt, vid_met_dir)
                         # accumulate for dataset-level summary
                         for model_name, sm in res.items():
                             agg = dataset_agg.setdefault(model_name, {
@@ -158,6 +174,50 @@ class PipelineRunner:
                             agg["fp_75"] += int(sm.get("fp_75", 0))
                             agg["fn_75"] += int(sm.get("fn_75", 0))
                         self._log(f"Evaluated metrics written to: {vid_met_dir}")
+
+                        # Optional visualization: draw up to N GT frames per video with GT/pred boxes
+                        if viz_enabled:
+                            try:
+                                import cv2  # type: ignore
+                                vis_dir = os.path.join(out_dir_base, "visualizations", vid_stem)
+                                os.makedirs(vis_dir, exist_ok=True)
+                                gt_frames_sorted = sorted([int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes])
+                                if viz_samples > 0:
+                                    gt_frames_sorted = gt_frames_sorted[:min(viz_samples, len(gt_frames_sorted))]
+                                # preload predictions by frame for each model
+                                eval_pred_maps = {}
+                                for mn, pl in (eval_pv_predictions.items() if restrict_to_gt_frames else pv_predictions.items()):
+                                    m = {}
+                                    for p in pl:
+                                        m[int(p.frame_index)] = p.bbox
+                                    eval_pred_maps[mn] = m
+                                cap = cv2.VideoCapture(vp)
+                                for fi in gt_frames_sorted:
+                                    cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                                    ok, frame = cap.read()
+                                    if not ok:
+                                        continue
+                                    # draw GT boxes in green
+                                    for gtb in gt.get("frames", {}).get(fi, []) or []:
+                                        x, y, w, h = map(float, gtb)
+                                        cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0,255,0), 2)
+                                    # draw per-model pred in red (one per model)
+                                    for mn, fmap in eval_pred_maps.items():
+                                        pb = fmap.get(fi)
+                                        if pb is None:
+                                            continue
+                                        x, y, w, h = map(float, pb)
+                                        cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0,0,255), 2)
+                                        cv2.putText(frame, mn, (int(x), max(0, int(y)-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1, cv2.LINE_AA)
+                                    out_path = os.path.join(vis_dir, f"frame_{fi:06d}.jpg")
+                                    try:
+                                        cv2.imwrite(out_path, frame)
+                                    except Exception:
+                                        pass
+                                cap.release()
+                                self._log(f"Visualization images saved: {vis_dir}")
+                            except Exception as _e_viz:
+                                self._log(f"[Warn] Visualization failed: {_e_viz}")
                 # dataset-level summary across all videos
                 if evaluator and dataset_agg:
                     summary_out = {}
@@ -215,10 +275,13 @@ class PipelineRunner:
                     # optional training step
                     for model_name, model in fold_models:
                         if hasattr(model, "train"):
+                            self._log(f"[Train] Fold {fi+1}/{k_fold} | model={model_name} | train_videos={len(trn_ds)} val_videos={len(val_ds)}")
                             try:
-                                model.train(trn_ds, val_ds, seed=self.seed, output_dir=os.path.join(fold_dir, "train"))
-                            except Exception:
-                                pass
+                                ret = model.train(trn_ds, val_ds, seed=self.seed, output_dir=os.path.join(fold_dir, "train"))
+                                if isinstance(ret, dict):
+                                    self._log(f"[Train] Result: {ret}")
+                            except Exception as e:
+                                self._log(f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}")
                     run_on_dataset(val_ds, fold_dir, models_list=fold_models)
                     try:
                         with open(os.path.join(fold_dir, "metrics", "summary.json"), "r", encoding="utf-8") as f:
@@ -285,10 +348,15 @@ class PipelineRunner:
             os.makedirs(final_train_dir, exist_ok=True)
             for model_name, model in final_models:
                 if hasattr(model, "train"):
+                    self._log(f"[Train] Full train | model={model_name} | train_videos={len(train_ds)}")
                     try:
-                        model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
-                    except Exception:
-                        pass
+                        ret = model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
+                        if isinstance(ret, dict):
+                            self._log(f"[Train] Result: {ret}")
+                            if ret.get("status") == "no_data":
+                                self._log("[Warn] No training samples found (check that each video has a matching .json annotation next to it).")
+                    except Exception as e:
+                        self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
             test_dir = os.path.join(out_dir, "test")
             os.makedirs(test_dir, exist_ok=True)
             run_on_dataset(test_ds, test_dir, models_list=final_models)

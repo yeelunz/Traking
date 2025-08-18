@@ -1,4 +1,57 @@
+# --- Python bytecode & caches ---
 __pycache__/
-results/
-*.pyc
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# --- Build & packaging ---
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# --- Test & coverage ---
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+
+# --- OS files ---
 .DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- App data ---
+results/
+logs/
+*.log
+
+# --- Checkpoints / models ---
+*.pth
+*.pt
+*.onnx
+*.ckpt
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- Misc cache/temp ---
+.cache/
+tmp/
+temp/

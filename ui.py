@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QTextEdit, QLineEdit, QMessageBox,
     QComboBox, QSpinBox, QDoubleSpinBox, QFormLayout, QGroupBox,
-    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox
+    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox,
+    QScrollArea, QSplitter
 )
 
 from tracking.orchestrator.runner import PipelineRunner
@@ -18,6 +19,7 @@ from tracking.preproc import clahe  # noqa: F401
 from tracking.models import template_matching  # noqa: F401
 from tracking.models import csrt  # noqa: F401
 from tracking.models import optical_flow_lk  # noqa: F401
+from tracking.models import faster_rcnn  # noqa: F401
 from tracking.eval import evaluator  # noqa: F401
 
 
@@ -26,9 +28,14 @@ class SimpleRunnerUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Tracking Pipeline UI (Lite)")
         self.resize(900, 700)
+
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        root_layout = QVBoxLayout(central)
+
+        # Top container that will be placed inside a scroll area
+        top_container = QWidget()
+        top_layout = QVBoxLayout(top_container)
 
         # Config path row
         row = QHBoxLayout()
@@ -38,7 +45,7 @@ class SimpleRunnerUI(QMainWindow):
         btn_browse.clicked.connect(self.browse_cfg)
         row.addWidget(self.edit_cfg, 1)
         row.addWidget(btn_browse)
-        layout.addLayout(row)
+        top_layout.addLayout(row)
 
         # Dataset root row
         row2 = QHBoxLayout()
@@ -48,25 +55,31 @@ class SimpleRunnerUI(QMainWindow):
         btn_root.clicked.connect(self.browse_root)
         row2.addWidget(self.edit_root, 1)
         row2.addWidget(btn_root)
-        layout.addLayout(row2)
+        top_layout.addLayout(row2)
 
-        # Guided builder
+        # Guided builder group
         gb = QGroupBox("Pipeline Builder")
         gbl = QVBoxLayout(gb)
+        # internal state for params editors
+        self.pre_params = {}
+        self.model_params = {}
+        self._current_pre_name = None
+        self._pre_bindings = []
+        self._model_bindings = []
+
         ds_form = QFormLayout()
         self.split_method = QComboBox(); self.split_method.addItems(["video_level"])  # reserve
         self.split_r_train = QDoubleSpinBox(); self.split_r_train.setRange(0,1); self.split_r_train.setSingleStep(0.05); self.split_r_train.setValue(0.8)
         self.split_r_test = QDoubleSpinBox(); self.split_r_test.setRange(0,1); self.split_r_test.setSingleStep(0.05); self.split_r_test.setValue(0.2)
         self.kfold = QSpinBox(); self.kfold.setRange(1, 20); self.kfold.setValue(1)
+        gbl.addLayout(ds_form)
         ds_form.addRow("Split Method", self.split_method)
         ds_form.addRow("Ratios (train/test)", self._hbox([self.split_r_train, self.split_r_test]))
         ds_form.addRow("K-Fold (1=off)", self.kfold)
-        gbl.addLayout(ds_form)
 
         # Preprocessing selector with add/remove/reorder
         pre_row = QVBoxLayout()
-        pre_row_header = QHBoxLayout()
-        pre_row_header.addWidget(QLabel("Preprocessing:"))
+        pre_row_header = QHBoxLayout(); pre_row_header.addWidget(QLabel("Preprocessing:"))
         pre_row.addLayout(pre_row_header)
         pre_mid = QHBoxLayout()
         # available list
@@ -89,6 +102,7 @@ class SimpleRunnerUI(QMainWindow):
         pre_row.addLayout(pre_mid)
         gbl.addLayout(pre_row)
 
+        # Model row
         mdl_row = QHBoxLayout()
         mdl_row.addWidget(QLabel("Model:"))
         self.combo_model = QComboBox()
@@ -97,18 +111,9 @@ class SimpleRunnerUI(QMainWindow):
         mdl_row.addWidget(self.combo_model, 1)
         gbl.addLayout(mdl_row)
 
-        # Parameter editors
-        self.pre_params = {}  # name -> params dict
-        self._current_pre_name = None
-        self._pre_bindings = []  # list of (key, getter, setter)
-        self.model_params = {}  # model_name -> params dict
-        self._model_bindings = []
-        self._current_model_name: Optional[str] = None
-
-        # Preproc params editor (edit the currently selected item in right list)
+        # Preproc params editor
         pre_params_box = QGroupBox("Preproc 參數（編輯右側已選中的項目）")
         pre_params_l = QVBoxLayout(pre_params_box)
-        # keep a reference to place/reset forms later
         self.pre_params_vlayout = pre_params_l
         self.pre_form_container = QWidget(); self.pre_form_layout = QFormLayout(self.pre_form_container)
         pre_params_l.addWidget(self.pre_form_container)
@@ -119,7 +124,6 @@ class SimpleRunnerUI(QMainWindow):
         # Model params editor
         model_params_box = QGroupBox("Model 參數")
         model_params_l = QVBoxLayout(model_params_box)
-        # keep a reference to place/reset forms later
         self.model_params_vlayout = model_params_l
         self.model_form_container = QWidget(); self.model_form_layout = QFormLayout(self.model_form_container)
         model_params_l.addWidget(self.model_form_container)
@@ -127,6 +131,7 @@ class SimpleRunnerUI(QMainWindow):
         model_params_l.addWidget(btn_model_save)
         gbl.addWidget(model_params_box)
 
+        # Evaluator row
         ev_row = QHBoxLayout()
         ev_row.addWidget(QLabel("Evaluator:"))
         self.combo_eval = QComboBox()
@@ -135,12 +140,22 @@ class SimpleRunnerUI(QMainWindow):
         ev_row.addWidget(self.combo_eval, 1)
         gbl.addLayout(ev_row)
 
+        # Evaluation options: visualization
+        viz_row = QHBoxLayout()
+        self.chk_viz = QCheckBox("輸出可視化")
+        self.spn_viz_samples = QSpinBox(); self.spn_viz_samples.setRange(1, 10000); self.spn_viz_samples.setValue(10)
+        viz_row.addWidget(self.chk_viz)
+        viz_row.addWidget(QLabel("可視化張數(samples):"))
+        viz_row.addWidget(self.spn_viz_samples)
+        viz_row.addStretch(1)
+        gbl.addLayout(viz_row)
+
         gbl.addWidget(QLabel("Raw Config (optional):"))
         self.txt_cfg = QTextEdit()
         gbl.addWidget(self.txt_cfg, 1)
-        layout.addWidget(gb)
+        top_layout.addWidget(gb)
 
-        # Controls
+        # Controls row
         ctr = QHBoxLayout()
         btn_load = QPushButton("載入檔案"); btn_load.clicked.connect(self.load_file)
         btn_save = QPushButton("存檔"); btn_save.clicked.connect(self.save_file)
@@ -149,22 +164,37 @@ class SimpleRunnerUI(QMainWindow):
         btn_run = QPushButton("執行 Pipeline"); btn_run.clicked.connect(self.run_pipeline)
         for b in (btn_load, btn_save, btn_build, btn_sync_from_raw, btn_run):
             ctr.addWidget(b)
-        layout.addLayout(ctr)
-        # Logs
-        layout.addWidget(QLabel("Logs:"))
-        self.txt_log = QTextEdit(); self.txt_log.setReadOnly(True)
-        layout.addWidget(self.txt_log, 1)
+        top_layout.addLayout(ctr)
 
-        # wire events for params editors
+        # Logs panel (bottom of splitter)
+        logs_widget = QWidget()
+        logs_layout = QVBoxLayout(logs_widget)
+        logs_layout.setContentsMargins(0, 0, 0, 0)
+        logs_layout.addWidget(QLabel("Logs:"))
+        self.txt_log = QTextEdit(); self.txt_log.setReadOnly(True)
+        logs_layout.addWidget(self.txt_log, 1)
+
+        # Wire events for params editors
         self.list_pre_sel.currentRowChanged.connect(self._on_pre_selected_changed)
-        # track current model to save the correct one before switching
         self._current_model_name = self.combo_model.currentText()
         self.combo_model.currentIndexChanged.connect(self._on_model_index_changed)
-        # init model form
         self._on_model_changed(self._current_model_name)
 
+        # Scrollable top area + resizable splitter
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(top_container)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(scroll)
+        splitter.addWidget(logs_widget)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        root_layout.addWidget(splitter)
     def log(self, msg: str):
         self.txt_log.append(msg)
+        # 同步輸出到終端機，便於即時觀察
+        try:
+            print(msg, flush=True)
+        except Exception:
+            pass
 
     def _hbox(self, widgets):
         w = QWidget(); l = QHBoxLayout(w); l.setContentsMargins(0,0,0,0)
@@ -203,23 +233,38 @@ class SimpleRunnerUI(QMainWindow):
         QMessageBox.information(self, "已儲存", f"寫入 {path}")
 
     def parse_config(self) -> Optional[dict]:
+        import traceback as _tb
         txt = self.txt_cfg.toPlainText()
         if not txt.strip():
             return None
-        path = self.edit_cfg.text().lower()
+        path = (self.edit_cfg.text() or "").lower()
+        # Prefer YAML if副檔名是 yml/yaml；否則嘗試 JSON，失敗再回退 YAML
         if path.endswith((".yaml", ".yml")):
             try:
                 import yaml  # type: ignore
                 return yaml.safe_load(txt)
             except Exception as e:
+                err = f"YAML 解析失敗: {e}\n{_tb.format_exc()}"
+                self.log(err)
                 QMessageBox.critical(self, "YAML 錯誤", str(e))
                 return None
         else:
+            # Try JSON first
             try:
                 return json.loads(txt)
-            except Exception as e:
-                QMessageBox.critical(self, "JSON 錯誤", str(e))
-                return None
+            except Exception as e_json:
+                # Fallback to YAML
+                try:
+                    import yaml  # type: ignore
+                    return yaml.safe_load(txt)
+                except Exception as e_yaml:
+                    err = (
+                        f"設定解析失敗。嘗試 JSON 與 YAML 皆失敗\n"
+                        f"JSON 錯誤: {e_json}\nYAML 錯誤: {e_yaml}\n{_tb.format_exc()}"
+                    )
+                    self.log(err)
+                    QMessageBox.critical(self, "設定解析失敗", err)
+                    return None
 
     def build_yaml_from_controls(self):
         ds_root = self.edit_root.text().strip() or ""
@@ -265,7 +310,9 @@ class SimpleRunnerUI(QMainWindow):
                     "pipeline": pipeline_steps,
                 }
             ],
-            "evaluation": {"evaluator": evaluator},
+            "evaluation": {
+                "evaluator": evaluator,
+            },
             "output": {"results_root": os.path.join(os.getcwd(), "results")}
         }
         try:
@@ -335,26 +382,80 @@ class SimpleRunnerUI(QMainWindow):
             idx = self.combo_eval.findText(ev)
             if idx >= 0:
                 self.combo_eval.setCurrentIndex(idx)
+        # evaluation.visualize
+        ev_viz = (cfg.get("evaluation", {}) or {}).get("visualize", {}) or {}
+        self.chk_viz.setChecked(bool(ev_viz.get("enabled", False)))
+        try:
+            self.spn_viz_samples.setValue(int(ev_viz.get("samples", 10) or 10))
+        except Exception:
+            self.spn_viz_samples.setValue(10)
         # refresh forms to reflect stored params
         self._on_pre_selected_changed(self.list_pre_sel.currentRow())
         self._on_model_changed(self.combo_model.currentText())
 
     def run_pipeline(self):
+        import traceback as _tb
+        # Env diagnostics: python, torch/torchvision, CUDA
+        try:
+            import sys as _sys
+            self.log(f"Python: {_sys.executable}")
+            self.log(f"Python version: {_sys.version}")
+            try:
+                import os as _os
+                self.log(f"Conda env: {_os.environ.get('CONDA_DEFAULT_ENV', '<unknown>')}")
+            except Exception:
+                pass
+            try:
+                import torch as _t
+                self.log(f"torch: {_t.__version__}")
+                self.log(f"CUDA available: {_t.cuda.is_available()}")
+                if _t.cuda.is_available():
+                    try:
+                        dev_name = _t.cuda.get_device_name(0)
+                    except Exception:
+                        dev_name = "<unknown>"
+                    self.log(f"CUDA device[0]: {dev_name}")
+            except Exception as e_t:
+                self.log(f"torch import failed: {e_t}")
+            try:
+                import torchvision as _tv
+                self.log(f"torchvision: {_tv.__version__}")
+            except Exception as e_tv:
+                self.log(f"torchvision import failed: {e_tv}")
+            try:
+                from PIL import Image as _PIL_Image
+                import PIL as _PIL
+                self.log(f"Pillow: {_PIL.__version__} ({_PIL_Image.__file__})")
+            except Exception as e_pil:
+                self.log(f"Pillow import failed: {e_pil}")
+        except Exception:
+            pass
         cfg = self.parse_config()
         if not cfg:
+            self.log("設定內容為空或格式錯誤（詳細見上方 Logs 或終端）")
             QMessageBox.warning(self, "錯誤", "設定內容為空或格式錯誤")
             return
         root = self.edit_root.text().strip()
         if root:
             cfg.setdefault("dataset", {})["root"] = root
+        # Override visualize from UI (do not persist to YAML)
+        try:
+            ev = cfg.setdefault("evaluation", {})
+            ev_viz = ev.setdefault("visualize", {})
+            ev_viz["enabled"] = bool(self.chk_viz.isChecked())
+            ev_viz["samples"] = int(self.spn_viz_samples.value())
+            # Keep default behavior for restrict_to_gt_frames unless provided in file
+        except Exception:
+            pass
         self.log("開始執行…")
         runner = PipelineRunner(cfg, logger=self.log)
         try:
             runner.run()
             self.log("完成。")
         except Exception as e:
-            self.log(f"錯誤: {e}")
-            QMessageBox.critical(self, "執行失敗", str(e))
+            tb = _tb.format_exc()
+            self.log(f"執行錯誤: {e}\n{tb}")
+            QMessageBox.critical(self, "執行失敗", f"{e}\n（詳細請見 Logs/終端）")
 
     # Helpers for preprocessing UI
     def _with_title(self, title: str, widget: QWidget) -> QWidget:
