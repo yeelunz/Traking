@@ -84,7 +84,22 @@ class BasicEvaluator:
             ces: List[float] = []
             per_frame_rows: List[List[Any]] = [["frame_index", "iou", "center_error"]]
             # For displacement plot (center magnitude vs. time)
-            centers_mag: List[Tuple[int, float]] = []  # (frame_index, |center|)
+            centers_mag: List[Tuple[int, float]] = []  # (frame_index, |center_pred|)
+            # Prepare GT center magnitude per frame (first GT box only)
+            gt_center_mag_map: Dict[int, float] = {}
+            for _fi, _boxes in frames_gt.items():
+                if not _boxes:
+                    continue
+                try:
+                    gx, gy, gw, gh = _boxes[0]
+                    gcx, gcy = float(gx) + float(gw) / 2.0, float(gy) + float(gh) / 2.0
+                    gt_center_mag_map[int(_fi)] = float((gcx ** 2 + gcy ** 2) ** 0.5)
+                except Exception:
+                    continue
+            # Build a quick lookup of predictions by frame (first prediction wins)
+            pred_map: Dict[int, Tuple[float, float, float, float]] = {}
+            for p in preds:
+                pred_map.setdefault(int(p.frame_index), p.bbox)
             for p in preds:
                 gt_boxes = frames_gt.get(p.frame_index, [])
                 if not gt_boxes:
@@ -101,9 +116,38 @@ class BasicEvaluator:
                 ious.append(i)
                 ces.append(c)
                 per_frame_rows.append([p.frame_index, i, c])
-                # center displacement relative to origin (0,0)
+                # center displacement relative to origin (0,0) for prediction
                 cx, cy = p.center
                 centers_mag.append((p.frame_index, float((cx ** 2 + cy ** 2) ** 0.5)))
+            # --- EAO (Expected Average Overlap) simplified implementation ---
+            # Construct IoU time series aligned to GT frames (missing predictions count as IoU=0)
+            gt_seq_frames_sorted: List[int] = sorted([int(fi) for fi, boxes in frames_gt.items() if boxes])
+            iou_ts: List[float] = []
+            for fi in gt_seq_frames_sorted:
+                gtb = (frames_gt.get(fi) or [None])[0]
+                if gtb is None:
+                    continue
+                pb = pred_map.get(int(fi))
+                iou_ts.append(bbox_iou(pb, gtb) if pb is not None else 0.0)
+            # Define the evaluation length range [L_min, L_max]
+            L_min = 1
+            L_max_default = 100
+            N = len(iou_ts)
+            eao_curve: List[Tuple[int, float]] = []  # (L, expected avg overlap for length L)
+            if N > 0:
+                L_max = min(L_max_default, N)
+                cumsum = [0.0]
+                s = 0.0
+                for v in iou_ts:
+                    s += float(v)
+                    cumsum.append(s)
+                for L in range(L_min, L_max + 1):
+                    avg_overlap_L = (cumsum[L] - cumsum[0]) / float(L)
+                    eao_curve.append((L, avg_overlap_L))
+                eao = sum(val for _, val in eao_curve) / len(eao_curve)
+            else:
+                L_max = 0
+                eao = 0.0
             # detection-style metrics (single object) at IoU thresholds
             det50 = _det_counts_ap(preds, frames_gt, 0.5)
             det75 = _det_counts_ap(preds, frames_gt, 0.75)
@@ -124,6 +168,9 @@ class BasicEvaluator:
                 # raw counts for aggregation
                 "tp_50": det50["tp"], "fp_50": det50["fp"], "fn_50": det50["fn"],
                 "tp_75": det75["tp"], "fp_75": det75["fp"], "fn_75": det75["fn"],
+                # EAO metrics (per-sequence)
+                "EAO": float(eao),
+                "EAO_L": int(L_max),
             }
             results[model_name] = summary
             os.makedirs(out_dir, exist_ok=True)
@@ -139,6 +186,13 @@ class BasicEvaluator:
             with open(os.path.join(out_dir, f"{model_name}_per_frame.csv"), "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerows(per_frame_rows)
+            # EAO curve csv
+            if eao_curve:
+                with open(os.path.join(out_dir, f"{model_name}_eao_curve.csv"), "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(["L", "expected_avg_overlap"])
+                    for L, val in eao_curve:
+                        w.writerow([L, val])
             # plots
             if plt is not None:
                 try:
@@ -160,18 +214,54 @@ class BasicEvaluator:
                         plt.tight_layout()
                         plt.savefig(os.path.join(out_dir, f"{model_name}_ce_hist.png"))
                         plt.close()
-                    # Center displacement (|center|) over time curve for this video
-                    if centers_mag:
-                        centers_mag.sort(key=lambda t: t[0])
-                        xs = [fi for fi, _ in centers_mag]
-                        ys = [mag for _, mag in centers_mag]
+                    # Center displacement (|center|) over time curve: plot GT and Pred lines aligned on GT frames
+                    # If GT exists, align x-axis to GT frames and draw both lines; otherwise fallback to Pred-only
+                    has_gt_centers = bool(gt_center_mag_map)
+                    if has_gt_centers or centers_mag:
                         plt.figure()
-                        plt.plot(xs, ys, linewidth=1.5)
+                        if has_gt_centers:
+                            # x-axis: sorted GT frames
+                            xs_gt = sorted(gt_center_mag_map.keys())
+                            ys_gt = [gt_center_mag_map[fi] for fi in xs_gt]
+                            # Prediction magnitudes mapped by frame
+                            pred_center_mag_map = {}
+                            for fi, bb in pred_map.items():
+                                try:
+                                    px, py, pw, ph = bb
+                                    pcx, pcy = float(px) + float(pw) / 2.0, float(py) + float(ph) / 2.0
+                                    pred_center_mag_map[int(fi)] = float((pcx ** 2 + pcy ** 2) ** 0.5)
+                                except Exception:
+                                    continue
+                            import math as _m
+                            ys_pred = [pred_center_mag_map.get(fi, float('nan')) for fi in xs_gt]
+                            plt.plot(xs_gt, ys_gt, label='GT', linewidth=1.8)
+                            plt.plot(xs_gt, ys_pred, label='Pred', linewidth=1.2)
+                            plt.legend()
+                            xs_final = xs_gt
+                        else:
+                            centers_mag.sort(key=lambda t: t[0])
+                            xs_final = [fi for fi, _ in centers_mag]
+                            ys = [mag for _, mag in centers_mag]
+                            plt.plot(xs_final, ys, linewidth=1.5, label='Pred')
+                            plt.legend()
                         plt.title(f"Center displacement vs Time - {model_name}")
                         plt.xlabel("Frame index")
                         plt.ylabel("|center| (pixels)")
                         plt.tight_layout()
                         plt.savefig(os.path.join(out_dir, f"{model_name}_center_displacement.png"))
+                        plt.close()
+                    # EAO curve plot
+                    if eao_curve:
+                        plt.figure()
+                        xs = [L for L, _ in eao_curve]
+                        ys = [v for _, v in eao_curve]
+                        plt.plot(xs, ys, linewidth=1.8)
+                        plt.title(f"EAO Curve - {model_name}")
+                        plt.xlabel("Sequence length L")
+                        plt.ylabel("Expected Average Overlap")
+                        plt.ylim(0.0, 1.0)
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(out_dir, f"{model_name}_eao_curve.png"))
                         plt.close()
                 except Exception:
                     pass

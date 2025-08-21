@@ -3,6 +3,10 @@ import os
 import json
 import time
 from typing import Dict, Any, List, Callable, Optional
+try:
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    tqdm = None  # type: ignore
 
 from ..core.registry import PREPROC_REGISTRY, MODEL_REGISTRY, EVAL_REGISTRY
 from ..utils.annotations import load_coco_vid
@@ -45,16 +49,17 @@ class PipelineRunner:
         os.makedirs(d, exist_ok=True)
         return d
 
-    def _log(self, msg: str):
-        if self._logger:
-            try:
-                self._logger(msg)
-            except Exception:
-                pass
+    def _log(self, msg: str, to_console: bool = True):
+        # keep file logging always; console logging can be suppressed when tqdm bars are active
         if self._log_file:
             try:
                 with open(self._log_file, "a", encoding="utf-8") as f:
                     f.write(msg + "\n")
+            except Exception:
+                pass
+        if to_console and self._logger:
+            try:
+                self._logger(msg)
             except Exception:
                 pass
 
@@ -154,15 +159,35 @@ class PipelineRunner:
                 use_models = models_list or models
                 for model_name, _ in use_models:
                     predictions_all.setdefault(model_name, [])
-                for video_item in dataset:
+                # iterate videos with optional progress bar
+                iterable = dataset
+                total_videos = None
+                try:
+                    total_videos = len(dataset)  # type: ignore
+                except Exception:
+                    total_videos = None
+                if tqdm is not None:
+                    iterable = tqdm(dataset, total=total_videos, desc="Videos", unit="vid")
+                for video_item in iterable:
                     vp = video_item["video_path"]
                     gt_json = os.path.splitext(vp)[0] + ".json"
                     gt = load_coco_vid(gt_json) if os.path.exists(gt_json) else {"frames": {}}
-                    self._log(f"Predicting video: {os.path.basename(vp)}")
+                    # reduce noisy console logs during progress; keep in file only when tqdm is present
+                    self._log(f"Predicting video: {os.path.basename(vp)}", to_console=(tqdm is None))
                     pv_predictions = {}
-                    for model_name, model in use_models:
+                    # per-video per-model bar
+                    model_iter = use_models
+                    if tqdm is not None and len(use_models) > 1:
+                        model_iter = tqdm(use_models, desc=f"Models@{os.path.basename(vp)}", unit="mdl", leave=False)
+                    for model_name, model in model_iter:
                         try:
-                            preds = model.predict(vp)
+                            # If we only evaluate GT frames and the model supports sparse inference,
+                            # request predictions only on those frames (useful for detection-based ML models)
+                            if restrict_to_gt_frames and hasattr(model, 'predict_frames'):
+                                gt_frames_sorted = sorted([int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes])
+                                preds = model.predict_frames(vp, gt_frames_sorted)  # type: ignore[attr-defined]
+                            else:
+                                preds = model.predict(vp)
                         except Exception as e:
                             # Log the failure and continue to next model/video
                             self._log(f"[ERROR] Predict failed | model={model_name} video={os.path.basename(vp)} error={e}")
@@ -173,22 +198,27 @@ class PipelineRunner:
                         # Filter predictions to GT frames only for evaluation (avoid penalizing unannotated frames)
                         if restrict_to_gt_frames:
                             gt_frames_set = {int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes}
-                            eval_pv_predictions = {
-                                mn: [p for p in pl if int(getattr(p, 'frame_index', -1)) in gt_frames_set]
-                                for mn, pl in pv_predictions.items()
-                            }
-                            # Fallback alignment: if a model gets empty after filtering but had predictions,
-                            # try shifting all pred indices by the first GT frame so that trackers starting at 0
-                            # can align to annotations starting at e.g. 1/other.
+                            eval_pv_predictions = {}
                             if gt_frames_set:
                                 min_gt = min(gt_frames_set)
-                                for mn, pl in pv_predictions.items():
-                                    if pl and not eval_pv_predictions.get(mn):
-                                        try:
-                                            shifted = [FramePrediction(int(p.frame_index) + int(min_gt), p.bbox, p.score) for p in pl]
-                                            eval_pv_predictions[mn] = [p for p in shifted if int(p.frame_index) in gt_frames_set]
-                                        except Exception:
-                                            pass
+                            for mn, pl in pv_predictions.items():
+                                # original filter (no shift)
+                                direct = [p for p in pl if int(getattr(p, 'frame_index', -1)) in gt_frames_set]
+                                best = direct
+                                # try alignment by constant offset: delta = min_gt - min_pred
+                                try:
+                                    if gt_frames_set and pl:
+                                        min_pred = int(min(int(getattr(p, 'frame_index', 0)) for p in pl))
+                                        delta = int(min_gt) - int(min_pred)
+                                        if delta != 0:
+                                            shifted = [FramePrediction(int(p.frame_index) + delta, p.bbox, p.score) for p in pl]
+                                            shifted_f = [p for p in shifted if int(getattr(p, 'frame_index', -1)) in gt_frames_set]
+                                            # choose the one with higher coverage on GT frames
+                                            if len(shifted_f) > len(direct):
+                                                best = shifted_f
+                                except Exception:
+                                    pass
+                                eval_pv_predictions[mn] = best
                         else:
                             eval_pv_predictions = pv_predictions
                         # per-video evaluation directory to avoid overwriting
@@ -205,6 +235,8 @@ class PipelineRunner:
                                 # detection aggregation
                                 "tp_50": 0, "fp_50": 0, "fn_50": 0,
                                 "tp_75": 0, "fp_75": 0, "fn_75": 0,
+                                # EAO aggregation (average across videos)
+                                "sum_EAO": 0.0, "videos": 0,
                             })
                             agg["count"] += int(sm.get("count", 0))
                             agg["sum_iou"] += float(sm.get("sum_iou", 0.0))
@@ -217,7 +249,11 @@ class PipelineRunner:
                             agg["tp_75"] += int(sm.get("tp_75", 0))
                             agg["fp_75"] += int(sm.get("fp_75", 0))
                             agg["fn_75"] += int(sm.get("fn_75", 0))
-                        self._log(f"Evaluated metrics written to: {vid_met_dir}")
+                            # EAO per-video scalar average
+                            if "EAO" in sm:
+                                agg["sum_EAO"] += float(sm.get("EAO", 0.0))
+                                agg["videos"] += 1
+                        self._log(f"Evaluated metrics written to: {vid_met_dir}", to_console=(tqdm is None))
 
                         # Optional visualization: draw up to N GT frames per video with GT/pred boxes
                         if viz_enabled:
@@ -259,9 +295,9 @@ class PipelineRunner:
                                     except Exception:
                                         pass
                                 cap.release()
-                                self._log(f"Visualization images saved: {vis_dir}")
+                                self._log(f"Visualization images saved: {vis_dir}", to_console=(tqdm is None))
                             except Exception as _e_viz:
-                                self._log(f"[Warn] Visualization failed: {_e_viz}")
+                                self._log(f"[Warn] Visualization failed: {_e_viz}", to_console=(tqdm is None))
                 # dataset-level summary across all videos
                 if evaluator and dataset_agg:
                     summary_out = {}
@@ -279,16 +315,20 @@ class PipelineRunner:
                         tp75, fp75 = int(a.get("tp_75", 0)), int(a.get("fp_75", 0))
                         map50 = (tp50 / (tp50 + fp50)) if (tp50 + fp50) > 0 else 0.0
                         map75 = (tp75 / (tp75 + fp75)) if (tp75 + fp75) > 0 else 0.0
+                        # Average EAO across videos (if any present)
+                        vcnt = max(1, int(a.get("videos", 0)))
+                        eao_mean = float(a.get("sum_EAO", 0.0)) / vcnt if int(a.get("videos", 0)) > 0 else 0.0
                         summary_out[model_name] = {
                             "frames_count": n,
                             "iou_mean": i_mu, "iou_std": i_sd,
                             "ce_mean": c_mu, "ce_std": c_sd,
                             "mAP_50": map50, "mAP_75": map75,
+                            "EAO": eao_mean,
                         }
                     summary_path = os.path.join(met_dir, "summary.json")
                     with open(summary_path, "w", encoding="utf-8") as f:
                         json.dump(summary_out, f, ensure_ascii=False, indent=2)
-                    self._log(f"Dataset metrics summary saved: {summary_path}")
+                    self._log(f"Dataset metrics summary saved: {summary_path}", to_console=(tqdm is None))
                 pred_dir = os.path.join(out_dir_base, "predictions")
                 os.makedirs(pred_dir, exist_ok=True)
                 for model_name, preds in predictions_all.items():
@@ -297,7 +337,7 @@ class PipelineRunner:
                         json.dump([
                             {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score} for p in preds
                         ], f, ensure_ascii=False, indent=2)
-                    self._log(f"Predictions saved: {outp}")
+                    self._log(f"Predictions saved: {outp}", to_console=(tqdm is None))
 
             # k-fold within training for validation
             if k_fold > 1:
@@ -311,7 +351,10 @@ class PipelineRunner:
                 rng.shuffle(vids)
                 fold_size = max(1, len(vids) // k_fold)
                 fold_summaries = []
-                for fi in range(k_fold):
+                fold_iter = range(k_fold)
+                if tqdm is not None:
+                    fold_iter = tqdm(range(k_fold), total=k_fold, desc="K-Fold", unit="fold")
+                for fi in fold_iter:
                     val_vids = vids[fi * fold_size:(fi + 1) * fold_size]
                     trn_vids = [v for v in vids if v not in val_vids]
                     val_ds = SimpleDataset(val_vids, dm.ann_by_video)
@@ -327,7 +370,7 @@ class PipelineRunner:
                             try:
                                 ret = model.train(trn_ds, val_ds, seed=self.seed, output_dir=os.path.join(fold_dir, "train"))
                                 if isinstance(ret, dict):
-                                    self._log(f"[Train] Result: {ret}")
+                                    self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
                             except Exception as e:
                                 self._log(f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}")
                     run_on_dataset(val_ds, fold_dir, models_list=fold_models)
@@ -340,13 +383,15 @@ class PipelineRunner:
                 agg = {}
                 for sm in fold_summaries:
                     for model_name, m in sm.items():
-                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "mAP_50": [], "mAP_75": []})
+                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "mAP_50": [], "mAP_75": [], "EAO": []})
                         agg[model_name]["iou_mean"].append(m.get("iou_mean", 0.0))
                         agg[model_name]["ce_mean"].append(m.get("ce_mean", 0.0))
                         if "mAP_50" in m:
                             agg[model_name]["mAP_50"].append(m.get("mAP_50", 0.0))
                         if "mAP_75" in m:
                             agg[model_name]["mAP_75"].append(m.get("mAP_75", 0.0))
+                        if "EAO" in m:
+                            agg[model_name]["EAO"].append(m.get("EAO", 0.0))
                 comp_dir = os.path.join(out_dir, "comparison")
                 os.makedirs(comp_dir, exist_ok=True)
                 agg_out = {}
@@ -366,6 +411,8 @@ class PipelineRunner:
                         "mAP_50_std": mean_std(vals.get("mAP_50", []))[1],
                         "mAP_75_mean": mean_std(vals.get("mAP_75", []))[0],
                         "mAP_75_std": mean_std(vals.get("mAP_75", []))[1],
+                        "EAO_mean": mean_std(vals.get("EAO", []))[0],
+                        "EAO_std": mean_std(vals.get("EAO", []))[1],
                     }
                 with open(os.path.join(comp_dir, "kfold_summary.json"), "w", encoding="utf-8") as f:
                     json.dump(agg_out, f, ensure_ascii=False, indent=2)
@@ -388,7 +435,7 @@ class PipelineRunner:
                     plt.savefig(os.path.join(comp_dir, "kfold_ce_bar.png")); plt.close()
                 except Exception:
                     pass
-                self._log("K-Fold validation finished. Aggregates saved.")
+                self._log("K-Fold validation finished. Aggregates saved.", to_console=(tqdm is None))
 
             # final training on full train and evaluate on test
             final_models = build_models()
@@ -400,9 +447,9 @@ class PipelineRunner:
                     try:
                         ret = model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
                         if isinstance(ret, dict):
-                            self._log(f"[Train] Result: {ret}")
+                            self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
                             if ret.get("status") == "no_data":
-                                self._log("[Warn] No training samples found (check that each video has a matching .json annotation next to it).")
+                                        self._log("[Warn] No training samples found (check that each video has a matching .json annotation next to it).", to_console=(tqdm is None))
                     except Exception as e:
                         self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
             test_dir = os.path.join(out_dir, "test")

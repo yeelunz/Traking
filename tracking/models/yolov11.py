@@ -389,3 +389,56 @@ class YOLOv11Model(TrackingModel):
 
         cap.release()
         return preds
+
+    def predict_frames(self, video_path: str, frame_indices: List[int]) -> List[FramePrediction]:
+        if YOLO is None:
+            detail = f" underlying import error: {_ULTRA_IMPORT_ERROR!r}" if _ULTRA_IMPORT_ERROR else ""
+            raise RuntimeError(f"Ultralytics not available.{detail}")
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        preds: List[FramePrediction] = []
+        last_bbox: Optional[tuple] = None
+        for idx in sorted(set(int(i) for i in frame_indices)):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            frame = self._apply_preprocs_np(frame)
+            try:
+                results = self.model.predict(
+                    source=frame,
+                    conf=self.conf,
+                    iou=self.iou,
+                    imgsz=self.imgsz,
+                    device=self._device_str,
+                    classes=self.classes,
+                    verbose=False,
+                    max_det=self.max_det,
+                )
+            except Exception as e:
+                results = []
+            bbox_added = False
+            if results:
+                r0 = results[0]
+                try:
+                    boxes = getattr(r0, "boxes", None)
+                    if boxes is not None and len(boxes) > 0:
+                        confs = boxes.conf.cpu().numpy().astype(float)
+                        best = int(np.argmax(confs))
+                        xyxy = boxes.xyxy.cpu().numpy()[best].tolist()
+                        x1, y1, x2, y2 = map(float, xyxy)
+                        w = max(1.0, x2 - x1)
+                        h = max(1.0, y2 - y1)
+                        score = float(confs[best])
+                        bbox = (float(x1), float(y1), float(w), float(h))
+                        preds.append(FramePrediction(int(idx), bbox, score))
+                        last_bbox = bbox
+                        bbox_added = True
+                except Exception:
+                    pass
+            if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
+                preds.append(FramePrediction(int(idx), last_bbox, None))
+        cap.release()
+        return preds

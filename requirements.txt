@@ -13,3 +13,6 @@ ultralytics>=8.3.0
 
 # If you plan to use the CSRT tracker, replace opencv-python with:
 # opencv-contrib-python
+ 
+# Progress bars
+tqdm

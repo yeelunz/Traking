@@ -512,44 +512,106 @@ class FasterRCNNModel(TrackingModel):
                 scores = outputs.get("scores")
                 boxes = outputs.get("boxes")
                 if scores is not None and boxes is not None and len(scores) > 0:
-                    # 先套用 score 門檻，再於候選中取最高分框（單目標）
+                    # 門檻策略：若有分數>=threshold 的候選，從中取最高分；
+                    # 否則改取所有候選中的最高分（不因未過門檻而直接 fallback），避免輸出「黏住」。
                     try:
                         thresh = float(getattr(self, "score_thresh", 0.0))
                     except Exception:
                         thresh = 0.0
+                    best_idx = None
+                    # 嘗試在門檻以上的候選中取最佳
                     try:
-                        mask = scores >= thresh
+                        above = (scores >= thresh).nonzero(as_tuple=False)
+                        if above is not None and above.numel() > 0:
+                            cand_idx = above.view(-1)
+                            cand_scores = scores[cand_idx]
+                            rel = int(torch.argmax(cand_scores).item())
+                            best_idx = int(cand_idx[rel].item())
                     except Exception:
-                        # 保底：不支援逐元素比較時直接不篩選
-                        mask = None
-                    if mask is not None:
+                        best_idx = None
+                    # 若沒有任何候選達門檻，退回所有候選取最佳
+                    if best_idx is None:
                         try:
-                            n_keep = int(mask.sum().item())
+                            best_idx = int(torch.argmax(scores).item())
                         except Exception:
-                            n_keep = 0
-                        if n_keep > 0:
-                            fs = scores[mask]
-                            fb = boxes[mask]
-                            best = int(torch.argmax(fs).item())
-                            x1, y1, x2, y2 = fb[best].tolist()
-                            bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
-                            last_bbox = bbox
-                            preds.append(FramePrediction(idx, bbox, float(fs[best].item())))
-                        else:
-                            # 無符合門檻候選
-                            if self.fallback_last_prediction and last_bbox is not None:
-                                preds.append(FramePrediction(idx, last_bbox, None))
-                    else:
-                        # 未能成功產生 mask，退回直接取最高分
-                        best = int(torch.argmax(scores).item())
-                        x1, y1, x2, y2 = boxes[best].tolist()
+                            best_idx = None
+                    if best_idx is not None:
+                        x1, y1, x2, y2 = boxes[best_idx].tolist()
                         bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
                         last_bbox = bbox
-                        preds.append(FramePrediction(idx, bbox, float(scores[best].item())))
+                        sc = float(scores[best_idx].item()) if hasattr(scores, "device") else float(scores[best_idx])
+                        preds.append(FramePrediction(idx, bbox, sc))
+                    else:
+                        # 非預期：scores 存在但無法取出 index，改用 fallback（若可用）
+                        if self.fallback_last_prediction and last_bbox is not None:
+                            preds.append(FramePrediction(idx, last_bbox, None))
                 else:
                     # 若當前幀無偵測，且允許 fallback，使用上一幀的預測填補
                     if self.fallback_last_prediction and last_bbox is not None:
                         preds.append(FramePrediction(idx, last_bbox, None))
                 idx += 1
+        cap.release()
+        return preds
+
+    # Optional sparse inference for evaluation on specific frames
+    def predict_frames(self, video_path: str, frame_indices: List[int]) -> List[FramePrediction]:
+        if torch is None or torchvision is None:
+            detail = f" underlying import error: {_TORCH_TV_IMPORT_ERROR!r}" if _TORCH_TV_IMPORT_ERROR else ""
+            raise RuntimeError(f"PyTorch/torchvision not available. Install torch & torchvision to use FasterRCNN.{detail}")
+        import cv2
+        if hasattr(self, "model"):
+            try:
+                self.model.eval()
+            except Exception:
+                pass
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        preds: List[FramePrediction] = []
+        last_bbox = None  # type: Optional[tuple]
+        with torch.no_grad():
+            for idx in sorted(set(int(i) for i in frame_indices)):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                frame = self._apply_preprocs_np(frame)
+                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                tensor = self._to_tensor(img).to(self._device)
+                outputs = self.model([tensor])[0]
+                scores = outputs.get("scores")
+                boxes = outputs.get("boxes")
+                if scores is not None and boxes is not None and len(scores) > 0:
+                    try:
+                        thresh = float(getattr(self, "score_thresh", 0.0))
+                    except Exception:
+                        thresh = 0.0
+                    best_idx = None
+                    try:
+                        above = (scores >= thresh).nonzero(as_tuple=False)
+                        if above is not None and above.numel() > 0:
+                            cand_idx = above.view(-1)
+                            cand_scores = scores[cand_idx]
+                            rel = int(torch.argmax(cand_scores).item())
+                            best_idx = int(cand_idx[rel].item())
+                    except Exception:
+                        best_idx = None
+                    if best_idx is None:
+                        try:
+                            best_idx = int(torch.argmax(scores).item())
+                        except Exception:
+                            best_idx = None
+                    if best_idx is not None:
+                        x1, y1, x2, y2 = boxes[best_idx].tolist()
+                        bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
+                        last_bbox = bbox
+                        sc = float(scores[best_idx].item()) if hasattr(scores, "device") else float(scores[best_idx])
+                        preds.append(FramePrediction(int(idx), bbox, sc))
+                    else:
+                        if self.fallback_last_prediction and last_bbox is not None:
+                            preds.append(FramePrediction(int(idx), last_bbox, None))
+                else:
+                    if self.fallback_last_prediction and last_bbox is not None:
+                        preds.append(FramePrediction(int(idx), last_bbox, None))
         cap.release()
         return preds
