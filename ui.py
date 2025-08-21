@@ -3,7 +3,8 @@ import json
 import os
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRegularExpression
+from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QTextEdit, QLineEdit, QMessageBox,
@@ -20,6 +21,8 @@ from tracking.models import template_matching  # noqa: F401
 from tracking.models import csrt  # noqa: F401
 from tracking.models import optical_flow_lk  # noqa: F401
 from tracking.models import faster_rcnn  # noqa: F401
+from tracking.models import yolov11  # noqa: F401
+from tracking.models import fast_speckle  # noqa: F401
 from tracking.eval import evaluator  # noqa: F401
 
 
@@ -313,7 +316,7 @@ class SimpleRunnerUI(QMainWindow):
             "evaluation": {
                 "evaluator": evaluator,
             },
-            "output": {"results_root": os.path.join(os.getcwd(), "results")}
+            # output omitted on purpose; UI will enforce results folder under project
         }
         try:
             import yaml  # type: ignore
@@ -445,6 +448,14 @@ class SimpleRunnerUI(QMainWindow):
             ev_viz["enabled"] = bool(self.chk_viz.isChecked())
             ev_viz["samples"] = int(self.spn_viz_samples.value())
             # Keep default behavior for restrict_to_gt_frames unless provided in file
+        except Exception:
+            pass
+        # Force results to be saved under the project folder (where ui.py lives)
+        try:
+            proj_root = os.path.dirname(os.path.abspath(__file__))
+            out = cfg.setdefault("output", {})
+            out["results_root"] = os.path.join(proj_root, "results")
+            self.log(f"結果將儲存至: {out['results_root']}")
         except Exception:
             pass
         self.log("開始執行…")
@@ -592,11 +603,35 @@ class SimpleRunnerUI(QMainWindow):
                 lambda v: sp.setValue(int(v)),
             )
         elif isinstance(value, float):
-            sp = QDoubleSpinBox(); sp.setDecimals(6); sp.setRange(-1e9, 1e9)
+            # Use line edit to preserve scientific notation (e.g., 1e-8) and avoid rounding to 0.000000
+            le = QLineEdit()
+            # Accept floats with optional scientific notation
+            try:
+                rx = QRegularExpression(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+                le.setValidator(QRegularExpressionValidator(rx))
+            except Exception:
+                # Fallback: no validator
+                pass
+            orig = float(value)
+            def _get():
+                txt = le.text().strip()
+                if not txt:
+                    return orig
+                try:
+                    return float(txt)
+                except Exception:
+                    return orig
+            def _set(v):
+                try:
+                    fv = float(v)
+                    # .12g keeps significant digits and uses scientific notation for small numbers
+                    le.setText(format(fv, ".12g"))
+                except Exception:
+                    le.setText(str(v))
             return (
-                sp,
-                lambda: float(sp.value()),
-                lambda v: sp.setValue(float(v)),
+                le,
+                _get,
+                _set,
             )
         elif isinstance(value, str):
             le = QLineEdit()

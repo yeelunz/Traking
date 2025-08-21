@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Callable, Optional
 
 from ..core.registry import PREPROC_REGISTRY, MODEL_REGISTRY, EVAL_REGISTRY
 from ..utils.annotations import load_coco_vid
+from ..core.interfaces import FramePrediction
 from ..data.dataset_manager import COCOJsonDatasetManager, SimpleDataset
 # import built-in plugins to populate registries
 from ..preproc import clahe  # noqa: F401
@@ -13,6 +14,8 @@ from ..models import template_matching  # noqa: F401
 from ..models import csrt  # noqa: F401
 from ..models import optical_flow_lk  # noqa: F401
 from ..models import faster_rcnn  # noqa: F401
+from ..models import yolov11  # noqa: F401
+from ..models import fast_speckle  # noqa: F401
 from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
@@ -25,7 +28,13 @@ class PipelineRunner:
         self.seed = int(config.get("seed", 0))
         dataset_cfg = config.get("dataset", {})
         self.dataset_root = dataset_cfg.get("root", ".")
-        self.results_root = config.get("output", {}).get("results_root", os.path.join(os.getcwd(), "results"))
+        out_cfg = config.get("output", {}) or {}
+        # If output missing or lacks results_root, default to project folder /results
+        try:
+            proj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        except Exception:
+            proj_root = os.getcwd()
+        self.results_root = out_cfg.get("results_root") or os.path.join(proj_root, "results")
         os.makedirs(self.results_root, exist_ok=True)
         self._logger = logger
         self._log_file: Optional[str] = None
@@ -50,7 +59,8 @@ class PipelineRunner:
                 pass
 
     def run(self):
-        set_seed(self.seed)
+        # Only need reproducible dataset splits, not full deterministic ops (which can break CuBLAS).
+        set_seed(self.seed, deterministic=False)
         dm = COCOJsonDatasetManager(self.dataset_root)
         ds_cfg = self.cfg.get("dataset", {})
         split_cfg = (ds_cfg or {}).get("split", {})
@@ -58,6 +68,7 @@ class PipelineRunner:
         ratios = split_cfg.get("ratios", [0.8, 0.2])
         k_fold = int(split_cfg.get("k_fold", 1) or 1)
         self._log(f"Dataset root: {self.dataset_root}")
+        self._log(f"Results root: {self.results_root}")
         # accept [train,test] or [train,val,test]; always map to (train, 0.0, test)
         if isinstance(ratios, list) and len(ratios) == 2:
             train_r, test_r = float(ratios[0]), float(ratios[1])
@@ -82,6 +93,7 @@ class PipelineRunner:
             os.makedirs(logs_dir, exist_ok=True)
             self._log_file = os.path.join(logs_dir, "run.log")
             self._log(f"Started experiment: {exp_name}")
+            self._log(f"Experiment folder: {out_dir}")
 
             # build preproc chain
             preprocs = []
@@ -97,10 +109,26 @@ class PipelineRunner:
                 ms = []
                 for step in model_steps:
                     cls = MODEL_REGISTRY[step["name"]]
-                    m = cls(step.get("params", {}))
-                    if hasattr(m, "preprocs"):
-                        setattr(m, "preprocs", preprocs)
-                    ms.append((step["name"], m))
+                    try:
+                        m = cls(step.get("params", {}))
+                        if hasattr(m, "preprocs"):
+                            setattr(m, "preprocs", preprocs)
+                        ms.append((step["name"], m))
+                    except Exception as _e_inst:
+                        self._log(f"[ERROR] Model init failed | model={step['name']} error={_e_inst}\n{_tb.format_exc()}")
+                        # fallback placeholder to keep pipeline running and produce result files
+                        class _UnavailableModel:
+                            def __init__(self, reason: str):
+                                self.name = step["name"]
+                                self.reason = reason
+                                self.preprocs = []
+                            def train(self, *a, **k):
+                                return {"status": "unavailable", "reason": self.reason}
+                            def predict(self, *a, **k):
+                                return []
+                            def load_checkpoint(self, *a, **k):
+                                pass
+                        ms.append((step["name"], _UnavailableModel(str(_e_inst))))
                 return ms
             models = build_models()
             self._log(f"Models: {[name for name,_ in models]}")
@@ -111,6 +139,7 @@ class PipelineRunner:
             evaluator = eval_cls() if eval_cls else None
 
             def run_on_dataset(dataset, out_dir_base: str, models_list=None):
+                # initialize containers and ensure per-model predictions files are always created
                 predictions_all = {}
                 # aggregate across entire dataset (all videos) per model
                 dataset_agg = {}
@@ -121,13 +150,16 @@ class PipelineRunner:
                 viz_cfg = eval_cfg.get("visualize", {}) or {}
                 viz_enabled = bool(viz_cfg.get("enabled", False))
                 viz_samples = int(viz_cfg.get("samples", 10) or 10)
+                # Determine models used and initialize prediction collectors
+                use_models = models_list or models
+                for model_name, _ in use_models:
+                    predictions_all.setdefault(model_name, [])
                 for video_item in dataset:
                     vp = video_item["video_path"]
                     gt_json = os.path.splitext(vp)[0] + ".json"
                     gt = load_coco_vid(gt_json) if os.path.exists(gt_json) else {"frames": {}}
                     self._log(f"Predicting video: {os.path.basename(vp)}")
                     pv_predictions = {}
-                    use_models = models_list or models
                     for model_name, model in use_models:
                         try:
                             preds = model.predict(vp)
@@ -145,6 +177,18 @@ class PipelineRunner:
                                 mn: [p for p in pl if int(getattr(p, 'frame_index', -1)) in gt_frames_set]
                                 for mn, pl in pv_predictions.items()
                             }
+                            # Fallback alignment: if a model gets empty after filtering but had predictions,
+                            # try shifting all pred indices by the first GT frame so that trackers starting at 0
+                            # can align to annotations starting at e.g. 1/other.
+                            if gt_frames_set:
+                                min_gt = min(gt_frames_set)
+                                for mn, pl in pv_predictions.items():
+                                    if pl and not eval_pv_predictions.get(mn):
+                                        try:
+                                            shifted = [FramePrediction(int(p.frame_index) + int(min_gt), p.bbox, p.score) for p in pl]
+                                            eval_pv_predictions[mn] = [p for p in shifted if int(p.frame_index) in gt_frames_set]
+                                        except Exception:
+                                            pass
                         else:
                             eval_pv_predictions = pv_predictions
                         # per-video evaluation directory to avoid overwriting
@@ -241,15 +285,19 @@ class PipelineRunner:
                             "ce_mean": c_mu, "ce_std": c_sd,
                             "mAP_50": map50, "mAP_75": map75,
                         }
-                    with open(os.path.join(met_dir, "summary.json"), "w", encoding="utf-8") as f:
+                    summary_path = os.path.join(met_dir, "summary.json")
+                    with open(summary_path, "w", encoding="utf-8") as f:
                         json.dump(summary_out, f, ensure_ascii=False, indent=2)
+                    self._log(f"Dataset metrics summary saved: {summary_path}")
                 pred_dir = os.path.join(out_dir_base, "predictions")
                 os.makedirs(pred_dir, exist_ok=True)
                 for model_name, preds in predictions_all.items():
-                    with open(os.path.join(pred_dir, f"{model_name}.json"), "w", encoding="utf-8") as f:
+                    outp = os.path.join(pred_dir, f"{model_name}.json")
+                    with open(outp, "w", encoding="utf-8") as f:
                         json.dump([
                             {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score} for p in preds
                         ], f, ensure_ascii=False, indent=2)
+                    self._log(f"Predictions saved: {outp}")
 
             # k-fold within training for validation
             if k_fold > 1:

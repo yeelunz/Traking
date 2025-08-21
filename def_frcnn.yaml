@@ -1,7 +1,7 @@
 seed: 42
 
 dataset:
-  root: "C:/Users/asas1/Desktop/test"   # 改成你的資料根目錄（影片 + 同名 .json）
+  root: "C:/Users/asas1/OneDrive/Desktop/workflow_test"   # 改成你的資料根目錄（影片 + 同名 .json）
   split:
     method: "video_level"
     ratios: [0.8, 0.2]                  # train/test
@@ -51,5 +51,3 @@ evaluation:
     enabled: true
     samples: 10
 
-output:
-  results_root: "C:/Users/asas1/Desktop/Tracking/results"

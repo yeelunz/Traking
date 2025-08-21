@@ -1,0 +1,38 @@
+seed: 42
+
+dataset:
+  # 將此處改為你的資料集根目錄（影片與同名 .json）
+  root: "C:/Users/asas1/OneDrive/Desktop/workflow_test"
+  split:
+    method: "video_level"
+    ratios: [0.8, 0.2]
+    k_fold: 1
+
+experiments:
+  - name: "exp_FASTSpeckle_default"
+    pipeline:
+      # 若需要可啟用 CLAHE 或其它 preproc，預設留空
+      # - type: "preproc"
+      #   name: "CLAHE"
+      #   params: {clipLimit: 2.0, tileGridSize: [8,8]}
+      - type: "model"
+        name: "FASTSpeckle"
+        params:
+          # FAST detector
+          fast_threshold: 20
+          fast_nonmax: true
+          max_features: 200
+          # LK optical flow
+          lk_win_size: 21
+          lk_max_level: 3
+          # reinit / maintenance
+          min_features: 30
+          reinit_interval: 10
+
+evaluation:
+  evaluator: "BasicEvaluator"
+  visualize:
+    enabled: true
+    samples: 10
+
+# Note: output/results_root intentionally omitted — UI enforces project-local results folder.

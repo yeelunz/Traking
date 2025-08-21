@@ -21,9 +21,15 @@ class CSRTTracker(TrackingModel):
     def __init__(self, config: Dict[str, Any]):
         if cv2 is None:
             raise RuntimeError("OpenCV is required for CSRT tracker.")
-        # CSRT requires opencv-contrib-python
-        if not hasattr(cv2, "legacy") or not hasattr(cv2.legacy, "TrackerCSRT_create"):
-            raise RuntimeError("CSRT requires opencv-contrib-python (cv2.legacy.TrackerCSRT_create not found).")
+        # CSRT requires contrib tracker; check presence of any known factory variant
+        has_any = (
+            (hasattr(cv2, "legacy") and (hasattr(cv2.legacy, "TrackerCSRT_create") or hasattr(cv2.legacy, "TrackerCSRT")))
+            or hasattr(cv2, "TrackerCSRT_create")
+            or hasattr(cv2, "TrackerCSRT")
+        )
+        if not has_any:
+            ver = getattr(cv2, "__version__", "?")
+            raise RuntimeError(f"CSRT requires opencv-contrib-python (CSRT factory not found). cv2={ver}")
         self.init_w, self.init_h = tuple(config.get("init_box", [64, 64]))
         self.preprocs: List[PreprocessingModule] = []
 
@@ -66,7 +72,29 @@ class CSRTTracker(TrackingModel):
             raise RuntimeError(f"Cannot open video: {video_path}")
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         preds: List[FramePrediction] = []
-        tracker = cv2.legacy.TrackerCSRT_create()
+        # Create CSRT tracker with robust fallbacks across OpenCV variants
+        tracker = None
+        try_order = []
+        if hasattr(cv2, "legacy"):
+            if hasattr(cv2.legacy, "TrackerCSRT_create"):
+                try_order.append(lambda: cv2.legacy.TrackerCSRT_create())
+            if hasattr(cv2.legacy, "TrackerCSRT"):
+                try_order.append(lambda: cv2.legacy.TrackerCSRT.create())
+        if hasattr(cv2, "TrackerCSRT_create"):
+            try_order.append(lambda: cv2.TrackerCSRT_create())
+        if hasattr(cv2, "TrackerCSRT"):
+            try_order.append(lambda: cv2.TrackerCSRT.create())
+        last_err = None
+        for fn in try_order:
+            try:
+                tracker = fn()
+                if tracker is not None:
+                    break
+            except Exception as e:
+                last_err = e
+        if tracker is None:
+            ver = getattr(cv2, "__version__", "?")
+            raise RuntimeError(f"CSRT tracker API not found (cv2={ver}). Last error: {last_err}")
         initbb = None
         for i in range(total):
             ok, frame = cap.read()

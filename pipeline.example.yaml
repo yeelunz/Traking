@@ -1,6 +1,6 @@
 seed: 42
 dataset:
-  root: "c:/Users/asas1/Desktop/labelTool"  # change to dataset root containing videos + .json from label tool
+  root: "C:/Users/asas1/OneDrive/Desktop/workflow_test"  # change to dataset root containing videos + .json from label tool
   # dataset split options (video-level)
   split:
     method: "video_level"
@@ -17,5 +17,3 @@ experiments:
         params: {template_size: [64,64], search_margin: 32}
 evaluation:
   evaluator: "BasicEvaluator"
-output:
-  results_root: "c:/Users/asas1/Desktop/Tracking/results"

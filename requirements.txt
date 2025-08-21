@@ -1,13 +1,15 @@
-numpy<2
 opencv-python
 pyyaml
 PySide6
 matplotlib
 pillow
-
+opencv-contrib-python
 # For Faster R-CNN model
 torch
 torchvision
+
+# YOLOv11 (Ultralytics)
+ultralytics>=8.3.0
 
 # If you plan to use the CSRT tracker, replace opencv-python with:
 # opencv-contrib-python

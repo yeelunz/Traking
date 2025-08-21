@@ -512,12 +512,40 @@ class FasterRCNNModel(TrackingModel):
                 scores = outputs.get("scores")
                 boxes = outputs.get("boxes")
                 if scores is not None and boxes is not None and len(scores) > 0:
-                    # 取最高分框（不套分數門檻）
-                    best = int(torch.argmax(scores).item())
-                    x1, y1, x2, y2 = boxes[best].tolist()
-                    bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
-                    last_bbox = bbox
-                    preds.append(FramePrediction(idx, bbox, float(scores[best].item())))
+                    # 先套用 score 門檻，再於候選中取最高分框（單目標）
+                    try:
+                        thresh = float(getattr(self, "score_thresh", 0.0))
+                    except Exception:
+                        thresh = 0.0
+                    try:
+                        mask = scores >= thresh
+                    except Exception:
+                        # 保底：不支援逐元素比較時直接不篩選
+                        mask = None
+                    if mask is not None:
+                        try:
+                            n_keep = int(mask.sum().item())
+                        except Exception:
+                            n_keep = 0
+                        if n_keep > 0:
+                            fs = scores[mask]
+                            fb = boxes[mask]
+                            best = int(torch.argmax(fs).item())
+                            x1, y1, x2, y2 = fb[best].tolist()
+                            bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
+                            last_bbox = bbox
+                            preds.append(FramePrediction(idx, bbox, float(fs[best].item())))
+                        else:
+                            # 無符合門檻候選
+                            if self.fallback_last_prediction and last_bbox is not None:
+                                preds.append(FramePrediction(idx, last_bbox, None))
+                    else:
+                        # 未能成功產生 mask，退回直接取最高分
+                        best = int(torch.argmax(scores).item())
+                        x1, y1, x2, y2 = boxes[best].tolist()
+                        bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
+                        last_bbox = bbox
+                        preds.append(FramePrediction(idx, bbox, float(scores[best].item())))
                 else:
                     # 若當前幀無偵測，且允許 fallback，使用上一幀的預測填補
                     if self.fallback_last_prediction and last_bbox is not None:
