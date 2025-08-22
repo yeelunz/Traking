@@ -411,6 +411,12 @@ class FasterRCNNModel(TrackingModel):
                 pass
 
         for epoch in range(max(1, self.epochs)):
+            try:
+                cb = getattr(self, 'progress_callback', None)
+                if callable(cb):
+                    cb('train_epoch_start', epoch+1, int(self.epochs))
+            except Exception:
+                pass
             epoch_loss = 0.0
             n_batches = 0
             for bi, (images, targets) in enumerate(dl_train):
@@ -508,6 +514,12 @@ class FasterRCNNModel(TrackingModel):
             # 簡易列印
             try:
                 print(f"[FasterRCNN][Epoch {epoch+1}/{self.epochs}] train_loss={epoch_loss:.4f} val_loss={val_epoch_loss if val_epoch_loss is not None else 'NA'}")
+            except Exception:
+                pass
+            try:
+                cb = getattr(self, 'progress_callback', None)
+                if callable(cb):
+                    cb('train_epoch_end', epoch+1, int(self.epochs))
             except Exception:
                 pass
 

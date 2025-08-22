@@ -34,6 +34,13 @@ class CSRTTracker(TrackingModel):
         self.preprocs: List[PreprocessingModule] = []
 
     def train(self, train_dataset, val_dataset=None, seed: int = 0, output_dir: str | None = None):
+        cb = getattr(self, 'progress_callback', None)
+        try:
+            if callable(cb):
+                cb('train_epoch_start', 1, 1)
+                cb('train_epoch_end', 1, 1)
+        except Exception:
+            pass
         return {"status": "no_training"}
 
     def load_checkpoint(self, ckpt_path: str):

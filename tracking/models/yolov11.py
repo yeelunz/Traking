@@ -282,6 +282,29 @@ class YOLOv11Model(TrackingModel):
         patience = int(getattr(self, "patience", self.DEFAULT_CONFIG["patience"]))
         workers = int(getattr(self, "workers", self.DEFAULT_CONFIG["workers"]))
 
+        # Hook progress callbacks (per-epoch) if UI injected one
+        cb = getattr(self, 'progress_callback', None)
+        def _emit(stage: str, trainer):
+            try:
+                if callable(cb):
+                    cur = int(getattr(trainer, 'epoch', 0)) + 1
+                    tot = int(getattr(trainer, 'epochs', epochs))
+                    cb(stage, cur, tot)
+            except Exception:
+                pass
+        try:
+            if callable(cb) and hasattr(self.model, 'add_callback'):
+                # start/end events (names per ultralytics callback system)
+                self.model.add_callback('on_train_epoch_start', lambda trainer: _emit('train_epoch_start', trainer))
+                # Some versions use on_train_epoch_end, others may allow on_fit_epoch_end; register both safely
+                self.model.add_callback('on_train_epoch_end', lambda trainer: _emit('train_epoch_end', trainer))
+                try:
+                    self.model.add_callback('on_fit_epoch_end', lambda trainer: _emit('train_epoch_end', trainer))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Run training
         results = None
         try:

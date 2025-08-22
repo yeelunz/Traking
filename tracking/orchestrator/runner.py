@@ -27,7 +27,7 @@ import traceback as _tb
 
 
 class PipelineRunner:
-    def __init__(self, config: Dict[str, Any], logger: Optional[Callable[[str], None]] = None):
+    def __init__(self, config: Dict[str, Any], logger: Optional[Callable[[str], None]] = None, progress_cb: Optional[Callable[[str,int,int,Dict[str,Any]], None]] = None):
         self.cfg = config
         self.seed = int(config.get("seed", 0))
         dataset_cfg = config.get("dataset", {})
@@ -42,6 +42,15 @@ class PipelineRunner:
         os.makedirs(self.results_root, exist_ok=True)
         self._logger = logger
         self._log_file: Optional[str] = None
+        self._progress_cb = progress_cb
+
+    # lightweight wrapper to emit progress events
+    def _progress(self, stage: str, current: int, total: int, extra: Optional[Dict[str,Any]] = None):
+        if self._progress_cb:
+            try:
+                self._progress_cb(stage, int(current), int(total), extra or {})
+            except Exception:
+                pass
 
     def _timestamp_dir(self, name: str) -> str:
         ts = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -154,6 +163,12 @@ class PipelineRunner:
                         ms.append((step["name"], _UnavailableModel(str(_e_inst))))
                 return ms
             models = build_models()
+            # attach model-level progress callbacks (per-epoch)
+            for name, m in models:
+                try:
+                    setattr(m, 'progress_callback', lambda stage, cur, tot, model=name: self._progress(stage, cur, tot, {'model': model}))
+                except Exception:
+                    pass
             self._log(f"Models: {[name for name,_ in models]}")
 
             # evaluator
@@ -161,7 +176,7 @@ class PipelineRunner:
             eval_cls = EVAL_REGISTRY.get(eval_name)
             evaluator = eval_cls() if eval_cls else None
 
-            def run_on_dataset(dataset, out_dir_base: str, models_list=None):
+            def run_on_dataset(dataset, out_dir_base: str, models_list=None, phase: str = 'eval'):
                 # initialize containers and ensure per-model predictions files are always created
                 predictions_all = {}
                 # aggregate across entire dataset (all videos) per model
@@ -186,7 +201,11 @@ class PipelineRunner:
                     total_videos = None
                 if tqdm is not None:
                     iterable = tqdm(dataset, total=total_videos, desc="Videos", unit="vid")
+                idx_video = 0
                 for video_item in iterable:
+                    idx_video += 1
+                    if total_videos:
+                        self._progress('eval_video', idx_video, total_videos, {'phase': phase, 'exp': exp_name})
                     vp = video_item["video_path"]
                     gt_json = os.path.splitext(vp)[0] + ".json"
                     gt = load_coco_vid(gt_json) if os.path.exists(gt_json) else {"frames": {}}
@@ -373,6 +392,7 @@ class PipelineRunner:
                 if tqdm is not None:
                     fold_iter = tqdm(range(k_fold), total=k_fold, desc="K-Fold", unit="fold")
                 for fi in fold_iter:
+                    self._progress('kfold_fold', fi+1, k_fold, {'exp': exp_name})
                     val_vids = vids[fi * fold_size:(fi + 1) * fold_size]
                     trn_vids = [v for v in vids if v not in val_vids]
                     val_ds = SimpleDataset(val_vids, dm.ann_by_video)

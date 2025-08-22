@@ -71,6 +71,18 @@ class FASTSpeckle(TrackingModel):
                 self.det = None
 
     def train(self, train_dataset, val_dataset=None, seed: int = 0, output_dir: str | None = None):
+        # Emit a dummy one-epoch progress so UI can show completion instantly
+        cb = getattr(self, 'progress_callback', None)
+        try:
+            if callable(cb):
+                cb('train_epoch_start', 1, 1)
+        except Exception:
+            pass
+        try:
+            if callable(cb):
+                cb('train_epoch_end', 1, 1)
+        except Exception:
+            pass
         return {"status": "no_training"}
 
     def load_checkpoint(self, ckpt_path: str):
