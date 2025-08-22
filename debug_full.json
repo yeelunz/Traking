@@ -1,0 +1,3878 @@
+[
+  {
+    "batch_index": 0,
+    "loss_total": 0.6763888001441956,
+    "loss_classifier": 0.5884731411933899,
+    "loss_box_reg": 0.07108201831579208,
+    "loss_objectness": 0.013114310801029205,
+    "loss_rpn_box_reg": 0.0037193563766777515,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.97502136230469,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 56.605003356933594,
+    "box_h_max": 58.02000427246094,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      75,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 1,
+    "loss_total": 0.7170276045799255,
+    "loss_classifier": 0.6150259971618652,
+    "loss_box_reg": 0.07539893686771393,
+    "loss_objectness": 0.02465846762061119,
+    "loss_rpn_box_reg": 0.0019442372722551227,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 32.54998779296875,
+    "box_w_max": 35.379974365234375,
+    "box_h_mean": 69.33499145507812,
+    "box_h_max": 70.03999328613281,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      0,
+      17
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 2,
+    "loss_total": 0.7243146896362305,
+    "loss_classifier": 0.627983570098877,
+    "loss_box_reg": 0.06719411164522171,
+    "loss_objectness": 0.027866004034876823,
+    "loss_rpn_box_reg": 0.001271011191420257,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 30.774993896484375,
+    "box_w_max": 31.1300048828125,
+    "box_h_mean": 58.37000274658203,
+    "box_h_max": 68.6300048828125,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      22,
+      147
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 3,
+    "loss_total": 0.7340565919876099,
+    "loss_classifier": 0.639554500579834,
+    "loss_box_reg": 0.08858634531497955,
+    "loss_objectness": 0.0046617817133665085,
+    "loss_rpn_box_reg": 0.001253969152458012,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.209991455078125,
+    "box_w_max": 38.209991455078125,
+    "box_h_mean": 54.475006103515625,
+    "box_h_max": 58.72001647949219,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-31-47.mkv"
+    ],
+    "frame_indices": [
+      146,
+      67
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 4,
+    "loss_total": 0.7214669585227966,
+    "loss_classifier": 0.6146821975708008,
+    "loss_box_reg": 0.07859721034765244,
+    "loss_objectness": 0.02296142280101776,
+    "loss_rpn_box_reg": 0.00522614736109972,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.67999267578125,
+    "box_w_max": 42.449981689453125,
+    "box_h_mean": 55.53999328613281,
+    "box_h_max": 58.019989013671875,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      71,
+      92
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 5,
+    "loss_total": 0.7325930595397949,
+    "loss_classifier": 0.6212575435638428,
+    "loss_box_reg": 0.07381604611873627,
+    "loss_objectness": 0.033680062741041183,
+    "loss_rpn_box_reg": 0.003839378710836172,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.790008544921875,
+    "box_w_max": 41.740020751953125,
+    "box_h_mean": 57.31000518798828,
+    "box_h_max": 58.019989013671875,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      61,
+      73
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 6,
+    "loss_total": 0.6881616115570068,
+    "loss_classifier": 0.6247876882553101,
+    "loss_box_reg": 0.04029267653822899,
+    "loss_objectness": 0.017828330397605896,
+    "loss_rpn_box_reg": 0.005252881906926632,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.67999267578125,
+    "box_w_max": 44.569976806640625,
+    "box_h_mean": 62.61499786376953,
+    "box_h_max": 63.67999267578125,
+    "videos": [
+      "2025-08-18 17-28-11.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      223,
+      62
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 7,
+    "loss_total": 0.8035954833030701,
+    "loss_classifier": 0.6374050974845886,
+    "loss_box_reg": 0.14383447170257568,
+    "loss_objectness": 0.020607471466064453,
+    "loss_rpn_box_reg": 0.0017484172713011503,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.5,
+    "box_w_max": 39.6199951171875,
+    "box_h_mean": 52.00499725341797,
+    "box_h_max": 54.47999572753906,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      40,
+      164
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 8,
+    "loss_total": 0.7401121258735657,
+    "loss_classifier": 0.6003220081329346,
+    "loss_box_reg": 0.08445688337087631,
+    "loss_objectness": 0.05208345130085945,
+    "loss_rpn_box_reg": 0.003249815199524164,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 31.835006713867188,
+    "box_w_max": 33.25,
+    "box_h_mean": 62.26000213623047,
+    "box_h_max": 67.91999816894531,
+    "videos": [
+      "2025-08-18 17-31-59.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      133,
+      47
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 9,
+    "loss_total": 0.7376269102096558,
+    "loss_classifier": 0.6047663688659668,
+    "loss_box_reg": 0.10104943811893463,
+    "loss_objectness": 0.029093271121382713,
+    "loss_rpn_box_reg": 0.002717832801863551,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.6199951171875,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 65.09000396728516,
+    "box_h_max": 65.09001159667969,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      168,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 10,
+    "loss_total": 0.7062221765518188,
+    "loss_classifier": 0.6036795377731323,
+    "loss_box_reg": 0.062331248074769974,
+    "loss_objectness": 0.032745104283094406,
+    "loss_rpn_box_reg": 0.007466267328709364,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 42.80499267578125,
+    "box_w_max": 47.399993896484375,
+    "box_h_mean": 68.98500061035156,
+    "box_h_max": 74.29000854492188,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-27-15.mkv"
+    ],
+    "frame_indices": [
+      51,
+      129
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 11,
+    "loss_total": 0.7296741604804993,
+    "loss_classifier": 0.5994112491607666,
+    "loss_box_reg": 0.09682125598192215,
+    "loss_objectness": 0.030491339042782784,
+    "loss_rpn_box_reg": 0.0029503381811082363,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.375,
+    "box_w_max": 36.079986572265625,
+    "box_h_mean": 53.415000915527344,
+    "box_h_max": 53.77000427246094,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-27-15.mkv"
+    ],
+    "frame_indices": [
+      168,
+      61
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 12,
+    "loss_total": 0.6753364205360413,
+    "loss_classifier": 0.5837030410766602,
+    "loss_box_reg": 0.08336159586906433,
+    "loss_objectness": 0.004116990603506565,
+    "loss_rpn_box_reg": 0.004154760390520096,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.74501037597656,
+    "box_w_max": 43.8699951171875,
+    "box_h_mean": 61.54999542236328,
+    "box_h_max": 64.37998962402344,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      86,
+      130
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 13,
+    "loss_total": 0.7504330277442932,
+    "loss_classifier": 0.6057946085929871,
+    "loss_box_reg": 0.09633947163820267,
+    "loss_objectness": 0.04550355672836304,
+    "loss_rpn_box_reg": 0.0027953721582889557,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.55999755859375,
+    "box_w_max": 44.57000732421875,
+    "box_h_mean": 61.55000305175781,
+    "box_h_max": 67.20999145507812,
+    "videos": [
+      "2025-08-18 17-27-00.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      21,
+      44
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 14,
+    "loss_total": 0.6576699018478394,
+    "loss_classifier": 0.5903878211975098,
+    "loss_box_reg": 0.03630725294351578,
+    "loss_objectness": 0.026421133428812027,
+    "loss_rpn_box_reg": 0.004553688690066338,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 34.31500244140625,
+    "box_w_max": 37.5,
+    "box_h_mean": 65.44499206542969,
+    "box_h_max": 68.62998962402344,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      0,
+      64
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 15,
+    "loss_total": 0.7310137152671814,
+    "loss_classifier": 0.6180697083473206,
+    "loss_box_reg": 0.05917953699827194,
+    "loss_objectness": 0.04009094834327698,
+    "loss_rpn_box_reg": 0.01367348711937666,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 43.15998840332031,
+    "box_w_max": 45.989990234375,
+    "box_h_mean": 67.92499542236328,
+    "box_h_max": 69.33999633789062,
+    "videos": [
+      "2025-08-18 17-28-11.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      214,
+      153
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 16,
+    "loss_total": 0.726635754108429,
+    "loss_classifier": 0.6228194236755371,
+    "loss_box_reg": 0.0854840874671936,
+    "loss_objectness": 0.014234036207199097,
+    "loss_rpn_box_reg": 0.004098252393305302,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 42.44999694824219,
+    "box_w_max": 44.57000732421875,
+    "box_h_mean": 64.02999114990234,
+    "box_h_max": 66.50999450683594,
+    "videos": [
+      "2025-08-18 17-31-59.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      27,
+      139
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 17,
+    "loss_total": 0.7443236708641052,
+    "loss_classifier": 0.5798529982566833,
+    "loss_box_reg": 0.14390113949775696,
+    "loss_objectness": 0.019186798483133316,
+    "loss_rpn_box_reg": 0.0013827283401042223,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.4949951171875,
+    "box_w_max": 38.910003662109375,
+    "box_h_mean": 58.019996643066406,
+    "box_h_max": 60.850006103515625,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-27-15.mkv"
+    ],
+    "frame_indices": [
+      0,
+      73
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 18,
+    "loss_total": 0.7094838619232178,
+    "loss_classifier": 0.5957069396972656,
+    "loss_box_reg": 0.09072698652744293,
+    "loss_objectness": 0.020021509379148483,
+    "loss_rpn_box_reg": 0.0030284575186669827,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 32.899993896484375,
+    "box_w_max": 33.959991455078125,
+    "box_h_mean": 57.30500030517578,
+    "box_h_max": 64.3800048828125,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-30-27.mkv"
+    ],
+    "frame_indices": [
+      51,
+      92
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 19,
+    "loss_total": 0.7098262310028076,
+    "loss_classifier": 0.5816469788551331,
+    "loss_box_reg": 0.05560677498579025,
+    "loss_objectness": 0.0663919597864151,
+    "loss_rpn_box_reg": 0.006180548574775457,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 45.99000549316406,
+    "box_w_max": 46.70001220703125,
+    "box_h_mean": 66.86001586914062,
+    "box_h_max": 67.21002197265625,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      69,
+      207
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 20,
+    "loss_total": 0.7085915207862854,
+    "loss_classifier": 0.6073353290557861,
+    "loss_box_reg": 0.047255322337150574,
+    "loss_objectness": 0.049951426684856415,
+    "loss_rpn_box_reg": 0.004049439914524555,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.035003662109375,
+    "box_w_max": 48.1099853515625,
+    "box_h_mean": 69.69001007080078,
+    "box_h_max": 73.58001708984375,
+    "videos": [
+      "2025-08-18 17-30-47.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      64,
+      115
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 21,
+    "loss_total": 0.7331255078315735,
+    "loss_classifier": 0.6069746017456055,
+    "loss_box_reg": 0.11280956119298935,
+    "loss_objectness": 0.010503203608095646,
+    "loss_rpn_box_reg": 0.00283811311237514,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 43.50999450683594,
+    "box_w_max": 53.05999755859375,
+    "box_h_mean": 58.01499938964844,
+    "box_h_max": 62.260009765625,
+    "videos": [
+      "2025-08-18 17-30-47.mkv",
+      "2025-08-18 17-31-47.mkv"
+    ],
+    "frame_indices": [
+      31,
+      18
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 22,
+    "loss_total": 0.7178671956062317,
+    "loss_classifier": 0.5780094265937805,
+    "loss_box_reg": 0.11902544647455215,
+    "loss_objectness": 0.01834217831492424,
+    "loss_rpn_box_reg": 0.002490078331902623,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.79499816894531,
+    "box_w_max": 38.209991455078125,
+    "box_h_mean": 53.41499328613281,
+    "box_h_max": 62.25999450683594,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      86,
+      38
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 23,
+    "loss_total": 0.7701718807220459,
+    "loss_classifier": 0.6362171173095703,
+    "loss_box_reg": 0.08450940996408463,
+    "loss_objectness": 0.04769574850797653,
+    "loss_rpn_box_reg": 0.0017495587235316634,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.144989013671875,
+    "box_w_max": 41.740020751953125,
+    "box_h_mean": 54.125,
+    "box_h_max": 56.59999084472656,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      82,
+      77
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 24,
+    "loss_total": 0.6760570406913757,
+    "loss_classifier": 0.6004860401153564,
+    "loss_box_reg": 0.051441945135593414,
+    "loss_objectness": 0.02318754605948925,
+    "loss_rpn_box_reg": 0.0009414968080818653,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.08500671386719,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 60.845001220703125,
+    "box_h_max": 64.3800048828125,
+    "videos": [
+      "2025-08-18 17-31-16.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      0,
+      103
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 25,
+    "loss_total": 0.7144151926040649,
+    "loss_classifier": 0.6179535984992981,
+    "loss_box_reg": 0.06433551758527756,
+    "loss_objectness": 0.025806734338402748,
+    "loss_rpn_box_reg": 0.0063193379901349545,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.67999267578125,
+    "box_w_max": 48.110015869140625,
+    "box_h_mean": 61.54999542236328,
+    "box_h_max": 64.37998962402344,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      99,
+      18
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 26,
+    "loss_total": 0.674955427646637,
+    "loss_classifier": 0.5832878351211548,
+    "loss_box_reg": 0.07563787698745728,
+    "loss_objectness": 0.014091096818447113,
+    "loss_rpn_box_reg": 0.001938667963258922,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.610015869140625,
+    "box_w_max": 34.670013427734375,
+    "box_h_mean": 67.91999816894531,
+    "box_h_max": 70.03999328613281,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      0,
+      6
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 27,
+    "loss_total": 0.6890658736228943,
+    "loss_classifier": 0.5899376273155212,
+    "loss_box_reg": 0.0861101746559143,
+    "loss_objectness": 0.009988481178879738,
+    "loss_rpn_box_reg": 0.0030295741744339466,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.56001281738281,
+    "box_w_max": 38.910003662109375,
+    "box_h_mean": 61.19999694824219,
+    "box_h_max": 67.20999145507812,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-30-42.mkv"
+    ],
+    "frame_indices": [
+      161,
+      112
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 28,
+    "loss_total": 0.7027402520179749,
+    "loss_classifier": 0.5787270069122314,
+    "loss_box_reg": 0.08325306326150894,
+    "loss_objectness": 0.0360151045024395,
+    "loss_rpn_box_reg": 0.00474508386105299,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.2550048828125,
+    "box_w_max": 33.959991455078125,
+    "box_h_mean": 54.47999572753906,
+    "box_h_max": 55.19000244140625,
+    "videos": [
+      "2025-08-18 17-30-42.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      93,
+      57
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 29,
+    "loss_total": 0.7317245602607727,
+    "loss_classifier": 0.6256633996963501,
+    "loss_box_reg": 0.08268073201179504,
+    "loss_objectness": 0.019590292125940323,
+    "loss_rpn_box_reg": 0.00379011919721961,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 43.87001037597656,
+    "box_w_max": 43.870025634765625,
+    "box_h_mean": 58.725006103515625,
+    "box_h_max": 60.850006103515625,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      81,
+      84
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 30,
+    "loss_total": 0.7584398984909058,
+    "loss_classifier": 0.6255974173545837,
+    "loss_box_reg": 0.08985498547554016,
+    "loss_objectness": 0.03606085479259491,
+    "loss_rpn_box_reg": 0.0069265905767679214,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 42.80499267578125,
+    "box_w_max": 48.82000732421875,
+    "box_h_mean": 63.31999206542969,
+    "box_h_max": 70.03999328613281,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-31-55.mkv"
+    ],
+    "frame_indices": [
+      17,
+      35
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 31,
+    "loss_total": 0.6488223075866699,
+    "loss_classifier": 0.5426011681556702,
+    "loss_box_reg": 0.04545894265174866,
+    "loss_objectness": 0.05560525134205818,
+    "loss_rpn_box_reg": 0.005156936123967171,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.14500427246094,
+    "box_w_max": 37.5,
+    "box_h_mean": 70.75,
+    "box_h_max": 72.8699951171875,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-30-47.mkv"
+    ],
+    "frame_indices": [
+      78,
+      73
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 32,
+    "loss_total": 0.7142640352249146,
+    "loss_classifier": 0.6074074506759644,
+    "loss_box_reg": 0.09308388829231262,
+    "loss_objectness": 0.00888569001108408,
+    "loss_rpn_box_reg": 0.004887039307504892,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.26997375488281,
+    "box_w_max": 40.329986572265625,
+    "box_h_mean": 67.92500305175781,
+    "box_h_max": 69.33999633789062,
+    "videos": [
+      "2025-08-18 17-30-42.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      19,
+      78
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 33,
+    "loss_total": 0.7391738891601562,
+    "loss_classifier": 0.6052232980728149,
+    "loss_box_reg": 0.09255608171224594,
+    "loss_objectness": 0.03963088244199753,
+    "loss_rpn_box_reg": 0.0017636623233556747,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.25498962402344,
+    "box_w_max": 36.78997802734375,
+    "box_h_mean": 62.970001220703125,
+    "box_h_max": 65.09001159667969,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-31-16.mkv"
+    ],
+    "frame_indices": [
+      0,
+      13
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 34,
+    "loss_total": 0.696236252784729,
+    "loss_classifier": 0.583823561668396,
+    "loss_box_reg": 0.06464347243309021,
+    "loss_objectness": 0.046065762639045715,
+    "loss_rpn_box_reg": 0.0017034139018505812,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.915008544921875,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 61.54998779296875,
+    "box_h_max": 67.20999145507812,
+    "videos": [
+      "2025-08-18 17-31-16.mkv",
+      "2025-08-18 17-27-15.mkv"
+    ],
+    "frame_indices": [
+      33,
+      135
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 35,
+    "loss_total": 0.7647712826728821,
+    "loss_classifier": 0.6306552886962891,
+    "loss_box_reg": 0.09975983202457428,
+    "loss_objectness": 0.0273953415453434,
+    "loss_rpn_box_reg": 0.006960824131965637,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.035003662109375,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 53.415000915527344,
+    "box_h_max": 53.77000427246094,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      28,
+      156
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 36,
+    "loss_total": 0.7384287118911743,
+    "loss_classifier": 0.6165080666542053,
+    "loss_box_reg": 0.1111849769949913,
+    "loss_objectness": 0.007660191506147385,
+    "loss_rpn_box_reg": 0.003075485583394766,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.03498840332031,
+    "box_w_max": 43.160003662109375,
+    "box_h_mean": 66.14999389648438,
+    "box_h_max": 70.03999328613281,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      188,
+      99
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 37,
+    "loss_total": 0.7744523882865906,
+    "loss_classifier": 0.6372312903404236,
+    "loss_box_reg": 0.10883909463882446,
+    "loss_objectness": 0.027107272297143936,
+    "loss_rpn_box_reg": 0.0012746810680255294,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.084991455078125,
+    "box_w_max": 39.6199951171875,
+    "box_h_mean": 66.85999298095703,
+    "box_h_max": 72.16999816894531,
+    "videos": [
+      "2025-08-18 17-27-46.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      19,
+      147
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 38,
+    "loss_total": 0.7387315034866333,
+    "loss_classifier": 0.5946739315986633,
+    "loss_box_reg": 0.131808340549469,
+    "loss_objectness": 0.010324090719223022,
+    "loss_rpn_box_reg": 0.0019250819459557533,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 44.220001220703125,
+    "box_w_max": 45.990020751953125,
+    "box_h_mean": 56.24500274658203,
+    "box_h_max": 58.720001220703125,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-30-42.mkv"
+    ],
+    "frame_indices": [
+      63,
+      40
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 39,
+    "loss_total": 0.7238718867301941,
+    "loss_classifier": 0.577719509601593,
+    "loss_box_reg": 0.11597520112991333,
+    "loss_objectness": 0.028559990227222443,
+    "loss_rpn_box_reg": 0.0016171867027878761,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.33000183105469,
+    "box_w_max": 41.040008544921875,
+    "box_h_mean": 59.785011291503906,
+    "box_h_max": 60.1400146484375,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      45,
+      197
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 40,
+    "loss_total": 0.7069822549819946,
+    "loss_classifier": 0.5877198576927185,
+    "loss_box_reg": 0.08826680481433868,
+    "loss_objectness": 0.0292181558907032,
+    "loss_rpn_box_reg": 0.0017774553271010518,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.6199951171875,
+    "box_w_max": 40.33001708984375,
+    "box_h_mean": 56.95500183105469,
+    "box_h_max": 58.720001220703125,
+    "videos": [
+      "2025-08-18 17-31-16.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      45,
+      142
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 41,
+    "loss_total": 0.7016031742095947,
+    "loss_classifier": 0.6349992752075195,
+    "loss_box_reg": 0.05427900701761246,
+    "loss_objectness": 0.011063436046242714,
+    "loss_rpn_box_reg": 0.0012614225270226598,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.605010986328125,
+    "box_w_max": 38.910003662109375,
+    "box_h_mean": 56.95500183105469,
+    "box_h_max": 64.3800048828125,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      41,
+      107
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 42,
+    "loss_total": 0.7049469947814941,
+    "loss_classifier": 0.5888672471046448,
+    "loss_box_reg": 0.08252052962779999,
+    "loss_objectness": 0.030259698629379272,
+    "loss_rpn_box_reg": 0.003299493808299303,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.084991455078125,
+    "box_w_max": 36.790008544921875,
+    "box_h_mean": 64.7400131225586,
+    "box_h_max": 65.80001831054688,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-30-42.mkv"
+    ],
+    "frame_indices": [
+      141,
+      28
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 43,
+    "loss_total": 0.7310945987701416,
+    "loss_classifier": 0.5895360708236694,
+    "loss_box_reg": 0.10616961866617203,
+    "loss_objectness": 0.030344873666763306,
+    "loss_rpn_box_reg": 0.005043972283601761,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.375,
+    "box_w_max": 37.5,
+    "box_h_mean": 65.09000396728516,
+    "box_h_max": 71.46000671386719,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      109,
+      16
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 44,
+    "loss_total": 0.7266966104507446,
+    "loss_classifier": 0.6005809903144836,
+    "loss_box_reg": 0.10670407116413116,
+    "loss_objectness": 0.01650341972708702,
+    "loss_rpn_box_reg": 0.00290818908251822,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.7449951171875,
+    "box_w_max": 43.8699951171875,
+    "box_h_mean": 61.55500793457031,
+    "box_h_max": 62.260009765625,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      225,
+      66
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 45,
+    "loss_total": 0.6859658360481262,
+    "loss_classifier": 0.6130315065383911,
+    "loss_box_reg": 0.05084720999002457,
+    "loss_objectness": 0.009092772379517555,
+    "loss_rpn_box_reg": 0.012994321994483471,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 45.27998352050781,
+    "box_w_max": 48.1099853515625,
+    "box_h_mean": 72.5199966430664,
+    "box_h_max": 75.0,
+    "videos": [
+      "2025-08-18 17-31-59.mkv",
+      "2025-08-18 17-30-27.mkv"
+    ],
+    "frame_indices": [
+      146,
+      15
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 46,
+    "loss_total": 0.7324654459953308,
+    "loss_classifier": 0.6069545745849609,
+    "loss_box_reg": 0.09166736900806427,
+    "loss_objectness": 0.027700673788785934,
+    "loss_rpn_box_reg": 0.006142884027212858,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 47.05000305175781,
+    "box_w_max": 53.05999755859375,
+    "box_h_mean": 58.37000274658203,
+    "box_h_max": 64.3800048828125,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      179,
+      129
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 47,
+    "loss_total": 0.7146114110946655,
+    "loss_classifier": 0.5803772807121277,
+    "loss_box_reg": 0.11253105849027634,
+    "loss_objectness": 0.01884576305747032,
+    "loss_rpn_box_reg": 0.0028573167510330677,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.20501708984375,
+    "box_w_max": 48.110015869140625,
+    "box_h_mean": 63.67999267578125,
+    "box_h_max": 66.50999450683594,
+    "videos": [
+      "2025-08-18 17-28-11.mkv",
+      "2025-08-18 17-30-47.mkv"
+    ],
+    "frame_indices": [
+      104,
+      23
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 48,
+    "loss_total": 0.7249187231063843,
+    "loss_classifier": 0.5749826431274414,
+    "loss_box_reg": 0.05846478417515755,
+    "loss_objectness": 0.07333730906248093,
+    "loss_rpn_box_reg": 0.018134012818336487,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.035003662109375,
+    "box_w_max": 45.989990234375,
+    "box_h_mean": 68.27500915527344,
+    "box_h_max": 76.41000366210938,
+    "videos": [
+      "2025-08-18 17-30-27.mkv",
+      "2025-08-18 17-31-47.mkv"
+    ],
+    "frame_indices": [
+      28,
+      19
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 49,
+    "loss_total": 0.7347171306610107,
+    "loss_classifier": 0.6198285222053528,
+    "loss_box_reg": 0.1010092943906784,
+    "loss_objectness": 0.011725032702088356,
+    "loss_rpn_box_reg": 0.0021542892791330814,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.375,
+    "box_w_max": 38.910003662109375,
+    "box_h_mean": 55.540000915527344,
+    "box_h_max": 60.850006103515625,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      218,
+      84
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 50,
+    "loss_total": 0.6567562818527222,
+    "loss_classifier": 0.5616612434387207,
+    "loss_box_reg": 0.05953141301870346,
+    "loss_objectness": 0.033060457557439804,
+    "loss_rpn_box_reg": 0.0025031999684870243,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.14500427246094,
+    "box_w_max": 41.739990234375,
+    "box_h_mean": 64.02999877929688,
+    "box_h_max": 65.80000305175781,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-30-27.mkv"
+    ],
+    "frame_indices": [
+      58,
+      123
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 51,
+    "loss_total": 0.7536343336105347,
+    "loss_classifier": 0.6162418127059937,
+    "loss_box_reg": 0.10811816900968552,
+    "loss_objectness": 0.02656641975045204,
+    "loss_rpn_box_reg": 0.002707915147766471,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.439971923828125,
+    "box_w_max": 40.329986572265625,
+    "box_h_mean": 62.61499786376953,
+    "box_h_max": 63.67999267578125,
+    "videos": [
+      "2025-08-18 17-27-00.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      47,
+      33
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 52,
+    "loss_total": 0.6903864145278931,
+    "loss_classifier": 0.6049926280975342,
+    "loss_box_reg": 0.05830347165465355,
+    "loss_objectness": 0.01918243058025837,
+    "loss_rpn_box_reg": 0.007907841354608536,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.269989013671875,
+    "box_w_max": 43.869964599609375,
+    "box_h_mean": 66.50499725341797,
+    "box_h_max": 71.45999145507812,
+    "videos": [
+      "2025-08-18 17-27-46.mkv",
+      "2025-08-18 17-30-42.mkv"
+    ],
+    "frame_indices": [
+      60,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 53,
+    "loss_total": 0.7175372838973999,
+    "loss_classifier": 0.5902523994445801,
+    "loss_box_reg": 0.11615875363349915,
+    "loss_objectness": 0.010557488538324833,
+    "loss_rpn_box_reg": 0.0005687016528099775,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.795013427734375,
+    "box_w_max": 38.21002197265625,
+    "box_h_mean": 65.08999633789062,
+    "box_h_max": 68.62998962402344,
+    "videos": [
+      "2025-08-18 17-30-47.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      0,
+      115
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 54,
+    "loss_total": 0.7176973223686218,
+    "loss_classifier": 0.6078248023986816,
+    "loss_box_reg": 0.0951852947473526,
+    "loss_objectness": 0.011285975575447083,
+    "loss_rpn_box_reg": 0.003401266410946846,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.38999938964844,
+    "box_w_max": 44.57000732421875,
+    "box_h_mean": 60.139991760253906,
+    "box_h_max": 62.970001220703125,
+    "videos": [
+      "2025-08-18 17-30-27.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      0,
+      70
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 55,
+    "loss_total": 0.7210508584976196,
+    "loss_classifier": 0.5963101387023926,
+    "loss_box_reg": 0.08037562668323517,
+    "loss_objectness": 0.04072650521993637,
+    "loss_rpn_box_reg": 0.003638642141595483,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.20501708984375,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 54.834991455078125,
+    "box_h_max": 57.30998229980469,
+    "videos": [
+      "2025-08-18 17-30-27.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      113,
+      130
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 56,
+    "loss_total": 0.7226420640945435,
+    "loss_classifier": 0.5986840724945068,
+    "loss_box_reg": 0.10026265680789948,
+    "loss_objectness": 0.02007587067782879,
+    "loss_rpn_box_reg": 0.0036194887943565845,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.915008544921875,
+    "box_w_max": 48.82000732421875,
+    "box_h_mean": 56.599998474121094,
+    "box_h_max": 64.37998962402344,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-30-47.mkv"
+    ],
+    "frame_indices": [
+      162,
+      82
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 57,
+    "loss_total": 0.7306819558143616,
+    "loss_classifier": 0.6294475793838501,
+    "loss_box_reg": 0.054596155881881714,
+    "loss_objectness": 0.04118257015943527,
+    "loss_rpn_box_reg": 0.0054556215181946754,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.079986572265625,
+    "box_w_max": 41.739990234375,
+    "box_h_mean": 52.709999084472656,
+    "box_h_max": 54.47999572753906,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      72,
+      205
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 58,
+    "loss_total": 0.6792426109313965,
+    "loss_classifier": 0.5868235230445862,
+    "loss_box_reg": 0.06970250606536865,
+    "loss_objectness": 0.019319811835885048,
+    "loss_rpn_box_reg": 0.00339677557349205,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.62001037597656,
+    "box_w_max": 39.620025634765625,
+    "box_h_mean": 60.845001220703125,
+    "box_h_max": 65.79998779296875,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      98,
+      84
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 59,
+    "loss_total": 0.7662519216537476,
+    "loss_classifier": 0.6175441741943359,
+    "loss_box_reg": 0.09730666875839233,
+    "loss_objectness": 0.047279760241508484,
+    "loss_rpn_box_reg": 0.004121285863220692,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.33000183105469,
+    "box_w_max": 43.160003662109375,
+    "box_h_mean": 64.739990234375,
+    "box_h_max": 72.16999816894531,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      8,
+      121
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 60,
+    "loss_total": 0.7343041300773621,
+    "loss_classifier": 0.5864872336387634,
+    "loss_box_reg": 0.08699584752321243,
+    "loss_objectness": 0.057797085493803024,
+    "loss_rpn_box_reg": 0.003023967146873474,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.78999328613281,
+    "box_w_max": 43.15997314453125,
+    "box_h_mean": 52.00499725341797,
+    "box_h_max": 55.18998718261719,
+    "videos": [
+      "2025-08-18 17-30-42.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      81,
+      169
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 61,
+    "loss_total": 0.7465299963951111,
+    "loss_classifier": 0.6282966136932373,
+    "loss_box_reg": 0.06832742691040039,
+    "loss_objectness": 0.04748263582587242,
+    "loss_rpn_box_reg": 0.002423322293907404,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 31.129989624023438,
+    "box_w_max": 33.25,
+    "box_h_mean": 65.80001068115234,
+    "box_h_max": 72.17001342773438,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-27-46.mkv"
+    ],
+    "frame_indices": [
+      0,
+      72
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 62,
+    "loss_total": 0.6953166127204895,
+    "loss_classifier": 0.6149994730949402,
+    "loss_box_reg": 0.06629358977079391,
+    "loss_objectness": 0.010057725012302399,
+    "loss_rpn_box_reg": 0.003965815994888544,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.96000671386719,
+    "box_w_max": 39.620025634765625,
+    "box_h_mean": 54.12499237060547,
+    "box_h_max": 54.47999572753906,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-31-16.mkv"
+    ],
+    "frame_indices": [
+      58,
+      128
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 63,
+    "loss_total": 0.7247179746627808,
+    "loss_classifier": 0.5952693223953247,
+    "loss_box_reg": 0.09299235790967941,
+    "loss_objectness": 0.03611787408590317,
+    "loss_rpn_box_reg": 0.0003384445735719055,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.79498291015625,
+    "box_w_max": 38.209991455078125,
+    "box_h_mean": 60.48999786376953,
+    "box_h_max": 67.91999816894531,
+    "videos": [
+      "2025-08-18 17-30-47.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      11,
+      43
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 64,
+    "loss_total": 0.7467475533485413,
+    "loss_classifier": 0.6224268674850464,
+    "loss_box_reg": 0.09725181013345718,
+    "loss_objectness": 0.02415374293923378,
+    "loss_rpn_box_reg": 0.002915108110755682,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.959991455078125,
+    "box_w_max": 36.079986572265625,
+    "box_h_mean": 56.599998474121094,
+    "box_h_max": 62.25999450683594,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      91,
+      117
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 65,
+    "loss_total": 0.7243799567222595,
+    "loss_classifier": 0.6074173450469971,
+    "loss_box_reg": 0.08800993859767914,
+    "loss_objectness": 0.02667289227247238,
+    "loss_rpn_box_reg": 0.002279744017869234,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.635009765625,
+    "box_w_max": 41.739990234375,
+    "box_h_mean": 59.88500213623047,
+    "box_h_max": 61.75,
+    "videos": [
+      "2025-08-18 17-27-46.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      24,
+      83
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 66,
+    "loss_total": 0.744915246963501,
+    "loss_classifier": 0.617055356502533,
+    "loss_box_reg": 0.06640395522117615,
+    "loss_objectness": 0.05854407325387001,
+    "loss_rpn_box_reg": 0.0029118750244379044,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.96501159667969,
+    "box_w_max": 38.21002197265625,
+    "box_h_mean": 56.954986572265625,
+    "box_h_max": 63.67999267578125,
+    "videos": [
+      "2025-08-18 17-31-16.mkv",
+      "2025-08-18 17-27-46.mkv"
+    ],
+    "frame_indices": [
+      131,
+      111
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 67,
+    "loss_total": 0.6505028605461121,
+    "loss_classifier": 0.5667024850845337,
+    "loss_box_reg": 0.06697480380535126,
+    "loss_objectness": 0.014280086383223534,
+    "loss_rpn_box_reg": 0.002545485971495509,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.730010986328125,
+    "box_w_max": 36.08001708984375,
+    "box_h_mean": 66.14999389648438,
+    "box_h_max": 70.75,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-30-27.mkv"
+    ],
+    "frame_indices": [
+      12,
+      41
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 68,
+    "loss_total": 0.7303267121315002,
+    "loss_classifier": 0.6149416565895081,
+    "loss_box_reg": 0.07481367141008377,
+    "loss_objectness": 0.03720957040786743,
+    "loss_rpn_box_reg": 0.0033618155866861343,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 34.66998291015625,
+    "box_w_max": 35.379974365234375,
+    "box_h_mean": 53.41999816894531,
+    "box_h_max": 55.19000244140625,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      45,
+      51
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 69,
+    "loss_total": 0.737125039100647,
+    "loss_classifier": 0.5998387932777405,
+    "loss_box_reg": 0.11685384809970856,
+    "loss_objectness": 0.018400363624095917,
+    "loss_rpn_box_reg": 0.0020320562180131674,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.91499328613281,
+    "box_w_max": 41.040008544921875,
+    "box_h_mean": 60.49000549316406,
+    "box_h_max": 67.21000671386719,
+    "videos": [
+      "2025-08-18 17-31-59.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      114,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 70,
+    "loss_total": 0.7383792996406555,
+    "loss_classifier": 0.5863345861434937,
+    "loss_box_reg": 0.12936502695083618,
+    "loss_objectness": 0.01946914754807949,
+    "loss_rpn_box_reg": 0.0032105641439557076,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 45.63499450683594,
+    "box_w_max": 50.94000244140625,
+    "box_h_mean": 62.970001220703125,
+    "box_h_max": 63.67999267578125,
+    "videos": [
+      "2025-08-18 17-30-47.mkv",
+      "2025-08-18 17-30-47.mkv"
+    ],
+    "frame_indices": [
+      54,
+      3
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 71,
+    "loss_total": 0.7147687673568726,
+    "loss_classifier": 0.6363751888275146,
+    "loss_box_reg": 0.06627781689167023,
+    "loss_objectness": 0.010157879441976547,
+    "loss_rpn_box_reg": 0.0019579112995415926,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.855010986328125,
+    "box_w_max": 41.040008544921875,
+    "box_h_mean": 65.44499969482422,
+    "box_h_max": 68.63002014160156,
+    "videos": [
+      "2025-08-18 17-31-16.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      71,
+      29
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 72,
+    "loss_total": 0.7019158005714417,
+    "loss_classifier": 0.606220006942749,
+    "loss_box_reg": 0.07075944542884827,
+    "loss_objectness": 0.019864484667778015,
+    "loss_rpn_box_reg": 0.005071906838566065,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.850006103515625,
+    "box_w_max": 39.6199951171875,
+    "box_h_mean": 68.62500762939453,
+    "box_h_max": 70.04000854492188,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      123,
+      84
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 73,
+    "loss_total": 0.688888669013977,
+    "loss_classifier": 0.5883405804634094,
+    "loss_box_reg": 0.0832679495215416,
+    "loss_objectness": 0.014339367859065533,
+    "loss_rpn_box_reg": 0.0029407807160168886,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.204986572265625,
+    "box_w_max": 45.989990234375,
+    "box_h_mean": 54.83000183105469,
+    "box_h_max": 55.88999938964844,
+    "videos": [
+      "2025-08-18 17-30-42.mkv",
+      "2025-08-18 17-31-55.mkv"
+    ],
+    "frame_indices": [
+      107,
+      43
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 74,
+    "loss_total": 0.7166458964347839,
+    "loss_classifier": 0.5920848846435547,
+    "loss_box_reg": 0.08017848432064056,
+    "loss_objectness": 0.0372515544295311,
+    "loss_rpn_box_reg": 0.007130993530154228,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.024993896484375,
+    "box_w_max": 45.989990234375,
+    "box_h_mean": 61.55500030517578,
+    "box_h_max": 68.6300048828125,
+    "videos": [
+      "2025-08-18 17-28-11.mkv",
+      "2025-08-18 17-30-47.mkv"
+    ],
+    "frame_indices": [
+      0,
+      43
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 75,
+    "loss_total": 0.7125358581542969,
+    "loss_classifier": 0.6204510927200317,
+    "loss_box_reg": 0.050615109503269196,
+    "loss_objectness": 0.038829728960990906,
+    "loss_rpn_box_reg": 0.0026398978661745787,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.204986572265625,
+    "box_w_max": 39.6199951171875,
+    "box_h_mean": 62.26499938964844,
+    "box_h_max": 63.68000793457031,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-31-59.mkv"
+    ],
+    "frame_indices": [
+      77,
+      127
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 76,
+    "loss_total": 0.7151066660881042,
+    "loss_classifier": 0.6015802025794983,
+    "loss_box_reg": 0.07162673026323318,
+    "loss_objectness": 0.03810941055417061,
+    "loss_rpn_box_reg": 0.003790312446653843,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.08000183105469,
+    "box_w_max": 36.08001708984375,
+    "box_h_mean": 61.19999694824219,
+    "box_h_max": 62.25999450683594,
+    "videos": [
+      "2025-08-18 17-27-00.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      91,
+      56
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 77,
+    "loss_total": 0.7243152856826782,
+    "loss_classifier": 0.6182042360305786,
+    "loss_box_reg": 0.08246198296546936,
+    "loss_objectness": 0.0226910300552845,
+    "loss_rpn_box_reg": 0.0009581082267686725,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.43501281738281,
+    "box_w_max": 39.620025634765625,
+    "box_h_mean": 65.09500122070312,
+    "box_h_max": 72.16999816894531,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      66,
+      200
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 78,
+    "loss_total": 0.7019356489181519,
+    "loss_classifier": 0.5760274529457092,
+    "loss_box_reg": 0.08916061371564865,
+    "loss_objectness": 0.03434610739350319,
+    "loss_rpn_box_reg": 0.002401488833129406,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.91499328613281,
+    "box_w_max": 43.8699951171875,
+    "box_h_mean": 53.41499328613281,
+    "box_h_max": 53.769989013671875,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      154,
+      189
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 79,
+    "loss_total": 0.6904929876327515,
+    "loss_classifier": 0.5520464181900024,
+    "loss_box_reg": 0.08489447832107544,
+    "loss_objectness": 0.04610149562358856,
+    "loss_rpn_box_reg": 0.007450584322214127,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.62001037597656,
+    "box_w_max": 48.110015869140625,
+    "box_h_mean": 61.909996032714844,
+    "box_h_max": 65.79998779296875,
+    "videos": [
+      "2025-08-18 17-30-27.mkv",
+      "2025-08-18 17-27-15.mkv"
+    ],
+    "frame_indices": [
+      81,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 80,
+    "loss_total": 0.7117083072662354,
+    "loss_classifier": 0.6128355264663696,
+    "loss_box_reg": 0.04837784543633461,
+    "loss_objectness": 0.04509425908327103,
+    "loss_rpn_box_reg": 0.005400686990469694,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 44.92498779296875,
+    "box_w_max": 50.22998046875,
+    "box_h_mean": 61.19999694824219,
+    "box_h_max": 61.55000305175781,
+    "videos": [
+      "2025-08-18 17-28-11.mkv",
+      "2025-08-18 17-31-55.mkv"
+    ],
+    "frame_indices": [
+      89,
+      26
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 81,
+    "loss_total": 0.6774885654449463,
+    "loss_classifier": 0.5742660164833069,
+    "loss_box_reg": 0.09200078248977661,
+    "loss_objectness": 0.01016249880194664,
+    "loss_rpn_box_reg": 0.0010592702310532331,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.38999938964844,
+    "box_w_max": 42.449981689453125,
+    "box_h_mean": 60.134986877441406,
+    "box_h_max": 61.54998779296875,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-31-16.mkv"
+    ],
+    "frame_indices": [
+      69,
+      22
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 82,
+    "loss_total": 0.7621802687644958,
+    "loss_classifier": 0.6417297720909119,
+    "loss_box_reg": 0.032863810658454895,
+    "loss_objectness": 0.08363761007785797,
+    "loss_rpn_box_reg": 0.003949121106415987,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 25.470001220703125,
+    "box_w_max": 29.009979248046875,
+    "box_h_mean": 49.170005798339844,
+    "box_h_max": 50.94000244140625,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      119,
+      170
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 83,
+    "loss_total": 0.6929550766944885,
+    "loss_classifier": 0.5983654260635376,
+    "loss_box_reg": 0.06779713928699493,
+    "loss_objectness": 0.02349301427602768,
+    "loss_rpn_box_reg": 0.0032995541114360094,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 44.77500915527344,
+    "box_w_max": 48.82000732421875,
+    "box_h_mean": 59.67499542236328,
+    "box_h_max": 61.54998779296875,
+    "videos": [
+      "2025-08-18 17-27-46.mkv",
+      "2025-08-18 17-30-47.mkv"
+    ],
+    "frame_indices": [
+      76,
+      96
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 84,
+    "loss_total": 0.7269995808601379,
+    "loss_classifier": 0.6318424940109253,
+    "loss_box_reg": 0.0691869705915451,
+    "loss_objectness": 0.023635875433683395,
+    "loss_rpn_box_reg": 0.002334237564355135,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.27001953125,
+    "box_w_max": 45.990020751953125,
+    "box_h_mean": 56.95500946044922,
+    "box_h_max": 62.97001647949219,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-27-46.mkv"
+    ],
+    "frame_indices": [
+      78,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 85,
+    "loss_total": 0.7031294107437134,
+    "loss_classifier": 0.5745939016342163,
+    "loss_box_reg": 0.09146100282669067,
+    "loss_objectness": 0.03294576331973076,
+    "loss_rpn_box_reg": 0.004128745291382074,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.68501281738281,
+    "box_w_max": 45.990020751953125,
+    "box_h_mean": 59.785003662109375,
+    "box_h_max": 63.68000793457031,
+    "videos": [
+      "2025-08-18 17-30-27.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      52,
+      194
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 86,
+    "loss_total": 0.7096269726753235,
+    "loss_classifier": 0.6144197583198547,
+    "loss_box_reg": 0.03217516094446182,
+    "loss_objectness": 0.058026187121868134,
+    "loss_rpn_box_reg": 0.0050058127380907536,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.78997802734375,
+    "box_w_max": 43.15997314453125,
+    "box_h_mean": 67.21499633789062,
+    "box_h_max": 69.33999633789062,
+    "videos": [
+      "2025-08-18 17-27-46.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      94,
+      142
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 87,
+    "loss_total": 0.758558452129364,
+    "loss_classifier": 0.6039847135543823,
+    "loss_box_reg": 0.12088341265916824,
+    "loss_objectness": 0.027488891035318375,
+    "loss_rpn_box_reg": 0.006201421841979027,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.43499755859375,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 61.19999694824219,
+    "box_h_max": 69.33999633789062,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-31-16.mkv"
+    ],
+    "frame_indices": [
+      49,
+      119
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 88,
+    "loss_total": 0.6828846335411072,
+    "loss_classifier": 0.5779751539230347,
+    "loss_box_reg": 0.07928457111120224,
+    "loss_objectness": 0.018769826740026474,
+    "loss_rpn_box_reg": 0.006855102255940437,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 46.49000549316406,
+    "box_w_max": 51.240020751953125,
+    "box_h_mean": 59.67500305175781,
+    "box_h_max": 61.55000305175781,
+    "videos": [
+      "2025-08-18 17-30-27.mkv",
+      "2025-08-18 17-27-46.mkv"
+    ],
+    "frame_indices": [
+      104,
+      89
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 89,
+    "loss_total": 0.7282917499542236,
+    "loss_classifier": 0.6120144128799438,
+    "loss_box_reg": 0.07627011835575104,
+    "loss_objectness": 0.03632057458162308,
+    "loss_rpn_box_reg": 0.0036866404116153717,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.20500183105469,
+    "box_w_max": 47.399993896484375,
+    "box_h_mean": 54.47999572753906,
+    "box_h_max": 57.30998229980469,
+    "videos": [
+      "2025-08-18 17-31-37.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      140,
+      89
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 90,
+    "loss_total": 0.7095503807067871,
+    "loss_classifier": 0.619290292263031,
+    "loss_box_reg": 0.05155639722943306,
+    "loss_objectness": 0.03408978506922722,
+    "loss_rpn_box_reg": 0.004613891243934631,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.73997497558594,
+    "box_w_max": 44.5699462890625,
+    "box_h_mean": 58.37000274658203,
+    "box_h_max": 62.260009765625,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      105,
+      74
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 91,
+    "loss_total": 0.6674259901046753,
+    "loss_classifier": 0.576290488243103,
+    "loss_box_reg": 0.05702224001288414,
+    "loss_objectness": 0.028472088277339935,
+    "loss_rpn_box_reg": 0.00564119778573513,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.5,
+    "box_w_max": 39.6199951171875,
+    "box_h_mean": 59.07500457763672,
+    "box_h_max": 59.42999267578125,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-28-11.mkv"
+    ],
+    "frame_indices": [
+      111,
+      111
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 92,
+    "loss_total": 0.723477840423584,
+    "loss_classifier": 0.6055320501327515,
+    "loss_box_reg": 0.08733445405960083,
+    "loss_objectness": 0.027752336114645004,
+    "loss_rpn_box_reg": 0.002858967985957861,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 32.899993896484375,
+    "box_w_max": 40.329986572265625,
+    "box_h_mean": 61.19999694824219,
+    "box_h_max": 64.3800048828125,
+    "videos": [
+      "2025-08-18 17-30-47.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      90,
+      59
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 93,
+    "loss_total": 0.6850880980491638,
+    "loss_classifier": 0.6044909954071045,
+    "loss_box_reg": 0.039942704141139984,
+    "loss_objectness": 0.03479214385151863,
+    "loss_rpn_box_reg": 0.0058623142540454865,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.62001037597656,
+    "box_w_max": 45.279998779296875,
+    "box_h_mean": 66.5050048828125,
+    "box_h_max": 75.70001220703125,
+    "videos": [
+      "2025-08-18 17-29-35.mkv",
+      "2025-08-18 17-27-46.mkv"
+    ],
+    "frame_indices": [
+      33,
+      46
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 94,
+    "loss_total": 0.7051177620887756,
+    "loss_classifier": 0.5872789621353149,
+    "loss_box_reg": 0.07843612134456635,
+    "loss_objectness": 0.033424023538827896,
+    "loss_rpn_box_reg": 0.005978652276098728,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.745025634765625,
+    "box_w_max": 49.530029296875,
+    "box_h_mean": 58.014984130859375,
+    "box_h_max": 61.54998779296875,
+    "videos": [
+      "2025-08-18 17-27-15.mkv",
+      "2025-08-18 17-31-16.mkv"
+    ],
+    "frame_indices": [
+      113,
+      63
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 95,
+    "loss_total": 0.7199001312255859,
+    "loss_classifier": 0.6102197170257568,
+    "loss_box_reg": 0.08978160470724106,
+    "loss_objectness": 0.0189246516674757,
+    "loss_rpn_box_reg": 0.0009741949616000056,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.375,
+    "box_w_max": 36.08001708984375,
+    "box_h_mean": 65.08999633789062,
+    "box_h_max": 65.80000305175781,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      137,
+      185
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 96,
+    "loss_total": 0.7059436440467834,
+    "loss_classifier": 0.5837201476097107,
+    "loss_box_reg": 0.09285686910152435,
+    "loss_objectness": 0.02562996931374073,
+    "loss_rpn_box_reg": 0.00373662612400949,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.855010986328125,
+    "box_w_max": 41.040008544921875,
+    "box_h_mean": 61.905006408691406,
+    "box_h_max": 65.09001159667969,
+    "videos": [
+      "2025-08-18 17-31-59.mkv",
+      "2025-08-18 17-27-15.mkv"
+    ],
+    "frame_indices": [
+      65,
+      86
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 97,
+    "loss_total": 0.7486901879310608,
+    "loss_classifier": 0.6284629106521606,
+    "loss_box_reg": 0.11086753010749817,
+    "loss_objectness": 0.007994161918759346,
+    "loss_rpn_box_reg": 0.0013655825750902295,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 33.61000061035156,
+    "box_w_max": 37.5,
+    "box_h_mean": 57.30999755859375,
+    "box_h_max": 63.67999267578125,
+    "videos": [
+      "2025-08-18 17-30-42.mkv",
+      "2025-08-18 17-31-55.mkv"
+    ],
+    "frame_indices": [
+      72,
+      92
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 98,
+    "loss_total": 0.6840519309043884,
+    "loss_classifier": 0.5951193571090698,
+    "loss_box_reg": 0.07109507918357849,
+    "loss_objectness": 0.014693191275000572,
+    "loss_rpn_box_reg": 0.003144249552860856,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 42.09999084472656,
+    "box_w_max": 43.160003662109375,
+    "box_h_mean": 59.07499694824219,
+    "box_h_max": 61.55000305175781,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-30-27.mkv"
+    ],
+    "frame_indices": [
+      14,
+      69
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 99,
+    "loss_total": 0.7286463975906372,
+    "loss_classifier": 0.594423770904541,
+    "loss_box_reg": 0.10653647035360336,
+    "loss_objectness": 0.0258067287504673,
+    "loss_rpn_box_reg": 0.0018794429488480091,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 35.019989013671875,
+    "box_w_max": 36.079986572265625,
+    "box_h_mean": 60.844993591308594,
+    "box_h_max": 64.3800048828125,
+    "videos": [
+      "2025-08-18 17-31-59.mkv",
+      "2025-08-18 17-31-16.mkv"
+    ],
+    "frame_indices": [
+      16,
+      54
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 100,
+    "loss_total": 0.733275830745697,
+    "loss_classifier": 0.6327518224716187,
+    "loss_box_reg": 0.07821524143218994,
+    "loss_objectness": 0.016731077805161476,
+    "loss_rpn_box_reg": 0.005577663891017437,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 41.035003662109375,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 54.12500762939453,
+    "box_h_max": 60.1400146484375,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      59,
+      129
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 101,
+    "loss_total": 0.7128345966339111,
+    "loss_classifier": 0.6031700372695923,
+    "loss_box_reg": 0.08348391950130463,
+    "loss_objectness": 0.018582887947559357,
+    "loss_rpn_box_reg": 0.00759771978482604,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 43.5150146484375,
+    "box_w_max": 43.870025634765625,
+    "box_h_mean": 72.16500854492188,
+    "box_h_max": 76.41000366210938,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-30-42.mkv"
+    ],
+    "frame_indices": [
+      178,
+      10
+    ],
+    "outlier_mad10": false
+  }
+]

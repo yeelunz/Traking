@@ -31,7 +31,6 @@ class SimpleRunnerUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Tracking Pipeline UI (Lite)")
         self.resize(900, 700)
-
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
@@ -63,12 +62,13 @@ class SimpleRunnerUI(QMainWindow):
         # Guided builder group
         gb = QGroupBox("Pipeline Builder")
         gbl = QVBoxLayout(gb)
-        # internal state for params editors
+        # internal state for params editors (redefined with syncing flag)
         self.pre_params = {}
         self.model_params = {}
         self._current_pre_name = None
         self._pre_bindings = []
         self._model_bindings = []
+        self._syncing = False  # prevent save/overwrite during raw sync
 
         ds_form = QFormLayout()
         self.split_method = QComboBox(); self.split_method.addItems(["video_level"])  # reserve
@@ -222,6 +222,12 @@ class SimpleRunnerUI(QMainWindow):
             return
         with open(path, "r", encoding="utf-8") as f:
             self.txt_cfg.setPlainText(f.read())
+        # 重要：自動將剛載入的 Raw Config 解析並同步到上方控制項，避免未按「同步」時用預設值覆蓋自訂參數
+        try:
+            self.sync_controls_from_raw()
+            self.log("[AutoSync] 已自動同步載入檔案的參數到 Builder 控制項。")
+        except Exception as e:
+            self.log(f"[AutoSync][Warn] 同步失敗: {e}")
 
     def save_file(self):
         path = self.edit_cfg.text().strip()
@@ -288,7 +294,14 @@ class SimpleRunnerUI(QMainWindow):
                 "name": pre_name,
                 "params": params
             })
-        mdl_params = dict(self.model_params.get(model) or getattr(MODEL_REGISTRY[model], 'DEFAULT_CONFIG', {}))
+        # 取得現有模型參數（若未修改則用預設），再合併：使用者 > 預設
+        user_params = dict(self.model_params.get(model) or {})
+        default_params = getattr(MODEL_REGISTRY[model], 'DEFAULT_CONFIG', {})
+        mdl_params = {**default_params, **user_params}
+        try:
+            self.log(f"[BuildYAML] Model={model} default={default_params} user={user_params} merged={mdl_params}")
+        except Exception:
+            pass
         # sanitize known auto-init keys
         if model in ("CSRT", "OpticalFlowLK"):
             mdl_params.pop("init_box", None)
@@ -329,7 +342,7 @@ class SimpleRunnerUI(QMainWindow):
         cfg = self.parse_config()
         if not cfg:
             return
-        # dataset
+        self._syncing = True
         ds = cfg.get("dataset", {})
         root = ds.get("root")
         if root:
@@ -337,64 +350,55 @@ class SimpleRunnerUI(QMainWindow):
         split = (ds or {}).get("split", {})
         ratios = split.get("ratios", [0.8, 0.2])
         if len(ratios) == 3:
-            self.split_r_train.setValue(float(ratios[0]))
-            self.split_r_test.setValue(float(ratios[2]))
+            self.split_r_train.setValue(float(ratios[0])); self.split_r_test.setValue(float(ratios[2]))
         elif len(ratios) == 2:
-            self.split_r_train.setValue(float(ratios[0]))
-            self.split_r_test.setValue(float(ratios[1]))
+            self.split_r_train.setValue(float(ratios[0])); self.split_r_test.setValue(float(ratios[1]))
         self.kfold.setValue(int(split.get("k_fold", 1) or 1))
-        # experiments (take first by default)
         exps = cfg.get("experiments", [])
         if exps:
             exp = exps[0]
             pipeline = exp.get("pipeline", [])
             pre_names = [s.get("name") for s in pipeline if s.get("type") == "preproc"]
             mdl_names = [s.get("name") for s in pipeline if s.get("type") == "model"]
-            # set preproc selections
-            # rebuild selected list
+            # rebuild preproc selection
             self.list_pre_sel.clear()
-            for name in pre_names:
-                if name in PREPROC_REGISTRY:
-                    self.list_pre_sel.addItem(QListWidgetItem(name))
-                    # store params for each preproc
-                    step = next((s for s in pipeline if s.get("type") == "preproc" and s.get("name") == name), None)
-                    if step is not None:
-                        params = dict(step.get("params") or {})
-                        # keep only known keys if DEFAULT_CONFIG exists
-                        defaults = getattr(PREPROC_REGISTRY[name], 'DEFAULT_CONFIG', {})
-                        for k in list(params.keys()):
-                            if defaults and k not in defaults:
-                                pass
-                        self.pre_params[name] = params
-            # set model (first)
+            for pname in pre_names:
+                if pname in PREPROC_REGISTRY:
+                    self.list_pre_sel.addItem(QListWidgetItem(pname))
+                    step = next((s for s in pipeline if s.get("type") == "preproc" and s.get("name") == pname), None)
+                    if step:
+                        self.pre_params[pname] = dict(step.get("params") or {})
             if mdl_names:
-                idx = self.combo_model.findText(mdl_names[0])
-                if idx >= 0:
-                    self.combo_model.setCurrentIndex(idx)
-                # store model params
-                mdl_step = next((s for s in pipeline if s.get("type") == "model"), None)
+                target = mdl_names[0]
+                mdl_step = next((s for s in pipeline if s.get("type") == "model" and s.get("name") == target), None)
                 if mdl_step:
-                    params = dict(mdl_step.get("params") or {})
-                    # remove init_box if present (auto-init from GT)
-                    if mdl_names[0] in ("CSRT", "OpticalFlowLK"):
-                        params.pop("init_box", None)
-                    self.model_params[mdl_names[0]] = params
-        # evaluator
+                    raw_params = dict(mdl_step.get("params") or {})
+                    if target in ("CSRT", "OpticalFlowLK"):
+                        raw_params.pop("init_box", None)
+                    self.model_params[target] = raw_params
+                    try:
+                        self.log(f"[SyncModelParams] model={target} raw_loaded={raw_params}")
+                    except Exception:
+                        pass
+                idx = self.combo_model.findText(target)
+                if idx >= 0:
+                    old = self.combo_model.blockSignals(True)
+                    self.combo_model.setCurrentIndex(idx)
+                    self.combo_model.blockSignals(old)
+                self._on_model_changed(target)
         ev = (cfg.get("evaluation", {}) or {}).get("evaluator")
         if ev:
             idx = self.combo_eval.findText(ev)
             if idx >= 0:
                 self.combo_eval.setCurrentIndex(idx)
-        # evaluation.visualize
         ev_viz = (cfg.get("evaluation", {}) or {}).get("visualize", {}) or {}
         self.chk_viz.setChecked(bool(ev_viz.get("enabled", False)))
         try:
             self.spn_viz_samples.setValue(int(ev_viz.get("samples", 10) or 10))
         except Exception:
             self.spn_viz_samples.setValue(10)
-        # refresh forms to reflect stored params
         self._on_pre_selected_changed(self.list_pre_sel.currentRow())
-        self._on_model_changed(self.combo_model.currentText())
+        self._syncing = False
 
     def run_pipeline(self):
         import traceback as _tb
@@ -526,14 +530,16 @@ class SimpleRunnerUI(QMainWindow):
             self._pre_bindings.append((key, getter, setter))
 
     def _on_model_changed(self, name: str):
-        # save existing edits for the previous model name
-        if self._current_model_name:
+        # Avoid saving form while syncing from raw
+        if self._current_model_name and not self._syncing:
             self._save_model_form(self._current_model_name)
-        # rebuild form
         self._clear_form(self.model_form_layout)
         self._model_bindings = []
         defaults = getattr(MODEL_REGISTRY[name], 'DEFAULT_CONFIG', {})
-        params = dict(self.model_params.get(name) or defaults)
+        if name in self.model_params and self.model_params[name]:
+            params = {**defaults, **self.model_params[name]}
+        else:
+            params = dict(defaults)
         # sanitize for GT-initialized trackers
         if name in ("CSRT", "OpticalFlowLK"):
             params.pop("init_box", None)
@@ -544,6 +550,16 @@ class SimpleRunnerUI(QMainWindow):
             self._model_bindings.append((key, getter, setter))
         # update current model name after rebuild
         self._current_model_name = name
+        # 診斷：記錄 lr 顯示與來源
+        try:
+            lr_binding = None
+            for k, getter, _ in self._model_bindings:
+                if k.lower() == 'lr':
+                    lr_binding = (k, getter())
+                    break
+            self.log(f"[ModelForm] model={name} form_lr={lr_binding[1] if lr_binding else 'N/A'} stored_params_lr={self.model_params.get(name, {}).get('lr','N/A')} default_lr={defaults.get('lr','N/A')}")
+        except Exception:
+            pass
 
     def _on_model_index_changed(self, idx: int):
         name = self.combo_model.itemText(idx)

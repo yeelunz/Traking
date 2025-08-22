@@ -49,6 +49,8 @@ class FasterRCNNModel(TrackingModel):
     "include_empty_frames": False,
     # prediction behavior
     "fallback_last_prediction": True,
+    # inference efficiency
+    "inference_batch": 4,
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -94,6 +96,68 @@ class FasterRCNNModel(TrackingModel):
         self.model.eval()
         self._device = torch.device(self.device if (self.device == "cpu" or torch.cuda.is_available()) else "cpu")
         self.model.to(self._device)
+        # Lightweight per-video frame reader cache to avoid reopening files for every frame during training
+        self._vfcache = self._VideoFrameCache(max_open=4)
+
+    class _VideoFrameCache:
+        """LRU-style cache for cv2.VideoCapture to minimize open/close overhead.
+
+        Not process-safe; intended for single-process dataloading (num_workers=0 on Windows).
+        """
+        def __init__(self, max_open: int = 4):
+            self.max_open = max(1, int(max_open))
+            self._caps: Dict[str, Any] = {}
+            self._order: List[str] = []  # MRU at end
+
+        def get_frame(self, video_path: str, frame_index: int):
+            import cv2
+            cap = self._caps.get(video_path)
+            if cap is None or not getattr(cap, 'isOpened', lambda: False)():
+                # open new capture, evict LRU if needed
+                try:
+                    cap = cv2.VideoCapture(video_path)
+                except Exception:
+                    cap = None
+                if cap is None or not cap.isOpened():
+                    return None
+                self._caps[video_path] = cap
+                if video_path in self._order:
+                    self._order.remove(video_path)
+                self._order.append(video_path)
+                # evict
+                while len(self._order) > self.max_open:
+                    old = self._order.pop(0)
+                    try:
+                        c = self._caps.pop(old, None)
+                        if c is not None:
+                            c.release()
+                    except Exception:
+                        pass
+            else:
+                # mark as MRU
+                try:
+                    if video_path in self._order:
+                        self._order.remove(video_path)
+                    self._order.append(video_path)
+                except Exception:
+                    pass
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+                ok, frame = cap.read()
+                if not ok:
+                    return None
+                return frame
+            except Exception:
+                return None
+
+        def close_all(self):
+            for k, c in list(self._caps.items()):
+                try:
+                    c.release()
+                except Exception:
+                    pass
+            self._caps.clear()
+            self._order.clear()
 
     def _apply_preprocs_np(self, frame_bgr: np.ndarray) -> np.ndarray:
         if not self.preprocs:
@@ -176,18 +240,8 @@ class FasterRCNNModel(TrackingModel):
         return list(images), list(targets)
 
     def _read_frame(self, video_path: str, frame_index: int) -> Optional[np.ndarray]:
-        import cv2
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return None
-        try:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = cap.read()
-            if not ok:
-                return None
-            return frame
-        finally:
-            cap.release()
+        # Use reusable cache to avoid repeatedly opening the same video during training
+        return self._vfcache.get_frame(video_path, frame_index)
 
     def _targets_from_bboxes(self, bboxes: List[Any], img_h: Optional[int] = None, img_w: Optional[int] = None, image_id: Optional[int] = None) -> Dict[str, Any]:
         # 轉換為 FasterRCNN 期望的 target 結構
@@ -472,6 +526,12 @@ class FasterRCNNModel(TrackingModel):
 
         # 切回 eval 模式
         self.model.eval()
+        # Close any cached video handles
+        try:
+            if hasattr(self, "_vfcache"):
+                self._vfcache.close_all()
+        except Exception:
+            pass
         return {"status": "ok", "history": history}
 
     def load_checkpoint(self, ckpt_path: str):
@@ -500,56 +560,73 @@ class FasterRCNNModel(TrackingModel):
         preds: List[FramePrediction] = []
         idx = 0
         last_bbox = None  # type: Optional[tuple]
+        # small-batch inference to reduce per-call overhead
+        try:
+            batch_size = int(getattr(self, "inference_batch", 4) or 4)
+        except Exception:
+            batch_size = 4
+        frames_buf: List[Any] = []
+        indices_buf: List[int] = []
+        def _flush_batch():
+            nonlocal last_bbox
+            if not frames_buf:
+                return
+            with torch.no_grad():
+                tensors = []
+                for fr in frames_buf:
+                    img = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+                    tensors.append(self._to_tensor(img).to(self._device))
+                outputs_list = self.model(tensors)
+                for out, fidx in zip(outputs_list, indices_buf):
+                    scores = out.get("scores")
+                    boxes = out.get("boxes")
+                    if scores is not None and boxes is not None and len(scores) > 0:
+                        try:
+                            thresh = float(getattr(self, "score_thresh", 0.0))
+                        except Exception:
+                            thresh = 0.0
+                        best_idx = None
+                        try:
+                            above = (scores >= thresh).nonzero(as_tuple=False)
+                            if above is not None and above.numel() > 0:
+                                cand_idx = above.view(-1)
+                                cand_scores = scores[cand_idx]
+                                rel = int(torch.argmax(cand_scores).item())
+                                best_idx = int(cand_idx[rel].item())
+                        except Exception:
+                            best_idx = None
+                        if best_idx is None:
+                            try:
+                                best_idx = int(torch.argmax(scores).item())
+                            except Exception:
+                                best_idx = None
+                        if best_idx is not None:
+                            x1, y1, x2, y2 = boxes[best_idx].tolist()
+                            bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
+                            last_bbox = bbox
+                            sc = float(scores[best_idx].item()) if hasattr(scores, "device") else float(scores[best_idx])
+                            preds.append(FramePrediction(int(fidx), bbox, sc))
+                        else:
+                            if self.fallback_last_prediction and last_bbox is not None:
+                                preds.append(FramePrediction(int(fidx), last_bbox, None))
+                    else:
+                        if self.fallback_last_prediction and last_bbox is not None:
+                            preds.append(FramePrediction(int(fidx), last_bbox, None))
+            frames_buf.clear()
+            indices_buf.clear()
         with torch.no_grad():
             while True:
                 ok, frame = cap.read()
                 if not ok:
                     break
                 frame = self._apply_preprocs_np(frame)
-                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                tensor = self._to_tensor(img).to(self._device)
-                outputs = self.model([tensor])[0]
-                scores = outputs.get("scores")
-                boxes = outputs.get("boxes")
-                if scores is not None and boxes is not None and len(scores) > 0:
-                    # 門檻策略：若有分數>=threshold 的候選，從中取最高分；
-                    # 否則改取所有候選中的最高分（不因未過門檻而直接 fallback），避免輸出「黏住」。
-                    try:
-                        thresh = float(getattr(self, "score_thresh", 0.0))
-                    except Exception:
-                        thresh = 0.0
-                    best_idx = None
-                    # 嘗試在門檻以上的候選中取最佳
-                    try:
-                        above = (scores >= thresh).nonzero(as_tuple=False)
-                        if above is not None and above.numel() > 0:
-                            cand_idx = above.view(-1)
-                            cand_scores = scores[cand_idx]
-                            rel = int(torch.argmax(cand_scores).item())
-                            best_idx = int(cand_idx[rel].item())
-                    except Exception:
-                        best_idx = None
-                    # 若沒有任何候選達門檻，退回所有候選取最佳
-                    if best_idx is None:
-                        try:
-                            best_idx = int(torch.argmax(scores).item())
-                        except Exception:
-                            best_idx = None
-                    if best_idx is not None:
-                        x1, y1, x2, y2 = boxes[best_idx].tolist()
-                        bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
-                        last_bbox = bbox
-                        sc = float(scores[best_idx].item()) if hasattr(scores, "device") else float(scores[best_idx])
-                        preds.append(FramePrediction(idx, bbox, sc))
-                    else:
-                        # 非預期：scores 存在但無法取出 index，改用 fallback（若可用）
-                        if self.fallback_last_prediction and last_bbox is not None:
-                            preds.append(FramePrediction(idx, last_bbox, None))
-                else:
-                    # 若當前幀無偵測，且允許 fallback，使用上一幀的預測填補
-                    if self.fallback_last_prediction and last_bbox is not None:
-                        preds.append(FramePrediction(idx, last_bbox, None))
+                frames_buf.append(frame)
+                indices_buf.append(idx)
+                if len(frames_buf) >= max(1, batch_size):
+                    _flush_batch()
                 idx += 1
+            # flush remaining
+            _flush_batch()
         cap.release()
         return preds
 
@@ -569,6 +646,59 @@ class FasterRCNNModel(TrackingModel):
             raise RuntimeError(f"Cannot open video: {video_path}")
         preds: List[FramePrediction] = []
         last_bbox = None  # type: Optional[tuple]
+        try:
+            batch_size = int(getattr(self, "inference_batch", 4) or 4)
+        except Exception:
+            batch_size = 4
+        buf_frames: List[Any] = []
+        buf_indices: List[int] = []
+        def _flush():
+            nonlocal last_bbox
+            if not buf_frames:
+                return
+            with torch.no_grad():
+                tensors = []
+                for fr in buf_frames:
+                    img = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+                    tensors.append(self._to_tensor(img).to(self._device))
+                outs = self.model(tensors)
+                for out, fidx in zip(outs, buf_indices):
+                    scores = out.get("scores")
+                    boxes = out.get("boxes")
+                    if scores is not None and boxes is not None and len(scores) > 0:
+                        try:
+                            thresh = float(getattr(self, "score_thresh", 0.0))
+                        except Exception:
+                            thresh = 0.0
+                        best_idx = None
+                        try:
+                            above = (scores >= thresh).nonzero(as_tuple=False)
+                            if above is not None and above.numel() > 0:
+                                cand_idx = above.view(-1)
+                                cand_scores = scores[cand_idx]
+                                rel = int(torch.argmax(cand_scores).item())
+                                best_idx = int(cand_idx[rel].item())
+                        except Exception:
+                            best_idx = None
+                        if best_idx is None:
+                            try:
+                                best_idx = int(torch.argmax(scores).item())
+                            except Exception:
+                                best_idx = None
+                        if best_idx is not None:
+                            x1, y1, x2, y2 = boxes[best_idx].tolist()
+                            bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
+                            last_bbox = bbox
+                            sc = float(scores[best_idx].item()) if hasattr(scores, "device") else float(scores[best_idx])
+                            preds.append(FramePrediction(int(fidx), bbox, sc))
+                        else:
+                            if self.fallback_last_prediction and last_bbox is not None:
+                                preds.append(FramePrediction(int(fidx), last_bbox, None))
+                    else:
+                        if self.fallback_last_prediction and last_bbox is not None:
+                            preds.append(FramePrediction(int(fidx), last_bbox, None))
+            buf_frames.clear()
+            buf_indices.clear()
         with torch.no_grad():
             for idx in sorted(set(int(i) for i in frame_indices)):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
@@ -576,42 +706,10 @@ class FasterRCNNModel(TrackingModel):
                 if not ok:
                     continue
                 frame = self._apply_preprocs_np(frame)
-                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                tensor = self._to_tensor(img).to(self._device)
-                outputs = self.model([tensor])[0]
-                scores = outputs.get("scores")
-                boxes = outputs.get("boxes")
-                if scores is not None and boxes is not None and len(scores) > 0:
-                    try:
-                        thresh = float(getattr(self, "score_thresh", 0.0))
-                    except Exception:
-                        thresh = 0.0
-                    best_idx = None
-                    try:
-                        above = (scores >= thresh).nonzero(as_tuple=False)
-                        if above is not None and above.numel() > 0:
-                            cand_idx = above.view(-1)
-                            cand_scores = scores[cand_idx]
-                            rel = int(torch.argmax(cand_scores).item())
-                            best_idx = int(cand_idx[rel].item())
-                    except Exception:
-                        best_idx = None
-                    if best_idx is None:
-                        try:
-                            best_idx = int(torch.argmax(scores).item())
-                        except Exception:
-                            best_idx = None
-                    if best_idx is not None:
-                        x1, y1, x2, y2 = boxes[best_idx].tolist()
-                        bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
-                        last_bbox = bbox
-                        sc = float(scores[best_idx].item()) if hasattr(scores, "device") else float(scores[best_idx])
-                        preds.append(FramePrediction(int(idx), bbox, sc))
-                    else:
-                        if self.fallback_last_prediction and last_bbox is not None:
-                            preds.append(FramePrediction(int(idx), last_bbox, None))
-                else:
-                    if self.fallback_last_prediction and last_bbox is not None:
-                        preds.append(FramePrediction(int(idx), last_bbox, None))
+                buf_frames.append(frame)
+                buf_indices.append(int(idx))
+                if len(buf_frames) >= max(1, batch_size):
+                    _flush()
+            _flush()
         cap.release()
         return preds

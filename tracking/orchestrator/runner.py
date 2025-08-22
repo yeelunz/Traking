@@ -118,6 +118,24 @@ class PipelineRunner:
                         m = cls(step.get("params", {}))
                         if hasattr(m, "preprocs"):
                             setattr(m, "preprocs", preprocs)
+                        # --- 新增：記錄模型實際使用的參數快照，方便偵錯 UI 傳參是否正確 ---
+                        try:
+                            # 可能的參數名稱集合（通用 + FasterRCNN 常見）
+                            cand_keys = {
+                                'device','pretrained','num_classes','epochs','batch_size','lr','weight_decay','momentum',
+                                'optimizer_name','optimizer','step_size','gamma','grad_clip','detect_anomaly','include_empty_frames',
+                                'fallback_last_prediction','score_thresh','adamw_betas','adamw_eps','inference_batch','num_workers','pin_memory'
+                            }
+                            snap = {}
+                            for k in sorted(cand_keys):
+                                if hasattr(m, k):
+                                    v = getattr(m, k)
+                                    # 避免張量 / 模型本體被序列化
+                                    if not hasattr(v, 'parameters') and not isinstance(v, (type(m.model),)):
+                                        snap[k] = v
+                            self._log(f"[ModelConfig] model={step['name']} params={snap}")
+                        except Exception:
+                            pass
                         ms.append((step["name"], m))
                     except Exception as _e_inst:
                         self._log(f"[ERROR] Model init failed | model={step['name']} error={_e_inst}\n{_tb.format_exc()}")

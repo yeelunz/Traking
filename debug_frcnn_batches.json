@@ -1,0 +1,306 @@
+[
+  {
+    "batch_index": 0,
+    "loss_total": 0.6763888001441956,
+    "loss_classifier": 0.5884731411933899,
+    "loss_box_reg": 0.07108201831579208,
+    "loss_objectness": 0.013114310801029205,
+    "loss_rpn_box_reg": 0.0037193563766777515,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 39.97502136230469,
+    "box_w_max": 42.45001220703125,
+    "box_h_mean": 56.605003356933594,
+    "box_h_max": 58.02000427246094,
+    "videos": [
+      "2025-08-18 17-31-55.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      75,
+      0
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 1,
+    "loss_total": 0.7170276045799255,
+    "loss_classifier": 0.6150259971618652,
+    "loss_box_reg": 0.07539893686771393,
+    "loss_objectness": 0.02465846762061119,
+    "loss_rpn_box_reg": 0.0019442372722551227,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 32.54998779296875,
+    "box_w_max": 35.379974365234375,
+    "box_h_mean": 69.33499145507812,
+    "box_h_max": 70.03999328613281,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-29-35.mkv"
+    ],
+    "frame_indices": [
+      0,
+      17
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 2,
+    "loss_total": 0.7243146896362305,
+    "loss_classifier": 0.627983570098877,
+    "loss_box_reg": 0.06719411164522171,
+    "loss_objectness": 0.027866004034876823,
+    "loss_rpn_box_reg": 0.001271011191420257,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 30.774993896484375,
+    "box_w_max": 31.1300048828125,
+    "box_h_mean": 58.37000274658203,
+    "box_h_max": 68.6300048828125,
+    "videos": [
+      "2025-08-18 17-29-04.mkv",
+      "2025-08-18 17-31-37.mkv"
+    ],
+    "frame_indices": [
+      22,
+      147
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 3,
+    "loss_total": 0.7340565919876099,
+    "loss_classifier": 0.639554500579834,
+    "loss_box_reg": 0.08858634531497955,
+    "loss_objectness": 0.0046617817133665085,
+    "loss_rpn_box_reg": 0.001253969152458012,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 38.209991455078125,
+    "box_w_max": 38.209991455078125,
+    "box_h_mean": 54.475006103515625,
+    "box_h_max": 58.72001647949219,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-31-47.mkv"
+    ],
+    "frame_indices": [
+      146,
+      67
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 4,
+    "loss_total": 0.7214669585227966,
+    "loss_classifier": 0.6146821975708008,
+    "loss_box_reg": 0.07859721034765244,
+    "loss_objectness": 0.02296142280101776,
+    "loss_rpn_box_reg": 0.00522614736109972,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.67999267578125,
+    "box_w_max": 42.449981689453125,
+    "box_h_mean": 55.53999328613281,
+    "box_h_max": 58.019989013671875,
+    "videos": [
+      "2025-08-18 17-27-56.mkv",
+      "2025-08-18 17-32-20.mkv"
+    ],
+    "frame_indices": [
+      71,
+      92
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 5,
+    "loss_total": 0.7325930595397949,
+    "loss_classifier": 0.6212575435638428,
+    "loss_box_reg": 0.07381604611873627,
+    "loss_objectness": 0.033680062741041183,
+    "loss_rpn_box_reg": 0.003839378710836172,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 36.790008544921875,
+    "box_w_max": 41.740020751953125,
+    "box_h_mean": 57.31000518798828,
+    "box_h_max": 58.019989013671875,
+    "videos": [
+      "2025-08-18 17-32-20.mkv",
+      "2025-08-18 17-29-04.mkv"
+    ],
+    "frame_indices": [
+      61,
+      73
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 6,
+    "loss_total": 0.6881616115570068,
+    "loss_classifier": 0.6247876882553101,
+    "loss_box_reg": 0.04029267653822899,
+    "loss_objectness": 0.017828330397605896,
+    "loss_rpn_box_reg": 0.005252881906926632,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 40.67999267578125,
+    "box_w_max": 44.569976806640625,
+    "box_h_mean": 62.61499786376953,
+    "box_h_max": 63.67999267578125,
+    "videos": [
+      "2025-08-18 17-28-11.mkv",
+      "2025-08-18 17-27-56.mkv"
+    ],
+    "frame_indices": [
+      223,
+      62
+    ],
+    "outlier_mad10": false
+  },
+  {
+    "batch_index": 7,
+    "loss_total": 0.8035954833030701,
+    "loss_classifier": 0.6374050974845886,
+    "loss_box_reg": 0.14383447170257568,
+    "loss_objectness": 0.020607471466064453,
+    "loss_rpn_box_reg": 0.0017484172713011503,
+    "n_images": 2,
+    "img_shapes": [
+      [
+        3,
+        490,
+        872
+      ],
+      [
+        3,
+        490,
+        872
+      ]
+    ],
+    "per_image_box_counts": [
+      1,
+      1
+    ],
+    "box_w_mean": 37.5,
+    "box_w_max": 39.6199951171875,
+    "box_h_mean": 52.00499725341797,
+    "box_h_max": 54.47999572753906,
+    "videos": [
+      "2025-08-18 17-31-47.mkv",
+      "2025-08-18 17-27-00.mkv"
+    ],
+    "frame_indices": [
+      40,
+      164
+    ],
+    "outlier_mad10": false
+  }
+]

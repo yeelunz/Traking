@@ -341,16 +341,20 @@ class YOLOv11Model(TrackingModel):
         preds: List[FramePrediction] = []
         idx = 0
         last_bbox: Optional[tuple] = None
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            frame = self._apply_preprocs_np(frame)
-
-            # Run YOLO inference on the frame (BGR is acceptable)
+        # small-batch prediction to reduce per-call overhead
+        try:
+            batch_size = int(getattr(self, "inference_batch", 4) or 4)
+        except Exception:
+            batch_size = 4
+        frames_buf = []
+        idx_buf: List[int] = []
+        def _flush():
+            nonlocal last_bbox
+            if not frames_buf:
+                return
             try:
-                results = self.model.predict(
-                    source=frame,
+                results_list = self.model.predict(
+                    source=frames_buf,
                     conf=self.conf,
                     iou=self.iou,
                     imgsz=self.imgsz,
@@ -359,33 +363,41 @@ class YOLOv11Model(TrackingModel):
                     verbose=False,
                     max_det=self.max_det,
                 )
-            except Exception as e:
-                # If inference fails on this frame, skip but keep index advancing
-                results = []
-
-            bbox_added = False
-            if results:
-                r0 = results[0]
+            except Exception:
+                results_list = []
+            for res, fidx in zip(results_list or [], idx_buf):
+                bbox_added = False
                 try:
-                    boxes = getattr(r0, "boxes", None)
+                    boxes = getattr(res, "boxes", None)
                     if boxes is not None and len(boxes) > 0:
-                        # Choose highest-confidence box
                         confs = boxes.conf.cpu().numpy().astype(float)
                         best = int(np.argmax(confs))
-                        xyxy = boxes.xyxy.cpu().numpy()[best].tolist()  # [x1,y1,x2,y2]
+                        xyxy = boxes.xyxy.cpu().numpy()[best].tolist()
                         x1, y1, x2, y2 = map(float, xyxy)
                         w = max(1.0, x2 - x1)
                         h = max(1.0, y2 - y1)
                         score = float(confs[best])
                         bbox = (float(x1), float(y1), float(w), float(h))
-                        preds.append(FramePrediction(idx, bbox, score))
+                        preds.append(FramePrediction(int(fidx), bbox, score))
                         last_bbox = bbox
                         bbox_added = True
                 except Exception:
-                    pass
-            if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
-                preds.append(FramePrediction(idx, last_bbox, None))
+                    bbox_added = False
+                if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
+                    preds.append(FramePrediction(int(fidx), last_bbox, None))
+            frames_buf.clear()
+            idx_buf.clear()
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame = self._apply_preprocs_np(frame)
+            frames_buf.append(frame)
+            idx_buf.append(idx)
+            if len(frames_buf) >= max(1, batch_size):
+                _flush()
             idx += 1
+        _flush()
 
         cap.release()
         return preds
@@ -400,15 +412,19 @@ class YOLOv11Model(TrackingModel):
             raise RuntimeError(f"Cannot open video: {video_path}")
         preds: List[FramePrediction] = []
         last_bbox: Optional[tuple] = None
-        for idx in sorted(set(int(i) for i in frame_indices)):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            frame = self._apply_preprocs_np(frame)
+        try:
+            batch_size = int(getattr(self, "inference_batch", 4) or 4)
+        except Exception:
+            batch_size = 4
+        buf_frames = []
+        buf_indices: List[int] = []
+        def _flush():
+            nonlocal last_bbox
+            if not buf_frames:
+                return
             try:
-                results = self.model.predict(
-                    source=frame,
+                results_list = self.model.predict(
+                    source=buf_frames,
                     conf=self.conf,
                     iou=self.iou,
                     imgsz=self.imgsz,
@@ -417,13 +433,12 @@ class YOLOv11Model(TrackingModel):
                     verbose=False,
                     max_det=self.max_det,
                 )
-            except Exception as e:
-                results = []
-            bbox_added = False
-            if results:
-                r0 = results[0]
+            except Exception:
+                results_list = []
+            for res, fidx in zip(results_list or [], buf_indices):
+                bbox_added = False
                 try:
-                    boxes = getattr(r0, "boxes", None)
+                    boxes = getattr(res, "boxes", None)
                     if boxes is not None and len(boxes) > 0:
                         confs = boxes.conf.cpu().numpy().astype(float)
                         best = int(np.argmax(confs))
@@ -433,12 +448,24 @@ class YOLOv11Model(TrackingModel):
                         h = max(1.0, y2 - y1)
                         score = float(confs[best])
                         bbox = (float(x1), float(y1), float(w), float(h))
-                        preds.append(FramePrediction(int(idx), bbox, score))
+                        preds.append(FramePrediction(int(fidx), bbox, score))
                         last_bbox = bbox
                         bbox_added = True
                 except Exception:
-                    pass
-            if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
-                preds.append(FramePrediction(int(idx), last_bbox, None))
+                    bbox_added = False
+                if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
+                    preds.append(FramePrediction(int(fidx), last_bbox, None))
+            buf_frames.clear(); buf_indices.clear()
+        for idx in sorted(set(int(i) for i in frame_indices)):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            frame = self._apply_preprocs_np(frame)
+            buf_frames.append(frame)
+            buf_indices.append(int(idx))
+            if len(buf_frames) >= max(1, batch_size):
+                _flush()
+        _flush()
         cap.release()
         return preds
