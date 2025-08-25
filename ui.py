@@ -1,12 +1,5 @@
 from __future__ import annotations
 import json, os
-
-# Ensure Matplotlib uses a non-interactive backend to avoid GUI initialization
-# inside worker threads (worker threads creating GUI backends can crash the
-# Qt application when running pipelines sequentially). This env var is read
-# by matplotlib at import time; setting it here before any evaluator/module
-# imports prevents GUI backends from being selected in worker threads.
-os.environ.setdefault('MPLBACKEND', 'Agg')
 from typing import Optional, Dict, Any, List, Tuple
 
 from PySide6.QtCore import Qt, QRegularExpression, QTimer, QObject, Signal, QThread

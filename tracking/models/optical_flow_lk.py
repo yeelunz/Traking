@@ -27,6 +27,13 @@ class OpticalFlowLK(TrackingModel):
         "quality_level": 0.01,
         "min_distance": 7,
         "win_size": 21,
+    # 新增：長影片避免耗時與“卡住”錯覺的控制參數
+    # 若為 True，當超過最後一個有 GT 的 frame 後即停止（評估 restrict_to_gt_frames 時不需跑整部片）
+    "stop_at_last_gt": True,
+    # 強制最多處理多少 frame（None=不限）
+    "max_eval_frames": None,
+    # 每處理多少 frame 列印一次除錯訊息（0/None=不列印）
+    "log_every": 500,
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -38,6 +45,17 @@ class OpticalFlowLK(TrackingModel):
         self.min_distance = int(config.get("min_distance", 7))
         self.win_size = int(config.get("win_size", 21))
         self.preprocs: List[PreprocessingModule] = []
+        self.stop_at_last_gt = bool(config.get("stop_at_last_gt", self.DEFAULT_CONFIG["stop_at_last_gt"]))
+        self.max_eval_frames = config.get("max_eval_frames", self.DEFAULT_CONFIG["max_eval_frames"])  # 可能是 None or int
+        try:
+            if self.max_eval_frames is not None:
+                self.max_eval_frames = int(self.max_eval_frames)
+        except Exception:
+            self.max_eval_frames = None
+        try:
+            self.log_every = int(config.get("log_every", self.DEFAULT_CONFIG["log_every"]) or 0)
+        except Exception:
+            self.log_every = 0
 
     def train(self, train_dataset, val_dataset=None, seed: int = 0, output_dir: str | None = None):
         cb = getattr(self, 'progress_callback', None)
@@ -88,6 +106,20 @@ class OpticalFlowLK(TrackingModel):
         bbox = None
         pts_prev = None
         t = 0
+        last_gt_frame: Optional[int] = None
+        gt_frames_sorted: List[int] = []
+        if self.stop_at_last_gt:
+            # 輕量載入一次 JSON 拿到所有有標註的 frame index
+            import os as _os
+            j = _os.path.splitext(video_path)[0] + ".json"
+            if _os.path.exists(j):
+                try:
+                    gt = load_coco_vid(j)
+                    gt_frames_sorted = sorted(int(fi) for fi, boxes in (gt.get("frames", {}) or {}).items() if boxes)
+                    if gt_frames_sorted:
+                        last_gt_frame = gt_frames_sorted[-1]
+                except Exception:
+                    pass
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -139,5 +171,15 @@ class OpticalFlowLK(TrackingModel):
             prev_gray = gray
             pts_prev = good_new if len(good_new) else pts_prev
             t += 1
+            # 早停條件：達到最後 GT frame 且再多補 1~2 frame 已足夠（保持 bbox 最終定位）
+            if last_gt_frame is not None and t > last_gt_frame + 2:
+                break
+            if self.max_eval_frames is not None and t >= self.max_eval_frames:
+                break
+            if self.log_every and (t % self.log_every == 0):
+                try:
+                    print(f"[OpticalFlowLK] processed {t} frames (video={video_path})")
+                except Exception:
+                    pass
         cap.release()
         return preds

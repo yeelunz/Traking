@@ -99,7 +99,10 @@ class PipelineRunner:
         for exp in self.cfg.get("experiments", []):
             exp_name = exp.get("name", "exp")
             out_dir = self._timestamp_dir(exp_name)
-            meta = {"config": exp, "seed": self.seed, "env": capture_env()}
+            # 允許在 config.output.skip_pip_freeze = true 時跳過 pip freeze 以避免卡住
+            out_cfg = self.cfg.get("output", {}) or {}
+            skip_freeze = bool(out_cfg.get("skip_pip_freeze", False))
+            meta = {"config": exp, "seed": self.seed, "env": capture_env(skip_freeze=skip_freeze)}
             with open(os.path.join(out_dir, "metadata.json"), "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             # init log file for this experiment
