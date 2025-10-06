@@ -1,0 +1,34 @@
+seed: 42
+dataset:
+  root: C:/Users/User/Desktop/翊倫實驗資料/CTS資料集/us_0912_relabel
+  split:
+    method: video_level
+    ratios:
+    - 0.8
+    - 0.2
+    k_fold: 1
+experiments:
+- name: exp_no_pre_StrongSORT
+  pipeline:
+  - type: model
+    name: StrongSORT
+    params:
+      weights: best.pt
+      conf: 0.25
+      iou: 0.5
+      imgsz: 640
+      device: cuda
+      classes: null
+      max_det: 300
+      max_cosine_distance: 0.3
+      nn_budget: 100
+      max_iou_distance: 0.7
+      max_age: 30
+      n_init: 3
+      feature_bins: 16
+      target_track_id: null
+      target_strategy: auto
+      fallback_last_prediction: true
+      min_confidence: 0.05
+evaluation:
+  evaluator: BasicEvaluator

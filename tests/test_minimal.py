@@ -1,4 +1,5 @@
 from tracking.orchestrator.runner import PipelineRunner
+from tracking.core.registry import MODEL_REGISTRY
 
 
 def test_imports():
@@ -15,3 +16,7 @@ def test_imports():
     }
     runner = PipelineRunner(cfg)
     assert runner is not None
+
+
+def test_strongsort_registered():
+    assert "StrongSORT" in MODEL_REGISTRY

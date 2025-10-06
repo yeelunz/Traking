@@ -1,0 +1,44 @@
+seed: 42
+
+dataset:
+  # 將此處改成資料集根目錄（包含影片與同名 .json 標註）
+  root: "C:/path/to/your/dataset"
+  split:
+    method: "video_level"
+    ratios: [0.8, 0.2]
+    k_fold: 1
+
+experiments:
+  - name: "exp_OCSort_default"
+    pipeline:
+      # 可視需求啟用前處理模組，例如 CLAHE
+      # - type: "preproc"
+      #   name: "CLAHE"
+      #   params: {clipLimit: 2.0, tileGridSize: [8,8]}
+      - type: "model"
+        name: "OCSort"
+        params:
+          # Ultralytics YOLOv11 偵測器設定
+          weights: "yolo11n.pt"
+          conf: 0.3
+          iou: 0.5
+          imgsz: 640
+          device: "cuda"   # 若無 GPU 可改成 "cpu"
+          max_det: 300
+          # OC-SORT 追蹤器核心超參數
+          det_thresh: 0.05
+          max_age: 30
+          min_hits: 3
+          tracker_iou_threshold: 0.3
+          delta_t: 3
+          inertia: 0.2
+          use_byte: false
+          # 單目標輸出策略
+          fallback_last_prediction: true
+          target_strategy: "auto"
+
+evaluation:
+  evaluator: "BasicEvaluator"
+  visualize:
+    enabled: true
+    samples: 10
