@@ -48,6 +48,7 @@ class YOLOv11Model(TrackingModel):
             detail = f" underlying import error: {_ULTRA_IMPORT_ERROR!r}" if _ULTRA_IMPORT_ERROR else ""
             raise RuntimeError(f"Ultralytics 'ultralytics' package is required for YOLOv11 model.{detail}")
 
+        # --- Config params ---
         self.weights = str(config.get("weights", self.DEFAULT_CONFIG["weights"]))
         self.conf = float(config.get("conf", self.DEFAULT_CONFIG["conf"]))
         self.iou = float(config.get("iou", self.DEFAULT_CONFIG["iou"]))
@@ -56,28 +57,33 @@ class YOLOv11Model(TrackingModel):
         self.classes = config.get("classes", self.DEFAULT_CONFIG["classes"])  # type: ignore
         self.max_det = int(config.get("max_det", self.DEFAULT_CONFIG["max_det"]))
         self.fallback_last_prediction = bool(config.get("fallback_last_prediction", self.DEFAULT_CONFIG["fallback_last_prediction"]))
+        self.include_empty_frames = bool(config.get("include_empty_frames", self.DEFAULT_CONFIG.get("include_empty_frames", False)))
 
-        # allow runner to inject preprocessing chain
+        # --- Training-specific (之前未保存 -> 導致 epochs 等使用預設值) ---
+        # 保留在實例屬性上，train() 透過 getattr 可取到覆寫值
+        self.epochs = int(config.get("epochs", self.DEFAULT_CONFIG["epochs"]))
+        self.batch = int(config.get("batch", self.DEFAULT_CONFIG["batch"]))
+        self.lr0 = float(config.get("lr0", self.DEFAULT_CONFIG["lr0"]))
+        self.patience = int(config.get("patience", self.DEFAULT_CONFIG["patience"]))
+        self.workers = int(config.get("workers", self.DEFAULT_CONFIG["workers"]))
+
+        # --- Runtime-injected preproc chain ---
         self.preprocs: List[PreprocessingModule] = []
 
-        # Build model (weights path or model name) with safe retry for corrupted local files
+        # --- Build / load weights with corruption fallback ---
         try:
             self.model = YOLO(self.weights)
         except Exception as e:
-            # If a local file with this name exists and appears corrupted, try removing it and retry once
             try:
                 if os.path.exists(self.weights) and os.path.isfile(self.weights):
-                    # only attempt cleanup for small/invalid files
+                    size = -1
                     try:
                         size = os.path.getsize(self.weights)
                     except Exception:
-                        size = -1
-                    # heuristic: if file size is unusually small (< 1024 bytes) or loading failed, remove to allow redownload
-                    if size >= 0 and size < 1024:
-                        try:
-                            os.remove(self.weights)
-                        except Exception:
-                            pass
+                        pass
+                    if 0 <= size < 1024:
+                        try: os.remove(self.weights)
+                        except Exception: pass
                         try:
                             self.model = YOLO(self.weights)
                             e = None
@@ -88,11 +94,10 @@ class YOLOv11Model(TrackingModel):
             if e is not None:
                 raise RuntimeError(
                     f"Failed to load YOLOv11 weights '{self.weights}': {e}.\n"
-                    "Common causes: the local .pt file is corrupted (partial download) or not a valid torch checkpoint.\n"
-                    "Fixes: remove the corrupted file and retry, or set params.weights to a valid checkpoint name/path (e.g. 'yolov8n.pt' or full path to your best.pt)."
+                    "Common causes: corrupted or partial .pt file. Remove it and retry, or set params.weights to a valid checkpoint."
                 )
 
-        # Resolve device string (use CPU if CUDA not available)
+        # --- Resolve device (fallback to CPU if CUDA not available) ---
         try:
             import torch  # type: ignore
             if self.device != "cpu" and not torch.cuda.is_available():
@@ -177,11 +182,7 @@ class YOLOv11Model(TrackingModel):
             from ..utils.annotations import load_coco_vid
             import cv2
             count = 0
-            include_empty = bool(self.DEFAULT_CONFIG.get("include_empty_frames", False))
-            try:
-                include_empty = bool(getattr(self, "include_empty_frames", include_empty))
-            except Exception:
-                pass
+            include_empty = bool(getattr(self, "include_empty_frames", False))
             for i in range(len(dataset)):
                 item = dataset[i]
                 vp: str = item["video_path"]

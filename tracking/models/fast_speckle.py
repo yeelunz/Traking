@@ -27,8 +27,8 @@ class FASTSpeckle(TrackingModel):
     - Track with LK optical flow; update bbox by median displacement.
     - Re-detect when features get too few or periodically.
     """
-
-    name = "FASTSpeckle"
+    # 對外顯示名稱改為 NCC（Normalized Cross-Correlation 取向的簡稱）
+    name = "NCC"
     DEFAULT_CONFIG = {
         # FAST detector
         "fast_threshold": 20,
@@ -48,7 +48,7 @@ class FASTSpeckle(TrackingModel):
 
     def __init__(self, config: Dict[str, Any]):
         if cv2 is None:
-            raise RuntimeError("OpenCV is required for FASTSpeckle.")
+            raise RuntimeError("OpenCV is required for NCC (FASTSpeckle).")
         self.fast_threshold = int(config.get("fast_threshold", self.DEFAULT_CONFIG["fast_threshold"]))
         self.fast_nonmax = bool(config.get("fast_nonmax", self.DEFAULT_CONFIG["fast_nonmax"]))
         self.max_features = int(config.get("max_features", self.DEFAULT_CONFIG["max_features"]))
@@ -211,7 +211,7 @@ class FASTSpeckle(TrackingModel):
                 if self.debug:
                     try:
                         n = 0 if pts_prev is None else len(pts_prev)
-                        print(f"[FASTSpeckle] init roi=({int(x)},{int(y)},{int(iw)},{int(ih)}) features={n}")
+                        print(f"[NCC] init roi=({int(x)},{int(y)},{int(iw)},{int(ih)}) features={n}")
                     except Exception:
                         pass
                 preds.append(FramePrediction(t, bbox, 1.0))
@@ -232,7 +232,7 @@ class FASTSpeckle(TrackingModel):
                 if self.debug:
                     try:
                         n = 0 if new_pts is None else len(new_pts)
-                        print(f"[FASTSpeckle] reinit@{t}: features={n}")
+                        print(f"[NCC] reinit@{t}: features={n}")
                     except Exception:
                         pass
             if pts_prev is None or len(pts_prev) == 0 or bbox is None:
@@ -259,7 +259,7 @@ class FASTSpeckle(TrackingModel):
                 bbox = (x, y, w, h)
             if self.debug:
                 try:
-                    print(f"[FASTSpeckle] frame={t} tracked={len(good_new)} bbox=({int(bbox[0])},{int(bbox[1])},{int(bbox[2])},{int(bbox[3])})")
+                    print(f"[NCC] frame={t} tracked={len(good_new)} bbox=({int(bbox[0])},{int(bbox[1])},{int(bbox[2])},{int(bbox[3])})")
                 except Exception:
                     pass
             preds.append(FramePrediction(t, bbox, 1.0))
@@ -268,3 +268,10 @@ class FASTSpeckle(TrackingModel):
             t += 1
         cap.release()
         return preds
+
+# 兼容性：允許以 "NCC" 名稱引用此模型
+try:
+    from ..core.registry import MODEL_REGISTRY  # type: ignore
+    MODEL_REGISTRY.setdefault("NCC", FASTSpeckle)
+except Exception:
+    pass

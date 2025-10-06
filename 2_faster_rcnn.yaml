@@ -1,0 +1,36 @@
+seed: 42
+dataset:
+  root: C:/Users/User/Desktop/翊倫實驗資料/CTS資料集/超音波檔案0912_extended_label
+  split:
+    method: video_level
+    ratios:
+    - 0.8
+    - 0.2
+    k_fold: 1
+experiments:
+- name: exp_CLAHE_SRAD_TemplateMatching
+  pipeline:
+  - type: preproc
+    name: CLAHE
+    params:
+      clipLimit: 2.0
+      tileGridSize:
+      - 8
+      - 8
+  - type: preproc
+    name: SRAD
+    params:
+      iterations: 10
+      lambda: 0.15
+      eps: 1.0e-06
+      convert_gray: true
+  - type: model
+    name: TemplateMatching
+    params:
+      method: TM_CCOEFF_NORMED
+      template_size:
+      - 64
+      - 64
+      search_margin: 32
+evaluation:
+  evaluator: BasicEvaluator

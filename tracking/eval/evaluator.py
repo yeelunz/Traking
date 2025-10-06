@@ -80,6 +80,24 @@ class BasicEvaluator:
                 "precision": precision, "recall": recall, "ap": ap,
             }
         for model_name, preds in predictions.items():
+            # --- Debug coverage stats (before metric loops) ---
+            try:
+                gt_frames_nonempty = sorted([int(fi) for fi, boxes in frames_gt.items() if boxes])
+            except Exception:
+                gt_frames_nonempty = []
+            total_gt_frames = len(gt_frames_nonempty)
+            pred_frame_indices_all = [int(getattr(p, 'frame_index', -1)) for p in preds]
+            unique_pred_frames = sorted(set(pred_frame_indices_all))
+            total_pred_frames = len(unique_pred_frames)
+            # direct intersection (frames with at least one GT box and at least one pred)
+            matched_frames = len(set(gt_frames_nonempty) & set(unique_pred_frames))
+            coverage_ratio = (matched_frames / total_gt_frames) if total_gt_frames > 0 else 0.0
+            gt_frame_range = [min(gt_frames_nonempty), max(gt_frames_nonempty)] if gt_frames_nonempty else [None, None]
+            pred_frame_range = [min(unique_pred_frames), max(unique_pred_frames)] if unique_pred_frames else [None, None]
+            # heuristic: suggested constant offset to maximize overlap using first frame indices
+            suggested_offset = None
+            if gt_frames_nonempty and unique_pred_frames:
+                suggested_offset = int(gt_frames_nonempty[0]) - int(unique_pred_frames[0])
             ious: List[float] = []
             ces: List[float] = []
             per_frame_rows: List[List[Any]] = [["frame_index", "iou", "center_error"]]
@@ -171,6 +189,14 @@ class BasicEvaluator:
                 # EAO metrics (per-sequence)
                 "EAO": float(eao),
                 "EAO_L": int(L_max),
+                # --- Debug coverage fields ---
+                "debug_total_gt_frames": total_gt_frames,
+                "debug_total_pred_frames": total_pred_frames,
+                "debug_matched_frames": matched_frames,
+                "debug_coverage_ratio": coverage_ratio,
+                "debug_gt_frame_range": gt_frame_range,
+                "debug_pred_frame_range": pred_frame_range,
+                "debug_suggested_constant_offset": suggested_offset,
             }
             results[model_name] = summary
             os.makedirs(out_dir, exist_ok=True)

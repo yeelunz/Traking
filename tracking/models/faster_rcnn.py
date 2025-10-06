@@ -397,7 +397,18 @@ class FasterRCNNModel(TrackingModel):
             optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay, betas=self.adamw_betas, eps=self.adamw_eps)
         else:
             optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay)
-        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=self.step_size, gamma=self.gamma)
+        # Scheduler（防呆：step_size<=0 會造成 ZeroDivisionError）
+        try:
+            safe_step = int(self.step_size) if isinstance(self.step_size, (int, float)) else 1
+        except Exception:
+            safe_step = 1
+        if safe_step < 1:
+            try:
+                print("[FasterRCNN] Invalid step_size<=0 provided; defaulting to 1 to avoid ZeroDivisionError.")
+            except Exception:
+                pass
+        safe_step = max(1, int(safe_step))
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=safe_step, gamma=self.gamma)
 
         history = {"train_loss": [], "val_loss": []}
 

@@ -15,7 +15,8 @@ from tracking.orchestrator.runner import PipelineRunner
 from tracking.core.registry import PREPROC_REGISTRY, MODEL_REGISTRY, EVAL_REGISTRY
 # populate registries
 from tracking.preproc import clahe  # noqa: F401
-from tracking.models import template_matching, csrt, optical_flow_lk, faster_rcnn, yolov11, fast_speckle  # noqa: F401
+from tracking.models import template_matching, optical_flow_lk, faster_rcnn, yolov11, fast_speckle  # noqa: F401
+"""注意: CSRT 模型已被停用 (不再匯入)。若需恢復，請在 tracking/models/__init__.py 取消註解 csrt 匯入。"""
 from tracking.eval import evaluator  # noqa: F401
 
 
@@ -115,7 +116,12 @@ class SimpleRunnerUI(QMainWindow):
         # Model + params
         gb_model = QGroupBox("Model"); vb_model = QVBoxLayout(gb_model)
         row_m = QHBoxLayout(); row_m.addWidget(QLabel("Name:"))
-        self.combo_model = QComboBox(); [self.combo_model.addItem(n) for n in sorted(MODEL_REGISTRY.keys())]
+        self.combo_model = QComboBox()
+        # 排除已停用的 CSRT 模型
+        for n in sorted(MODEL_REGISTRY.keys()):
+            if n == 'CSRT':
+                continue
+            self.combo_model.addItem(n)
         self.combo_model.currentIndexChanged.connect(self._on_model_index_changed)
         row_m.addWidget(self.combo_model, 1); vb_model.addLayout(row_m)
         self.model_form_layout = QFormLayout(); gb_model_params = QGroupBox("Model 參數（即時）"); gb_model_params.setLayout(self.model_form_layout); vb_model.addWidget(gb_model_params)
@@ -464,7 +470,29 @@ class SimpleRunnerUI(QMainWindow):
             w = QCheckBox(); register(w, 'stateChanged')
             return w, lambda: bool(w.isChecked()), lambda v: w.setChecked(bool(v))
         if isinstance(value, int):
-            w = NoWheelSpinBox(); w.setRange(-10**9, 10**9); register(w, 'valueChanged')
+            w = NoWheelSpinBox()
+            # Provide safer ranges for known keys to avoid invalid hyperparams (e.g., StepLR step_size>0)
+            if key in ("batch_size", "epochs", "k_fold", "num_workers", "inference_batch", "step_size"):
+                # clamp to at least 1 where required
+                lo = 0 if key in ("num_workers",) else 1
+                hi = 10**9
+                w.setRange(lo, hi)
+                def _set_int(v):
+                    try:
+                        iv = int(v)
+                    except Exception:
+                        iv = lo
+                    if key == "step_size" and iv < 1:
+                        iv = 1
+                    if key in ("batch_size", "epochs", "k_fold", "inference_batch") and iv < 1:
+                        iv = 1
+                    if key == "num_workers" and iv < 0:
+                        iv = 0
+                    w.setValue(iv)
+                register(w, 'valueChanged')
+                return w, lambda: int(w.value()), _set_int
+            # Fallback generic int editor
+            w.setRange(-10**9, 10**9); register(w, 'valueChanged')
             return w, lambda: int(w.value()), lambda v: w.setValue(int(v))
         if isinstance(value, float):
             w = QLineEdit();
@@ -561,40 +589,45 @@ class SimpleRunnerUI(QMainWindow):
             finished = Signal()
             error = Signal(str)
             progress = Signal(str, int, int, dict)
+            log = Signal(str)
 
-            def __init__(self, cfg, logger):
+            def __init__(self, cfg):
                 super().__init__()
                 self.cfg = cfg
-                self.logger = logger
 
             def run(self):
                 from traceback import format_exc
                 try:
+                    def _logger(msg: str):
+                        self.log.emit(msg)
                     runner = PipelineRunner(
                         self.cfg,
-                        logger=self.logger,
+                        logger=_logger,
                         progress_cb=lambda stage, cur, tot, extra: self.progress.emit(stage, cur, tot, extra)
                     )
                     runner.run()
                     self.finished.emit()
                 except Exception as e:
-                    self.logger(f'執行錯誤: {e}\n{format_exc()}')
+                    self.log.emit(f'執行錯誤: {e}\n{format_exc()}')
                     self.error.emit(str(e))
 
+        # UI 更新 (主執行緒)
         self.log('開始執行…')
         self._set_status('執行中…')
         self.progress.show()
-        self.progress.setRange(0, 0)  # start indeterminate until first progress event
+        self.progress.setRange(0, 0)
         self.btn_run.setEnabled(False)
         self.btn_load.setEnabled(False)
 
+        # Thread setup
         self._run_thread = QThread(self)
-        self._run_worker = _Worker(cfg, self.log)
+        self._run_worker = _Worker(cfg)
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
         self._run_worker.finished.connect(self._on_run_finished)
         self._run_worker.error.connect(self._on_run_error)
         self._run_worker.progress.connect(self._on_progress_event)
+        self._run_worker.log.connect(self.log)
         self._run_worker.finished.connect(self._cleanup_run_thread)
         self._run_worker.error.connect(self._cleanup_run_thread)
         self._run_thread.start()

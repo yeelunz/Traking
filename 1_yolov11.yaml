@@ -1,0 +1,34 @@
+seed: 42
+dataset:
+  root: C:/Users/User/Desktop/翊倫實驗資料/CTS資料集/超音波檔案0912
+  split:
+    method: video_level
+    ratios:
+    - 0.8
+    - 0.2
+    k_fold: 1
+experiments:
+- name: exp_no_pre_YOLOv11
+  pipeline:
+  - type: model
+    name: YOLOv11
+    params:
+      weights: yolo11n.pt
+      conf: 0.25
+      iou: 0.5
+      imgsz: 640
+      device: cuda
+      classes: null
+      max_det: 100
+      fallback_last_prediction: true
+      epochs: 5
+      batch: 8
+      lr0: 0.01
+      patience: 50
+      workers: 0
+      include_empty_frames: false
+evaluation:
+  evaluator: BasicEvaluator
+  visualize:
+    enabled: true
+    samples: 5

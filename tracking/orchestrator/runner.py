@@ -134,9 +134,9 @@ class PipelineRunner:
                         try:
                             # 可能的參數名稱集合（通用 + FasterRCNN 常見）
                             cand_keys = {
-                                'device','pretrained','num_classes','epochs','batch_size','lr','weight_decay','momentum',
+                                'device','pretrained','num_classes','epochs','batch','batch_size','lr','lr0','weight_decay','momentum',
                                 'optimizer_name','optimizer','step_size','gamma','grad_clip','detect_anomaly','include_empty_frames',
-                                'fallback_last_prediction','score_thresh','adamw_betas','adamw_eps','inference_batch','num_workers','pin_memory'
+                                'fallback_last_prediction','score_thresh','adamw_betas','adamw_eps','inference_batch','num_workers','workers','pin_memory','patience'
                             }
                             snap = {}
                             for k in sorted(cand_keys):
@@ -172,7 +172,15 @@ class PipelineRunner:
                     setattr(m, 'progress_callback', lambda stage, cur, tot, model=name: self._progress(stage, cur, tot, {'model': model}))
                 except Exception:
                     pass
-            self._log(f"Models: {[name for name,_ in models]}")
+            # 顯示實例名稱（對外顯示）
+            try:
+                display_names = []
+                for _reg_name, _m in models:
+                    disp = getattr(_m, 'name', _reg_name)
+                    display_names.append(disp)
+                self._log(f"Models: {display_names}")
+            except Exception:
+                self._log(f"Models: {[name for name,_ in models]}")
 
             # evaluator
             eval_name = self.cfg.get("evaluation", {}).get("evaluator", "BasicEvaluator")
@@ -193,8 +201,9 @@ class PipelineRunner:
                 viz_samples = int(viz_cfg.get("samples", 10) or 10)
                 # Determine models used and initialize prediction collectors
                 use_models = models_list or models
-                for model_name, _ in use_models:
-                    predictions_all.setdefault(model_name, [])
+                for model_name, _m in use_models:
+                    display_name = getattr(_m, 'name', model_name)
+                    predictions_all.setdefault(display_name, [])
                 # iterate videos with optional progress bar
                 iterable = dataset
                 total_videos = None
@@ -230,10 +239,26 @@ class PipelineRunner:
                                 preds = model.predict(vp)
                         except Exception as e:
                             # Log the failure and continue to next model/video
-                            self._log(f"[ERROR] Predict failed | model={model_name} video={os.path.basename(vp)} error={e}")
+                            self._log(f"[ERROR] Predict failed | model={getattr(model,'name',model_name)} video={os.path.basename(vp)} error={e}")
                             preds = []
-                        pv_predictions[model_name] = preds
-                        predictions_all.setdefault(model_name, []).extend(preds)
+                        disp = getattr(model, 'name', model_name)
+                        pv_predictions[disp] = preds
+                        predictions_all.setdefault(disp, []).extend(preds)
+                    # --- NEW: write per-video predictions for easier debugging/inspection ---
+                    try:
+                        vid_stem = os.path.splitext(os.path.basename(vp))[0]
+                        pred_dir = os.path.join(out_dir_base, "predictions_by_video", vid_stem)
+                        os.makedirs(pred_dir, exist_ok=True)
+                        for display_name, pl in pv_predictions.items():
+                            outp_video = os.path.join(pred_dir, f"{display_name}.json")
+                            with open(outp_video, "w", encoding="utf-8") as f:
+                                json.dump([
+                                    {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score}
+                                    for p in pl
+                                ], f, ensure_ascii=False, indent=2)
+                        self._log(f"Per-video predictions saved: {pred_dir}", to_console=(tqdm is None))
+                    except Exception:
+                        pass
                     if evaluator:
                         # Filter predictions to GT frames only for evaluation (avoid penalizing unannotated frames)
                         if restrict_to_gt_frames:
@@ -266,9 +291,27 @@ class PipelineRunner:
                         vid_met_dir = os.path.join(met_dir, vid_stem)
                         os.makedirs(vid_met_dir, exist_ok=True)
                         res = evaluator.evaluate(eval_pv_predictions, gt, vid_met_dir)
+                        # --- Debug: log coverage stats per model (from evaluator summary) ---
+                        try:
+                            for _mn, _sm in res.items():
+                                dbg_total_gt = _sm.get('debug_total_gt_frames')
+                                dbg_total_pred = _sm.get('debug_total_pred_frames')
+                                dbg_matched = _sm.get('debug_matched_frames')
+                                dbg_cover = _sm.get('debug_coverage_ratio')
+                                dbg_gt_rng = _sm.get('debug_gt_frame_range')
+                                dbg_pred_rng = _sm.get('debug_pred_frame_range')
+                                dbg_offset = _sm.get('debug_suggested_constant_offset')
+                                self._log(
+                                    f"[DebugCoverage] video={os.path.basename(vp)} model={_mn} "
+                                    f"gt_frames={dbg_total_gt} pred_frames={dbg_total_pred} matched={dbg_matched} "
+                                    f"coverage={dbg_cover:.3f} gt_range={dbg_gt_rng} pred_range={dbg_pred_rng} suggested_offset={dbg_offset}",
+                                    to_console=(tqdm is None)
+                                )
+                        except Exception:
+                            pass
                         # accumulate for dataset-level summary
-                        for model_name, sm in res.items():
-                            agg = dataset_agg.setdefault(model_name, {
+                        for display_name, sm in res.items():
+                            agg = dataset_agg.setdefault(display_name, {
                                 "count": 0,
                                 "sum_iou": 0.0, "sum_iou_sq": 0.0,
                                 "sum_ce": 0.0, "sum_ce_sq": 0.0,
@@ -371,8 +414,8 @@ class PipelineRunner:
                     self._log(f"Dataset metrics summary saved: {summary_path}", to_console=(tqdm is None))
                 pred_dir = os.path.join(out_dir_base, "predictions")
                 os.makedirs(pred_dir, exist_ok=True)
-                for model_name, preds in predictions_all.items():
-                    outp = os.path.join(pred_dir, f"{model_name}.json")
+                for display_name, preds in predictions_all.items():
+                    outp = os.path.join(pred_dir, f"{display_name}.json")
                     with open(outp, "w", encoding="utf-8") as f:
                         json.dump([
                             {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score} for p in preds
