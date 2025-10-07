@@ -7,6 +7,7 @@ opencv-contrib-python
 # For Faster R-CNN model
 torch
 torchvision
+timm>=0.9.12
 
 # YOLOv11 (Ultralytics)
 ultralytics>=8.3.0

@@ -6,7 +6,7 @@ Key pieces:
 - tracking/core: Interfaces and registries
 - tracking/data: Dataset manager for COCO-VID-like JSON next to videos
 - tracking/preproc: Example CLAHE module
-- tracking/models: Built-in trackers (Template Matching, FASTSpeckle/NCC, YOLOv11, OC-SORT wrapper, StrongSORT wrapper)
+- tracking/models: Built-in trackers (Template Matching, FASTSpeckle/NCC, YOLOv11, OC-SORT wrapper, StrongSORT wrapper, ToMP via pytracking)
 - tracking/eval: Basic evaluator computing IoU and center error
 - tracking/orchestrator: Pipeline runner to glue everything
 
@@ -31,6 +31,7 @@ Notes on trackers:
 - CSRT tracker requires `opencv-contrib-python` (cv2.legacy). If you want to use CSRT, uninstall opencv-python and install the contrib build instead.
 - OC-SORT wrapper relies on Ultralytics YOLOv11 for detections (`ultralytics` package) and the `ocsort` PyPI package. Both are listed in `requirements.txt`.
 - StrongSORT wrapper reuses the cloned `libs/StrongSORT` repo plus Ultralytics YOLOv11; make sure `ultralytics`, `torch`, and OpenCV are installed (see `requirements.txt`).
+- ToMP integration uses the bundled `libs/pytracking` checkout. Download the pretrained weights (e.g. `tomp50.pth.tar`) into `libs/pytracking/pytracking/networks/` and ensure `pytracking/pytracking/evaluation/local.py` points `network_path` there. Requires PyTorch (GPU optional) and will fall back to CPU when `device: "cpu"` or when CUDA is unavailable and `force_cpu_if_no_cuda: true`. Install `timm` (already listed in `requirements.txt`) because several ToMP backbones rely on it.
 
 Install:
 ```bat
@@ -42,6 +43,8 @@ Notes:
 - Extend by registering new preproc or model classes using the registries.
 - OCSort integration example: copy `pipeline.ocsort.yaml`, point `dataset.root` to your data, and run `python run_pipeline.py --config pipeline.ocsort.yaml`. Adjust the `params` section to swap detector weights or tweak OC-SORT hyper-parameters. The wrapper emits a single-object trajectory by sticking to the most consistent OC-SORT track (by ID/IoU, with score fallback).
 - StrongSORT integration example: copy `pipeline.strongsort.yaml`, update `dataset.root`, and run `python run_pipeline.py --config pipeline.strongsort.yaml`. Parameters mirror the OC-SORT wrapper (detector tuning + tracker hyper-parameters) with additional appearance bins for the lightweight colour histogram features bundled here.
+- ToMP integration example: copy `pipeline.tomp.yaml`, set `dataset.root`, drop the pretrained `tomp50.pth.tar` (or `tomp101.pth.tar`) into `libs/pytracking/pytracking/networks/`, and run `python run_pipeline.py --config pipeline.tomp.yaml`. Make sure each video has a matching `<video>.json` with the first-frame bounding box because ToMP requires it to initialize.
+- If you previously installed dependencies before ToMP support landed, run `pip install timm>=0.9.12` to pull in the missing backbone dependency.
 
 UI (optional):
 ```bat

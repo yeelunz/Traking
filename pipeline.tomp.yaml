@@ -1,0 +1,23 @@
+seed: 42
+dataset:
+  root: C:/Users/User/Desktop/翊倫實驗資料/CTS資料集/us_0912_relabel
+  split:
+    method: video_level
+    ratios:
+    - 0.8
+    - 0.2
+    k_fold: 1
+experiments:
+- name: exp_no_pre_ToMP
+  pipeline:
+  - type: model
+    name: ToMP
+    params:
+      parameter: tomp50
+      device: cuda
+      force_cpu_if_no_cuda: true
+      fallback_last_prediction: true
+      min_presence_score: 0.0
+      param_overrides: {}
+evaluation:
+  evaluator: BasicEvaluator

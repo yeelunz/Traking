@@ -9,3 +9,4 @@ from . import yolov11  # noqa: F401
 from . import fast_speckle  # noqa: F401
 from . import ocsort  # noqa: F401
 from . import strongsort  # noqa: F401
+from . import tomp  # noqa: F401

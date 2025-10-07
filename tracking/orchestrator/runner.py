@@ -22,6 +22,7 @@ from ..models import yolov11  # noqa: F401
 from ..models import fast_speckle  # noqa: F401
 from ..models import ocsort  # noqa: F401
 from ..models import strongsort  # noqa: F401
+from ..models import tomp  # noqa: F401
 from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
