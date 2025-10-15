@@ -13,6 +13,13 @@ timm>=0.9.12
 ultralytics>=8.3.0
 ocsort
 
+# MixFormerV2 dependencies
+tensorboard
+tensorboardX
+easydict
+lmdb
+einops
+
 # If you plan to use the CSRT tracker, replace opencv-python with:
 # opencv-contrib-python
  

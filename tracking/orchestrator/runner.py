@@ -23,6 +23,8 @@ from ..models import fast_speckle  # noqa: F401
 from ..models import ocsort  # noqa: F401
 from ..models import strongsort  # noqa: F401
 from ..models import tomp  # noqa: F401
+from ..models import tamos  # noqa: F401
+from ..models import mixformerv2  # noqa: F401
 from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
@@ -452,14 +454,37 @@ class PipelineRunner:
                     fold_models = build_models()
                     # optional training step
                     for model_name, model in fold_models:
-                        if hasattr(model, "train"):
-                            self._log(f"[Train] Fold {fi+1}/{k_fold} | model={model_name} | train_videos={len(trn_ds)} val_videos={len(val_ds)}")
+                        if not hasattr(model, "train"):
+                            continue
+                        allow_train = getattr(model, "train_enabled", True)
+                        should_train_cb = getattr(model, "should_train", None)
+                        if callable(should_train_cb):
                             try:
-                                ret = model.train(trn_ds, val_ds, seed=self.seed, output_dir=os.path.join(fold_dir, "train"))
-                                if isinstance(ret, dict):
-                                    self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
-                            except Exception as e:
-                                self._log(f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}")
+                                allow_train = bool(should_train_cb(trn_ds, val_ds))
+                            except Exception:
+                                pass
+                        if not allow_train:
+                            self._log(
+                                f"[Train] Skipped (disabled) | model={model_name} | fold={fi+1}/{k_fold}",
+                                to_console=(tqdm is None),
+                            )
+                            continue
+                        self._log(
+                            f"[Train] Fold {fi+1}/{k_fold} | model={model_name} | train_videos={len(trn_ds)} val_videos={len(val_ds)}"
+                        )
+                        try:
+                            ret = model.train(
+                                trn_ds,
+                                val_ds,
+                                seed=self.seed,
+                                output_dir=os.path.join(fold_dir, "train"),
+                            )
+                            if isinstance(ret, dict):
+                                self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
+                        except Exception as e:
+                            self._log(
+                                f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}"
+                            )
                     run_on_dataset(val_ds, fold_dir, models_list=fold_models)
                     try:
                         with open(os.path.join(fold_dir, "metrics", "summary.json"), "r", encoding="utf-8") as f:
@@ -529,16 +554,33 @@ class PipelineRunner:
             final_train_dir = os.path.join(out_dir, "train_full")
             os.makedirs(final_train_dir, exist_ok=True)
             for model_name, model in final_models:
-                if hasattr(model, "train"):
-                    self._log(f"[Train] Full train | model={model_name} | train_videos={len(train_ds)}")
+                if not hasattr(model, "train"):
+                    continue
+                allow_train = getattr(model, "train_enabled", True)
+                should_train_cb = getattr(model, "should_train", None)
+                if callable(should_train_cb):
                     try:
-                        ret = model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
-                        if isinstance(ret, dict):
-                            self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
-                            if ret.get("status") == "no_data":
-                                        self._log("[Warn] No training samples found (check that each video has a matching .json annotation next to it).", to_console=(tqdm is None))
-                    except Exception as e:
-                        self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
+                        allow_train = bool(should_train_cb(train_ds, None))
+                    except Exception:
+                        pass
+                if not allow_train:
+                    self._log(
+                        f"[Train] Skipped (disabled) | model={model_name}",
+                        to_console=(tqdm is None),
+                    )
+                    continue
+                self._log(f"[Train] Full train | model={model_name} | train_videos={len(train_ds)}")
+                try:
+                    ret = model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
+                    if isinstance(ret, dict):
+                        self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
+                        if ret.get("status") == "no_data":
+                            self._log(
+                                "[Warn] No training samples found (check that each video has a matching .json annotation next to it).",
+                                to_console=(tqdm is None),
+                            )
+                except Exception as e:
+                    self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
             test_dir = os.path.join(out_dir, "test")
             os.makedirs(test_dir, exist_ok=True)
             run_on_dataset(test_ds, test_dir, models_list=final_models)

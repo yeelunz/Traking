@@ -20,3 +20,7 @@ def test_imports():
 
 def test_strongsort_registered():
     assert "StrongSORT" in MODEL_REGISTRY
+
+
+def test_tamos_registered():
+    assert "TaMOs" in MODEL_REGISTRY

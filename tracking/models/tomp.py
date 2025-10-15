@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import importlib
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -112,6 +113,13 @@ class ToMPTracker(TrackingModel):
         "fallback_last_prediction": True,
         "min_presence_score": 0.0,
         "param_overrides": {},
+        "fine_tune": {
+            "enabled": False,
+            "command": None,
+            "cwd": None,
+            "checkpoint": None,
+            "env": {},
+        },
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -132,6 +140,16 @@ class ToMPTracker(TrackingModel):
         self.min_presence_score = float(config.get("min_presence_score", self.DEFAULT_CONFIG["min_presence_score"]))
         self._param_overrides = dict(config.get("param_overrides", self.DEFAULT_CONFIG["param_overrides"]))
         self._custom_checkpoint: Optional[str] = None
+
+        fine_tune_cfg = config.get("fine_tune", self.DEFAULT_CONFIG["fine_tune"])
+        if isinstance(fine_tune_cfg, bool):
+            fine_tune_cfg = {"enabled": bool(fine_tune_cfg)}
+        self._fine_tune_enabled = bool(fine_tune_cfg.get("enabled", False))
+        self._fine_tune_command: Optional[Union[str, Sequence[str]]] = fine_tune_cfg.get("command")
+        self._fine_tune_cwd: Optional[str] = fine_tune_cfg.get("cwd")
+        self._fine_tune_checkpoint_template: Optional[str] = fine_tune_cfg.get("checkpoint")
+        env_cfg = fine_tune_cfg.get("env", {}) or {}
+        self._fine_tune_env: Dict[str, str] = {str(k): str(v) for k, v in env_cfg.items()}
 
         param_module = _resolve_param_module(self.parameter_name)
         self._param_module_path = param_module.__name__
@@ -155,17 +173,76 @@ class ToMPTracker(TrackingModel):
     # ------------------------------------------------------------------
     def train(self, train_dataset, val_dataset=None, seed: int = 0, output_dir: Optional[str] = None):
         # ToMP requires no additional training at inference time. Emit a dummy callback for UI responsiveness.
+        if not self._fine_tune_enabled:
+            cb = getattr(self, "progress_callback", None)
+            if callable(cb):
+                try:
+                    cb("train_epoch_start", 1, 1)
+                except Exception:
+                    pass
+                try:
+                    cb("train_epoch_end", 1, 1)
+                except Exception:
+                    pass
+            return {"status": "no_training"}
+
+        formatted_output_dir = Path(output_dir or Path.cwd() / "finetune_tomp")
+        formatted_output_dir.mkdir(parents=True, exist_ok=True)
+
+        command = self._format_fine_tune_command(self._fine_tune_command, formatted_output_dir)
+        if command is None:
+            raise RuntimeError(
+                "ToMP fine-tune enabled but no command provided. Set fine_tune.command to a shell string or list."
+            )
+
+        shell = isinstance(command, str)
+        cmd_display = command if shell else " ".join(command)
+        cwd = Path(self._fine_tune_cwd or _PYTRACKING_ROOT)
+        env = os.environ.copy()
+        env.update(self._fine_tune_env)
+
         cb = getattr(self, "progress_callback", None)
         if callable(cb):
             try:
                 cb("train_epoch_start", 1, 1)
             except Exception:
                 pass
+
+        try:
+            subprocess.run(
+                command,
+                shell=shell,
+                check=True,
+                cwd=str(cwd),
+                env=env,
+            )
+        except subprocess.CalledProcessError as ex:
+            raise RuntimeError(f"ToMP fine-tune command failed with exit code {ex.returncode}: {cmd_display}") from ex
+
+        checkpoint_template = self._fine_tune_checkpoint_template
+        checkpoint_path: Optional[Path] = None
+        if checkpoint_template:
+            checkpoint_resolved = self._format_template(checkpoint_template, formatted_output_dir)
+            checkpoint_path = self._resolve_checkpoint_path(checkpoint_resolved, formatted_output_dir)
+            if not checkpoint_path.exists():
+                raise RuntimeError(
+                    f"ToMP fine-tune expected checkpoint at '{checkpoint_path}', but file was not found."
+                )
+            self._custom_checkpoint = str(checkpoint_path)
+            self._cached_params = None
+            self._create_params()
+
+        if callable(cb):
             try:
                 cb("train_epoch_end", 1, 1)
             except Exception:
                 pass
-        return {"status": "no_training"}
+
+        return {
+            "status": "external_fine_tune",
+            "command": cmd_display,
+            "checkpoint": str(checkpoint_path) if checkpoint_path else None,
+        }
 
     def load_checkpoint(self, ckpt_path: str):
         if not ckpt_path:
@@ -285,3 +362,50 @@ class ToMPTracker(TrackingModel):
             cap.release()
 
         return preds
+
+    # ------------------------------------------------------------------
+    # Fine-tune helpers
+    # ------------------------------------------------------------------
+    def _format_fine_tune_command(
+        self,
+        command: Optional[Union[str, Sequence[str]]],
+        output_dir: Path,
+    ) -> Optional[Union[str, List[str]]]:
+        if command is None:
+            return None
+        fmt_kwargs = {"output_dir": str(output_dir)}
+        if isinstance(command, str):
+            return command.format(**fmt_kwargs)
+        if isinstance(command, Iterable):
+            formatted: List[str] = []
+            for part in command:
+                formatted.append(str(part).format(**fmt_kwargs))
+            return formatted
+        raise TypeError("fine_tune.command must be a string or iterable of strings")
+
+    def _format_template(self, template: str, output_dir: Path) -> str:
+        fmt_kwargs = {"output_dir": str(output_dir)}
+        return template.format(**fmt_kwargs)
+
+    def _resolve_checkpoint_path(self, candidate: str, output_dir: Optional[Path]) -> Path:
+        path = Path(candidate)
+        if path.is_absolute():
+            return path
+        search_order: List[Path] = []
+        if output_dir is not None:
+            search_order.append(output_dir)
+        search_order.append(Path.cwd())
+        if _PYTRACKING_ROOT.exists():
+            search_order.append(_PYTRACKING_ROOT)
+        if _env_settings is not None:
+            env_cfg = _env_settings()
+            network_path = getattr(env_cfg, "network_path", "")
+            if isinstance(network_path, (list, tuple)):
+                search_order.extend(Path(p) for p in network_path)
+            elif network_path:
+                search_order.append(Path(network_path))
+        for base in search_order:
+            resolved = base / candidate
+            if resolved.exists():
+                return resolved
+        return Path(candidate)

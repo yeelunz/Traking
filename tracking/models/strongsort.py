@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import math
 
 try:
     import cv2  # type: ignore
@@ -425,3 +426,151 @@ class StrongSortTracker(TrackingModel):
 
         cap.release()
         return preds
+
+
+@register_model("StrongSORT++")
+class StrongSortPPTracker(StrongSortTracker):
+    """Enhanced StrongSORT variant with temporal interpolation and smoothing."""
+
+    name = "StrongSORT++"
+
+    DEFAULT_CONFIG: Dict[str, Any] = {
+        **StrongSortTracker.DEFAULT_CONFIG,
+        "enable_gsi": True,
+        "gsi_interval": 20,
+        "enable_gaussian_smoothing": True,
+        "smoothing_sigma": 1.25,
+        "score_fill_value": 0.6,
+        "clip_scores_between": [0.0, 1.0],
+    }
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        merged = {**self.DEFAULT_CONFIG, **(config or {})}
+        self._enable_interp = bool(merged.get("enable_gsi", True))
+        self._interp_max_gap = max(2, int(merged.get("gsi_interval", 20)))
+        self._enable_smoothing = bool(merged.get("enable_gaussian_smoothing", True))
+        self._smoothing_sigma = float(merged.get("smoothing_sigma", 1.25))
+        self._score_fill = float(merged.get("score_fill_value", 0.6))
+        clip = merged.get("clip_scores_between", None)
+        if isinstance(clip, (list, tuple)) and len(clip) == 2:
+            self._score_clip: Optional[Tuple[float, float]] = (float(clip[0]), float(clip[1]))
+        else:
+            self._score_clip = None
+
+    def predict(self, video_path: str) -> List[FramePrediction]:
+        preds = super().predict(video_path)
+        if not preds:
+            return preds
+        processed = self._deduplicate(preds)
+        if self._enable_interp:
+            processed = self._interpolate_gaps(processed, self._interp_max_gap)
+        if self._enable_smoothing:
+            processed = self._smooth_sequence(processed, self._smoothing_sigma)
+        return processed
+
+    @staticmethod
+    def _score_value(score: Optional[float]) -> float:
+        return float(score) if score is not None else float("-inf")
+
+    def _score_float(self, score: Optional[float]) -> float:
+        if score is None:
+            return self._score_fill
+        return float(score)
+
+    def _clip_score(self, value: float) -> float:
+        if self._score_clip is None:
+            return float(value)
+        lo, hi = self._score_clip
+        return float(max(lo, min(hi, value)))
+
+    def _deduplicate(self, preds: Sequence[FramePrediction]) -> List[FramePrediction]:
+        frame_map: Dict[int, FramePrediction] = {}
+        for p in preds:
+            idx = int(getattr(p, "frame_index", 0))
+            bbox = tuple(float(x) for x in p.bbox)
+            score = p.score
+            candidate = FramePrediction(idx, bbox, score)
+            stored = frame_map.get(idx)
+            if stored is None or self._score_value(candidate.score) > self._score_value(stored.score):
+                frame_map[idx] = candidate
+        return [frame_map[i] for i in sorted(frame_map.keys())]
+
+    def _interpolate_gaps(self, preds: Sequence[FramePrediction], max_gap: int) -> List[FramePrediction]:
+        if len(preds) < 2 or max_gap < 2:
+            return list(preds)
+        preds_sorted = sorted(preds, key=lambda p: int(p.frame_index))
+        output: List[FramePrediction] = []
+        for cur, nxt in zip(preds_sorted[:-1], preds_sorted[1:]):
+            output.append(cur)
+            gap = int(nxt.frame_index) - int(cur.frame_index)
+            if 1 < gap <= max_gap:
+                cur_box = np.asarray(cur.bbox, dtype=np.float32)
+                nxt_box = np.asarray(nxt.bbox, dtype=np.float32)
+                cur_score = self._score_float(cur.score)
+                nxt_score = self._score_float(nxt.score)
+                has_score = (cur.score is not None) or (nxt.score is not None)
+                delta_box = (nxt_box - cur_box) / float(gap)
+                delta_score = (nxt_score - cur_score) / float(gap)
+                for step in range(1, gap):
+                    frame_idx = int(cur.frame_index) + step
+                    bbox = cur_box + delta_box * step
+                    score = None
+                    if has_score:
+                        score = self._clip_score(cur_score + delta_score * step)
+                    output.append(
+                        FramePrediction(
+                            frame_idx,
+                            (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+                            score,
+                        )
+                    )
+        output.append(preds_sorted[-1])
+        return self._deduplicate(output)
+
+    def _smooth_sequence(self, preds: Sequence[FramePrediction], sigma: float) -> List[FramePrediction]:
+        if sigma <= 0 or len(preds) < 3:
+            return list(preds)
+        arr = np.asarray([p.bbox for p in preds], dtype=np.float32)
+        kernel = self._gaussian_kernel(sigma)
+        smoothed_boxes = self._apply_kernel(arr, kernel)
+
+        scores_available = any(p.score is not None for p in preds)
+        score_mask: List[bool] = [p.score is None for p in preds]
+        smoothed_scores: Optional[np.ndarray] = None
+        if scores_available:
+            score_vals = np.asarray([self._score_float(p.score) for p in preds], dtype=np.float32)
+            smoothed_scores = self._apply_kernel(score_vals.reshape(-1, 1), kernel).reshape(-1)
+
+        smoothed: List[FramePrediction] = []
+        for idx, p in enumerate(preds):
+            bbox = tuple(float(x) for x in smoothed_boxes[idx])
+            score: Optional[float]
+            if smoothed_scores is not None and not score_mask[idx]:
+                score = self._clip_score(float(smoothed_scores[idx]))
+            else:
+                score = p.score
+            smoothed.append(FramePrediction(int(p.frame_index), bbox, score))
+        return smoothed
+
+    @staticmethod
+    def _gaussian_kernel(sigma: float) -> np.ndarray:
+        sigma = max(1e-3, float(sigma))
+        radius = max(1, int(math.ceil(3.0 * sigma)))
+        offsets = np.arange(-radius, radius + 1, dtype=np.float32)
+        kernel = np.exp(-0.5 * (offsets / sigma) ** 2)
+        kernel_sum = float(np.sum(kernel))
+        if kernel_sum <= 0:
+            return np.array([1.0], dtype=np.float32)
+        return kernel / kernel_sum
+
+    @staticmethod
+    def _apply_kernel(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        radius = (len(kernel) - 1) // 2
+        padded = np.pad(arr, ((radius, radius), (0, 0)), mode="edge")
+        filtered = np.empty_like(arr, dtype=np.float32)
+        for col in range(arr.shape[1]):
+            filtered[:, col] = np.convolve(padded[:, col], kernel, mode="valid")
+        return filtered if filtered.shape == arr.shape else filtered[:arr.shape[0]]

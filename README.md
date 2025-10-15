@@ -6,7 +6,7 @@ Key pieces:
 - tracking/core: Interfaces and registries
 - tracking/data: Dataset manager for COCO-VID-like JSON next to videos
 - tracking/preproc: Example CLAHE module
-- tracking/models: Built-in trackers (Template Matching, FASTSpeckle/NCC, YOLOv11, OC-SORT wrapper, StrongSORT wrapper, ToMP via pytracking)
+- tracking/models: Built-in trackers (Template Matching, FASTSpeckle/NCC, YOLOv11, OC-SORT wrapper, StrongSORT wrapper, ToMP via pytracking, TaMOs via pytracking, MixFormerV2)
 - tracking/eval: Basic evaluator computing IoU and center error
 - tracking/orchestrator: Pipeline runner to glue everything
 
@@ -31,7 +31,10 @@ Notes on trackers:
 - CSRT tracker requires `opencv-contrib-python` (cv2.legacy). If you want to use CSRT, uninstall opencv-python and install the contrib build instead.
 - OC-SORT wrapper relies on Ultralytics YOLOv11 for detections (`ultralytics` package) and the `ocsort` PyPI package. Both are listed in `requirements.txt`.
 - StrongSORT wrapper reuses the cloned `libs/StrongSORT` repo plus Ultralytics YOLOv11; make sure `ultralytics`, `torch`, and OpenCV are installed (see `requirements.txt`).
-- ToMP integration uses the bundled `libs/pytracking` checkout. Download the pretrained weights (e.g. `tomp50.pth.tar`) into `libs/pytracking/pytracking/networks/` and ensure `pytracking/pytracking/evaluation/local.py` points `network_path` there. Requires PyTorch (GPU optional) and will fall back to CPU when `device: "cpu"` or when CUDA is unavailable and `force_cpu_if_no_cuda: true`. Install `timm` (already listed in `requirements.txt`) because several ToMP backbones rely on it.
+- ToMP integration uses the bundled `libs/pytracking` checkout. Download the pretrained weights (e.g. `tomp50.pth.tar`) into `libs/pytracking/pytracking/networks/` and ensure `pytracking/pytracking/evaluation/local.py` points `network_path` there. Requires PyTorch (GPU optional) and will fall back to CPU when `device: "cpu"` or when CUDA is unavailable and `force_cpu_if_no_cuda: true`. Install `timm` (already listed in `requirements.txt`) because several ToMP backbones rely on it. When you need to trigger the original pytracking fine-tuning scripts, set `fine_tune.enabled: true` on the ToMP model and provide a `fine_tune.command` (string or list) that runs the desired training entrypoint (for example, a call into `ltr.run_training`). Use `{output_dir}` placeholder inside the command if you want to reuse the framework's train folder, and point `fine_tune.checkpoint` to the generated `.pth.tar` so the wrapper reloads it automatically.
+- TaMOs integration also relies on the bundled `libs/pytracking` checkout. Grab checkpoints such as `tamos_resnet50.pth.tar` or `tamos_swin_base.pth.tar` from the [official Google Drive](https://drive.google.com/drive/folders/1i_hegsfhSd-7F6lhNAYw_Kx17TZUq_zy) and place them under `libs/pytracking/pytracking/networks/`. The wrapper defaults to the ResNet-50 preset, respects the same `device`/`force_cpu_if_no_cuda` flags, and supports overriding pytracking parameter attributes through the YAML config. If you want to hand off training to pytracking's tooling, mirror the ToMP instructions: enable `fine_tune`, provide a `command`, and point `checkpoint` to the produced weights so the wrapper switches to them for inference.
+- MixFormerV2 integration example: copy `pipeline.mixformerv2.yaml`, set `dataset.root`, and download one of the official checkpoints (e.g. `mixformerv2_base.pth.tar`). Place it under `libs/MixFormerV2/models/` so the wrapper can resolve it. MixFormerV2 currently requires a CUDA-capable GPU because the upstream implementation runs preprocessing and inference on CUDA tensors. Each video still needs a `<video>.json` with the first-frame bounding box for initialisation。請另外安裝 `tensorboard`, `tensorboardX`, `easydict`, `lmdb`, `einops`（已列在 `requirements.txt`）以滿足官方專案在匯入環境設定時的依賴。由於官方 checkpoint 會序列化自訂類別，框架會在載入時強制 `torch.load(..., weights_only=False)`；請僅使用可信來源的權重檔。
+-  建議將 `online_size` 保持在 `1`（範例管線已設定），避免原始 MixFormer 維護多個線上模板時在自訂資料集上產生維度不合的錯誤。
 
 Install:
 ```bat
@@ -43,8 +46,10 @@ Notes:
 - Extend by registering new preproc or model classes using the registries.
 - OCSort integration example: copy `pipeline.ocsort.yaml`, point `dataset.root` to your data, and run `python run_pipeline.py --config pipeline.ocsort.yaml`. Adjust the `params` section to swap detector weights or tweak OC-SORT hyper-parameters. The wrapper emits a single-object trajectory by sticking to the most consistent OC-SORT track (by ID/IoU, with score fallback).
 - StrongSORT integration example: copy `pipeline.strongsort.yaml`, update `dataset.root`, and run `python run_pipeline.py --config pipeline.strongsort.yaml`. Parameters mirror the OC-SORT wrapper (detector tuning + tracker hyper-parameters) with additional appearance bins for the lightweight colour histogram features bundled here.
+- StrongSORT++ integration example: copy `pipeline.strongsortpp.yaml`, update `dataset.root`, and run `python run_pipeline.py --config pipeline.strongsortpp.yaml`. 這個變體會在 StrongSORT 的結果上套用內建的軌跡補點與高斯平滑，可減少短暫漏追與抖動；可透過 `enable_gsi`、`gsi_interval`、`enable_gaussian_smoothing` 等參數調整行為。
 - ToMP integration example: copy `pipeline.tomp.yaml`, set `dataset.root`, drop the pretrained `tomp50.pth.tar` (or `tomp101.pth.tar`) into `libs/pytracking/pytracking/networks/`, and run `python run_pipeline.py --config pipeline.tomp.yaml`. Make sure each video has a matching `<video>.json` with the first-frame bounding box because ToMP requires it to initialize.
-- If you previously installed dependencies before ToMP support landed, run `pip install timm>=0.9.12` to pull in the missing backbone dependency.
+- TaMOs integration example: copy `pipeline.tamos.yaml`, set `dataset.root`, and ensure at least one TaMOs checkpoint (e.g. `tamos_resnet50.pth.tar`) is in `libs/pytracking/pytracking/networks/`. Each video still needs a `<video>.json` with the first-frame bounding box; the wrapper will optionally recycle the previous box if the presence score dips below your threshold. For fine-tuning, set `fine_tune.enabled: true`, fill in the training command (for example call into `python -m ltr.run_training tracking tamos_resnet50`), and point `fine_tune.checkpoint` at the resulting `.pth.tar`—the wrapper will adopt it for subsequent predictions.
+- If you previously installed dependencies before the ToMP/TaMOs support landed, run `pip install timm>=0.9.12` to pull in the missing backbone dependency.
 
 UI (optional):
 ```bat

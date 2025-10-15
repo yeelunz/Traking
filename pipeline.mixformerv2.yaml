@@ -1,0 +1,38 @@
+seed: 42
+
+# MixFormerV2 需要 CUDA GPU 與預先下載的權重檔。
+# 將預訓練檔 (例如 mixformerv2_base.pth.tar) 放在 libs/MixFormerV2/models/ 之後，調整下列 checkpoint 路徑即可。
+
+dataset:
+  root: "C:/Users/User/Desktop/翊倫實驗資料/CTS資料集/us_0912_relabel"
+  split:
+    method: "video_level"
+    ratios: [0.8, 0.2]
+    k_fold: 1
+
+experiments:
+  - name: "exp_MixFormerV2_base"
+    pipeline:
+      - type: "model"
+        name: "MixFormerV2"
+        params:
+          tracker: "mixformer2_vit_online"      # 或 mixformer2_vit
+          parameter: "288_depth8_score"         # 對應 experiments/mixformer2_vit_online/*.yaml
+          checkpoint: "models/mixformerv2_base.pth.tar"
+          search_area_scale: 5.0                 # 對應官方腳本的 --params__search_area_scale
+          online_size: 1                         # 僅在線上版本有效，可視需求設定整數
+          update_interval: null                  # 僅在線上版本有效，可視需求設定整數
+          train_enabled: false                   # 不勾選時跳過訓練，直接使用預訓練權重
+          min_confidence: 0.2
+          fallback_last_prediction: true
+
+        # 如需前處理，可在此插入 preproc 步驟，例如 CLAHE。
+        # - type: "preproc"
+        #   name: "CLAHE"
+        #   params: {clipLimit: 2.0, tileGridSize: [8,8]}
+
+evaluation:
+  evaluator: "BasicEvaluator"
+  visualize:
+    enabled: true
+    samples: 10
