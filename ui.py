@@ -466,6 +466,49 @@ class SimpleRunnerUI(QMainWindow):
         def register(widget, signal):
             sig = getattr(widget, signal, None)
             if sig: sig.connect(lambda *_: self._on_param_widget_changed(scope))
+        if scope == 'model' and key == 'first_frame_source':
+            combo = QComboBox()
+            choices: List[Tuple[str, str]] = [
+                ("Ground Truth (GT)", "gt"),
+                ("YOLO 檢測", "yolo"),
+                ("Auto (GT→YOLO)", "auto"),
+            ]
+            value_to_index: Dict[str, int] = {}
+            for idx, (label, data) in enumerate(choices):
+                combo.addItem(label, data)
+                value_to_index[data] = idx
+
+            def _canonical(v: Any) -> str:
+                text = str(v or "").strip().lower()
+                alias_map = {
+                    "groundtruth": "gt",
+                    "ground_truth": "gt",
+                    "yolov11": "yolo",
+                    "yolo_v11": "yolo",
+                    "detector": "yolo",
+                }
+                if not text:
+                    return "gt"
+                return alias_map.get(text, text)
+
+            def _get_value() -> str:
+                data = combo.currentData()
+                if isinstance(data, str):
+                    return data
+                cur = combo.currentText().strip().lower()
+                return _canonical(cur)
+
+            def _set_value(v: Any) -> None:
+                canon = _canonical(v)
+                idx = value_to_index.get(canon)
+                if idx is None:
+                    combo.addItem(canon, canon)
+                    idx = combo.count() - 1
+                    value_to_index[canon] = idx
+                combo.setCurrentIndex(idx)
+
+            register(combo, 'currentIndexChanged')
+            return combo, _get_value, _set_value
         if isinstance(value, bool):
             w = QCheckBox(); register(w, 'stateChanged')
             return w, lambda: bool(w.isChecked()), lambda v: w.setChecked(bool(v))

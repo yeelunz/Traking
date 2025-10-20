@@ -9,7 +9,7 @@ dataset:
     k_fold: 1
 
 experiments:
-  - name: "exp_FASTSpeckle_default"
+  - name: "exp_FASTSpeckle_auto_init"
     pipeline:
       # 若需要可啟用 CLAHE 或其它 preproc，預設留空
       # - type: "preproc"
@@ -21,13 +21,23 @@ experiments:
           # FAST detector
           fast_threshold: 20
           fast_nonmax: true
-          max_features: 200
+          max_features: 220
           # LK optical flow
-          lk_win_size: 21
+          lk_win_size: 19
           lk_max_level: 3
           # reinit / maintenance
-          min_features: 30
-          reinit_interval: 10
+          min_features: 28
+          reinit_interval: 8
+          # first-frame init (auto = GT first, fallback to YOLOv11)
+          first_frame_source: auto
+          first_frame_fallback: yolov11
+          init_detector_weights: best.pt
+          init_detector_conf: 0.2
+          init_detector_iou: 0.45
+          init_detector_imgsz: 960
+          init_detector_device: auto
+          init_detector_classes: null
+          init_detector_max_det: 25
 
 evaluation:
   evaluator: "BasicEvaluator"

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import random
 
 import numpy as np
 
@@ -24,7 +27,7 @@ except Exception as ex:  # pragma: no cover
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
-from ..utils.annotations import load_coco_vid
+from ..utils.init_bbox import resolve_first_frame_bbox
 
 
 _MIXFORMER_ROOT = Path(__file__).resolve().parents[2] / "libs" / "MixFormerV2"
@@ -234,27 +237,6 @@ def _is_valid_bbox(bbox: Optional[Tuple[float, float, float, float]]) -> bool:
     return all(np.isfinite([x, y, w, h])) and w > 0 and h > 0
 
 
-def _first_gt_bbox(video_path: str) -> Optional[Tuple[float, float, float, float]]:
-    json_path = os.path.splitext(video_path)[0] + ".json"
-    if not os.path.exists(json_path):
-        return None
-    try:
-        gt = load_coco_vid(json_path)
-    except Exception:
-        return None
-    frames = gt.get("frames", {}) or {}
-    if not frames:
-        return None
-    valid = sorted(int(k) for k, boxes in frames.items() if boxes)
-    if not valid:
-        return None
-    bboxes = frames.get(valid[0]) or []
-    if not bboxes:
-        return None
-    x, y, w, h = bboxes[0]
-    return float(x), float(y), float(w), float(h)
-
-
 @register_model("MixFormerV2")
 class MixFormerV2Tracker(TrackingModel):
     """Wrapper around the official MixFormerV2 tracker for the pipeline orchestrator."""
@@ -272,6 +254,22 @@ class MixFormerV2Tracker(TrackingModel):
         "fallback_last_prediction": True,
         "dataset_name": "custom",
         "train_enabled": False,
+        "train_epochs": 1,
+        "train_lr": None,
+        "train_weight_decay": None,
+        "train_freeze_backbone": True,
+        "train_max_samples": 0,
+        "train_log_interval": 20,
+        "train_template_update": "keep",
+        "first_frame_source": "gt",
+        "first_frame_fallback": "gt",
+        "init_detector_weights": "best.pt",
+        "init_detector_conf": 0.25,
+        "init_detector_iou": 0.5,
+        "init_detector_imgsz": 640,
+        "init_detector_device": "auto",
+        "init_detector_classes": None,
+        "init_detector_max_det": 50,
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -312,6 +310,32 @@ class MixFormerV2Tracker(TrackingModel):
         self.fallback_last_prediction = bool(merged.get("fallback_last_prediction", True))
         self.dataset_name = str(merged.get("dataset_name", "custom"))
         self.train_enabled = bool(merged.get("train_enabled", self.DEFAULT_CONFIG["train_enabled"]))
+        self.train_epochs = max(1, int(merged.get("train_epochs", self.DEFAULT_CONFIG["train_epochs"])))
+        self.train_lr = merged.get("train_lr", self.DEFAULT_CONFIG["train_lr"])
+        self.train_weight_decay = merged.get("train_weight_decay", self.DEFAULT_CONFIG["train_weight_decay"])
+        self.train_freeze_backbone = bool(merged.get("train_freeze_backbone", self.DEFAULT_CONFIG["train_freeze_backbone"]))
+        self.train_max_samples = max(0, int(merged.get("train_max_samples", self.DEFAULT_CONFIG["train_max_samples"])) )
+        self.train_log_interval = max(1, int(merged.get("train_log_interval", self.DEFAULT_CONFIG["train_log_interval"])) )
+        self.train_template_update = str(
+            merged.get("train_template_update", self.DEFAULT_CONFIG["train_template_update"])
+        ).lower()
+
+        self.first_frame_source = str(merged.get("first_frame_source", self.DEFAULT_CONFIG["first_frame_source"]) or "gt").lower()
+        raw_fallback = merged.get("first_frame_fallback", self.DEFAULT_CONFIG["first_frame_fallback"])
+        if raw_fallback is None:
+            self.first_frame_fallback: Optional[str] = None
+        else:
+            fb = str(raw_fallback).strip().lower()
+            self.first_frame_fallback = fb if fb not in ("", "none", "null") else None
+        self.init_detector_params = {
+            "weights": str(merged.get("init_detector_weights", self.DEFAULT_CONFIG["init_detector_weights"])),
+            "conf": float(merged.get("init_detector_conf", self.DEFAULT_CONFIG["init_detector_conf"])),
+            "iou": float(merged.get("init_detector_iou", self.DEFAULT_CONFIG["init_detector_iou"])),
+            "imgsz": int(merged.get("init_detector_imgsz", self.DEFAULT_CONFIG["init_detector_imgsz"])),
+            "device": str(merged.get("init_detector_device", self.DEFAULT_CONFIG["init_detector_device"])),
+            "classes": merged.get("init_detector_classes", self.DEFAULT_CONFIG["init_detector_classes"]),
+            "max_det": int(merged.get("init_detector_max_det", self.DEFAULT_CONFIG["init_detector_max_det"])),
+        }
 
         checkpoint_cfg = merged.get("checkpoint", self.DEFAULT_CONFIG["checkpoint"])
         if isinstance(checkpoint_cfg, (list, tuple)):
@@ -334,6 +358,8 @@ class MixFormerV2Tracker(TrackingModel):
         self._tracker_cls = tracker_factory()
 
         self.preprocs: List[PreprocessingModule] = []
+        self._finetuned_state_dict: Optional[Dict[str, Any]] = None
+        self._finetuned_summary: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
     # TrackingModel API
@@ -341,14 +367,311 @@ class MixFormerV2Tracker(TrackingModel):
     def train(self, train_dataset, val_dataset=None, seed: int = 0, output_dir: Optional[str] = None):
         if not self.train_enabled:
             return {"status": "skipped", "reason": "train_disabled"}
-        cb = getattr(self, "progress_callback", None)
-        if callable(cb):
+        if cv2 is None:
+            detail = (
+                f" (import error: {_CV2_IMPORT_ERROR!r})"
+                if "_CV2_IMPORT_ERROR" in globals() else ""
+            )
+            raise RuntimeError("OpenCV is required for MixFormerV2 training." + detail)
+        if torch is None:
+            detail = (
+                f" (import error: {_TORCH_IMPORT_ERROR!r})"
+                if "_TORCH_IMPORT_ERROR" in globals() else ""
+            )
+            raise RuntimeError("PyTorch is required for MixFormerV2 training." + detail)
+
+        dataset_len = len(train_dataset) if hasattr(train_dataset, "__len__") else None
+        if not dataset_len:
+            return {"status": "no_data", "reason": "empty_dataset"}
+
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+        params_kwargs: Dict[str, Any] = {
+            "yaml_name": self.parameter_name,
+            "model": self._checkpoint_arg,
+        }
+        if self.search_area_scale is not None:
+            params_kwargs["search_area_scale"] = self.search_area_scale
+        if self.online_size is not None:
+            params_kwargs["online_size"] = self.online_size
+        if self.update_interval is not None:
+            params_kwargs["update_interval"] = self.update_interval
+
+        params = self._parameters_fn(**params_kwargs)
+        cfg = params.cfg
+
+        mixformer_module = importlib.import_module("lib.models.mixformer2_vit")
+        build_mixformer2_vit_online = getattr(mixformer_module, "build_mixformer2_vit_online")
+        tracker_utils_module = importlib.import_module("lib.test.tracker.tracker_utils")
+        Preprocessor_wo_mask = getattr(tracker_utils_module, "Preprocessor_wo_mask")
+        processing_utils_module = importlib.import_module("lib.train.data.processing_utils")
+        sample_target = getattr(processing_utils_module, "sample_target")
+        import torch.nn.functional as F
+        from torch.nn.utils import clip_grad_norm_
+
+        device = torch.device("cuda")
+        settings = SimpleNamespace(static_model=self._checkpoint_arg)
+        net = build_mixformer2_vit_online(cfg, settings=settings, train=True)
+        checkpoint_obj = torch.load(self._checkpoint_arg, map_location="cpu")
+        ckpt_state = checkpoint_obj.get("net") if isinstance(checkpoint_obj, dict) else checkpoint_obj
+        net.load_state_dict(ckpt_state, strict=False)
+        net = net.to(device)
+        net.train()
+
+        if self.train_freeze_backbone:
+            for name, param in net.named_parameters():
+                if name.startswith("backbone"):
+                    param.requires_grad = False
+
+        trainable_params = [p for p in net.parameters() if p.requires_grad]
+        if not trainable_params:
+            trainable_params = list(net.parameters())
+
+        base_lr = float(getattr(cfg.TRAIN, "LR", 1e-4)) if hasattr(cfg, "TRAIN") else 1e-4
+        lr = float(self.train_lr) if self.train_lr is not None else base_lr * 0.1
+        weight_decay = (
+            float(self.train_weight_decay)
+            if self.train_weight_decay is not None
+            else float(getattr(cfg.TRAIN, "WEIGHT_DECAY", 1e-4))
+        )
+        optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
+        grad_clip = float(getattr(cfg.TRAIN, "GRAD_CLIP_NORM", 0.0)) if hasattr(cfg, "TRAIN") else 0.0
+
+        logger = getattr(self, "logger", None)
+
+        def _log(msg):
+            if logger is not None and hasattr(logger, "info"):
+                try:
+                    logger.info(msg)
+                    return
+                except Exception:
+                    pass
+            print(msg)
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            log_file = os.path.join(output_dir, "train_log.txt")
+        else:
+            log_file = None
+
+        def _write_log(line):
+            if not log_file:
+                return
             try:
-                cb("train_epoch_start", 1, 1)
-                cb("train_epoch_end", 1, 1)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
             except Exception:
                 pass
-        return {"status": "no_training", "reason": "not_implemented"}
+
+        preproc = Preprocessor_wo_mask()
+        search_size = float(params.search_size)
+
+        def map_box_back(pred_box, prev_bbox, resize_factor):
+            half_side = 0.5 * search_size / resize_factor
+            cx_prev = prev_bbox[0] + 0.5 * prev_bbox[2]
+            cy_prev = prev_bbox[1] + 0.5 * prev_bbox[3]
+            cx_real = pred_box[0] + (cx_prev - half_side)
+            cy_real = pred_box[1] + (cy_prev - half_side)
+            return torch.stack([
+                cx_real - 0.5 * pred_box[2],
+                cy_real - 0.5 * pred_box[3],
+                pred_box[2],
+                pred_box[3],
+            ])
+
+        def bbox_iou_tensor(a, b):
+            x1 = torch.max(a[0], b[0])
+            y1 = torch.max(a[1], b[1])
+            x2 = torch.min(a[0] + a[2], b[0] + b[2])
+            y2 = torch.min(a[1] + a[3], b[1] + b[3])
+            inter = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+            area_a = torch.clamp(a[2], min=0) * torch.clamp(a[3], min=0)
+            area_b = torch.clamp(b[2], min=0) * torch.clamp(b[3], min=0)
+            union = area_a + area_b - inter
+            return inter / (union + 1e-6)
+
+        template_strategy = self.train_template_update.lower()
+        max_samples = self.train_max_samples
+        log_interval = max(1, self.train_log_interval)
+        epochs = max(1, self.train_epochs)
+
+        progress_cb = getattr(self, "progress_callback", None)
+
+        def iter_video_samples(video_path, annotation):
+            frames = (annotation or {}).get("frames", {})
+            if not frames:
+                return
+            idx_to_bbox = {}
+            for key, boxes in frames.items():
+                if not boxes:
+                    continue
+                try:
+                    frame_idx = int(key)
+                except Exception:
+                    continue
+                bbox = boxes[0]
+                if bbox and len(bbox) >= 4 and bbox[2] > 0 and bbox[3] > 0:
+                    idx_to_bbox[frame_idx] = (
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                    )
+            if len(idx_to_bbox) < 2:
+                return
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                _log(f"[Train] Skipped video (unreadable): {video_path}")
+                return
+            try:
+                template_frame = None
+                template_bbox = None
+                prev_bbox = None
+                target_indices = set(idx_to_bbox.keys())
+                frame_idx = 0
+                while True:
+                    ok, frame_bgr = cap.read()
+                    if not ok:
+                        break
+                    if frame_idx in target_indices:
+                        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                        gt_bbox = idx_to_bbox[frame_idx]
+                        if template_frame is None:
+                            template_frame = frame_rgb
+                            template_bbox = gt_bbox
+                            prev_bbox = gt_bbox
+                        else:
+                            yield template_frame, template_bbox, prev_bbox, frame_rgb, gt_bbox
+                            prev_bbox = gt_bbox
+                            if template_strategy == "update":
+                                template_frame = frame_rgb
+                                template_bbox = gt_bbox
+                    frame_idx += 1
+            finally:
+                cap.release()
+
+        total_steps = 0
+        total_bbox_loss = 0.0
+        total_score_loss = 0.0
+        total_iou = 0.0
+
+        for epoch in range(epochs):
+            if callable(progress_cb):
+                try:
+                    progress_cb("train_epoch_start", epoch + 1, epochs)
+                except Exception:
+                    pass
+            _log(f"[Train] Epoch {epoch+1}/{epochs}")
+            if log_file:
+                _write_log(f"# Epoch {epoch+1}/{epochs}")
+
+            for item_idx in range(dataset_len):
+                sample_item = train_dataset[item_idx]
+                video_path = sample_item.get("video_path") if isinstance(sample_item, dict) else sample_item.get("video_path")
+                annotation = sample_item.get("annotation") if isinstance(sample_item, dict) else sample_item.get("annotation")
+                if not video_path or annotation is None:
+                    continue
+                for template_frame, template_bbox, prev_bbox, frame_rgb, gt_bbox in iter_video_samples(video_path, annotation):
+                    template_patch, _, _ = sample_target(
+                        template_frame,
+                        list(template_bbox),
+                        params.template_factor,
+                        output_sz=params.template_size,
+                    )
+                    template_tensor = preproc.process(template_patch)
+
+                    search_patch, resize_factor, _ = sample_target(
+                        frame_rgb,
+                        list(prev_bbox),
+                        params.search_factor,
+                        output_sz=params.search_size,
+                    )
+                    search_tensor = preproc.process(search_patch)
+
+                    optimizer.zero_grad(set_to_none=True)
+                    out = net(template_tensor, template_tensor, search_tensor, softmax=True, run_score_head=True)
+                    pred_boxes = out.get("pred_boxes")
+                    if pred_boxes is None:
+                        continue
+                    pred_vec = pred_boxes.view(-1, 4).mean(dim=0)
+                    pred_vec = pred_vec * (search_size / float(resize_factor))
+                    prev_bbox_tensor = torch.tensor(prev_bbox, dtype=torch.float32, device=device)
+                    gt_tensor = torch.tensor(gt_bbox, dtype=torch.float32, device=device)
+                    pred_abs = map_box_back(pred_vec, prev_bbox_tensor, float(resize_factor))
+
+                    bbox_loss = F.smooth_l1_loss(pred_abs, gt_tensor)
+                    score_logits = out.get("pred_scores")
+                    if score_logits is not None:
+                        score_loss = F.binary_cross_entropy_with_logits(
+                            score_logits.view(-1),
+                            torch.ones_like(score_logits.view(-1), device=device),
+                        )
+                    else:
+                        score_loss = torch.tensor(0.0, device=device)
+
+                    loss = bbox_loss + 0.3 * score_loss
+                    loss.backward()
+                    if grad_clip > 0:
+                        clip_grad_norm_(trainable_params, grad_clip)
+                    optimizer.step()
+
+                    with torch.no_grad():
+                        iou_val = bbox_iou_tensor(pred_abs, gt_tensor).item()
+
+                    total_steps += 1
+                    total_bbox_loss += float(bbox_loss.detach().item())
+                    total_score_loss += float(score_loss.detach().item())
+                    total_iou += float(iou_val)
+
+                    if total_steps % log_interval == 0:
+                        msg = (
+                            f"[Train] step={total_steps} loss={loss.detach().item():.4f} "
+                            f"bbox={bbox_loss.detach().item():.4f} score={score_loss.detach().item():.4f} "
+                            f"IoU={iou_val:.4f}"
+                        )
+                        _log(msg)
+                        _write_log(msg)
+
+                    if max_samples and total_steps >= max_samples:
+                        break
+                if max_samples and total_steps >= max_samples:
+                    break
+            if callable(progress_cb):
+                try:
+                    progress_cb("train_epoch_end", epoch + 1, epochs)
+                except Exception:
+                    pass
+            if max_samples and total_steps >= max_samples:
+                _log(f"[Train] Reached max_samples={max_samples}, stopping early.")
+                break
+
+        if total_steps == 0:
+            return {"status": "no_data", "reason": "no_valid_samples"}
+
+        avg_bbox_loss = total_bbox_loss / total_steps
+        avg_score_loss = total_score_loss / total_steps
+        mean_iou = total_iou / total_steps
+
+        finetuned_state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+        self._finetuned_state_dict = finetuned_state
+        summary = {
+            "status": "trained",
+            "epochs_completed": epoch + 1,
+            "steps": total_steps,
+            "avg_bbox_loss": avg_bbox_loss,
+            "avg_score_loss": avg_score_loss,
+            "mean_iou": mean_iou,
+            "learning_rate": lr,
+            "trainable_params": len(trainable_params),
+        }
+        self._finetuned_summary = summary
+        if log_file:
+            _write_log(f"summary={json.dumps(summary, ensure_ascii=False)}")
+
+        return summary
 
     def should_train(self, *_args, **_kwargs) -> bool:
         return self.train_enabled
@@ -419,6 +742,20 @@ class MixFormerV2Tracker(TrackingModel):
             if not hasattr(params, "vis_attn"):
                 params.vis_attn = 0
             tracker = self._tracker_cls(params, self.dataset_name)
+            finetuned_state = getattr(self, "_finetuned_state_dict", None)
+            if finetuned_state:
+                try:
+                    tracker.network.load_state_dict(finetuned_state, strict=False)
+                except Exception as ex:
+                    warn_msg = f"MixFormerV2: failed to load finetuned weights, falling back to checkpoint: {ex}"
+                    logger = getattr(self, "logger", None)
+                    if logger is not None and hasattr(logger, "warning"):
+                        try:
+                            logger.warning(warn_msg)
+                        except Exception:
+                            print(warn_msg)
+                    else:
+                        print(warn_msg)
         finally:
             if patched_torch_load and torch is not None and original_torch_load is not None:
                 torch.load = original_torch_load  # type: ignore[assignment]
@@ -460,12 +797,17 @@ class MixFormerV2Tracker(TrackingModel):
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
 
-        init_bbox = _first_gt_bbox(video_path)
+        init_bbox = resolve_first_frame_bbox(
+            video_path,
+            mode=self.first_frame_source,
+            detector=self.init_detector_params,
+            fallback=self.first_frame_fallback,
+        )
         if not _is_valid_bbox(init_bbox):
             cap.release()
             raise RuntimeError(
-                "MixFormerV2 requires a valid first-frame ground-truth bbox. "
-                f"No usable bbox found next to '{os.path.basename(video_path)}'."
+                "MixFormerV2 requires a valid first-frame bounding box. "
+                f"Failed to obtain one (mode={self.first_frame_source}) for '{os.path.basename(video_path)}'."
             )
 
         tracker = self._build_tracker()

@@ -41,7 +41,7 @@ except Exception as ex:  # pragma: no cover - keep failure explicit until runtim
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
-from ..utils.annotations import load_coco_vid
+from ..utils.init_bbox import resolve_first_frame_bbox
 
 
 def _resolve_param_module(param_name: str):
@@ -63,28 +63,6 @@ def _resolve_param_module(param_name: str):
         return importlib.import_module(module_path)
     except Exception as ex:
         raise RuntimeError(f"Failed to import ToMP parameter module '{module_path}': {ex}") from ex
-
-
-def _first_gt_bbox(video_path: str) -> Optional[Tuple[float, float, float, float]]:
-    json_path = os.path.splitext(video_path)[0] + ".json"
-    if not os.path.exists(json_path):
-        return None
-    try:
-        gt = load_coco_vid(json_path)
-    except Exception:
-        return None
-    frames = gt.get("frames", {})
-    if not frames:
-        return None
-    valid_keys = sorted(int(k) for k, boxes in frames.items() if boxes)
-    if not valid_keys:
-        return None
-    first_idx = valid_keys[0]
-    bbox = frames.get(first_idx, [None])[0]
-    if not bbox:
-        return None
-    x, y, w, h = bbox
-    return float(x), float(y), float(w), float(h)
 
 
 def _is_valid_bbox(bbox: Optional[Tuple[float, float, float, float]]) -> bool:
@@ -120,6 +98,15 @@ class ToMPTracker(TrackingModel):
             "checkpoint": None,
             "env": {},
         },
+        "first_frame_source": "gt",
+        "first_frame_fallback": "gt",
+        "init_detector_weights": "best.pt",
+        "init_detector_conf": 0.25,
+        "init_detector_iou": 0.5,
+        "init_detector_imgsz": 640,
+        "init_detector_device": "auto",
+        "init_detector_classes": None,
+        "init_detector_max_det": 50,
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -167,6 +154,23 @@ class ToMPTracker(TrackingModel):
         self._create_params()
 
         self.preprocs: List[PreprocessingModule] = []
+
+        self.first_frame_source = str(config.get("first_frame_source", self.DEFAULT_CONFIG["first_frame_source"]) or "gt").lower()
+        raw_fallback = config.get("first_frame_fallback", self.DEFAULT_CONFIG["first_frame_fallback"])
+        if raw_fallback is None:
+            self.first_frame_fallback: Optional[str] = None
+        else:
+            fb = str(raw_fallback).strip().lower()
+            self.first_frame_fallback = fb if fb not in ("", "none", "null") else None
+        self.init_detector_params = {
+            "weights": str(config.get("init_detector_weights", self.DEFAULT_CONFIG["init_detector_weights"])),
+            "conf": float(config.get("init_detector_conf", self.DEFAULT_CONFIG["init_detector_conf"])),
+            "iou": float(config.get("init_detector_iou", self.DEFAULT_CONFIG["init_detector_iou"])),
+            "imgsz": int(config.get("init_detector_imgsz", self.DEFAULT_CONFIG["init_detector_imgsz"])),
+            "device": str(config.get("init_detector_device", self.DEFAULT_CONFIG["init_detector_device"])),
+            "classes": config.get("init_detector_classes", self.DEFAULT_CONFIG["init_detector_classes"]),
+            "max_det": int(config.get("init_detector_max_det", self.DEFAULT_CONFIG["init_detector_max_det"])),
+        }
 
     # ------------------------------------------------------------------
     # TrackingModel API
@@ -323,12 +327,17 @@ class ToMPTracker(TrackingModel):
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
 
-        init_bbox = _first_gt_bbox(video_path)
+        init_bbox = resolve_first_frame_bbox(
+            video_path,
+            mode=self.first_frame_source,
+            detector=self.init_detector_params,
+            fallback=self.first_frame_fallback,
+        )
         if not _is_valid_bbox(init_bbox):
             cap.release()
             raise RuntimeError(
-                "ToMP requires a valid initial ground-truth bounding box. "
-                f"No usable bbox found next to '{video_path}'."
+                "ToMP requires a valid first-frame bounding box. "
+                f"Failed to obtain one (mode={self.first_frame_source}) for '{video_path}'."
             )
 
         tracker = self._build_tracker()
