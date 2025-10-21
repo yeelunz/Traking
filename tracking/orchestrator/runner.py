@@ -323,8 +323,8 @@ class PipelineRunner:
                                 # detection aggregation
                                 "tp_50": 0, "fp_50": 0, "fn_50": 0,
                                 "tp_75": 0, "fp_75": 0, "fn_75": 0,
-                                # EAO aggregation (average across videos)
-                                "sum_EAO": 0.0, "videos": 0,
+                                # Success AUC aggregation (average across videos)
+                                "sum_success_auc": 0.0, "videos": 0,
                             })
                             agg["count"] += int(sm.get("count", 0))
                             agg["sum_iou"] += float(sm.get("sum_iou", 0.0))
@@ -337,9 +337,9 @@ class PipelineRunner:
                             agg["tp_75"] += int(sm.get("tp_75", 0))
                             agg["fp_75"] += int(sm.get("fp_75", 0))
                             agg["fn_75"] += int(sm.get("fn_75", 0))
-                            # EAO per-video scalar average
-                            if "EAO" in sm:
-                                agg["sum_EAO"] += float(sm.get("EAO", 0.0))
+                            # Success AUC per-video scalar average
+                            if "success_auc" in sm:
+                                agg["sum_success_auc"] += float(sm.get("success_auc", 0.0))
                                 agg["videos"] += 1
                         self._log(f"Evaluated metrics written to: {vid_met_dir}", to_console=(tqdm is None))
 
@@ -403,15 +403,15 @@ class PipelineRunner:
                         tp75, fp75 = int(a.get("tp_75", 0)), int(a.get("fp_75", 0))
                         map50 = (tp50 / (tp50 + fp50)) if (tp50 + fp50) > 0 else 0.0
                         map75 = (tp75 / (tp75 + fp75)) if (tp75 + fp75) > 0 else 0.0
-                        # Average EAO across videos (if any present)
+                        # Average Success AUC across videos (if any present)
                         vcnt = max(1, int(a.get("videos", 0)))
-                        eao_mean = float(a.get("sum_EAO", 0.0)) / vcnt if int(a.get("videos", 0)) > 0 else 0.0
+                        success_auc_mean = float(a.get("sum_success_auc", 0.0)) / vcnt if int(a.get("videos", 0)) > 0 else 0.0
                         summary_out[model_name] = {
                             "frames_count": n,
                             "iou_mean": i_mu, "iou_std": i_sd,
                             "ce_mean": c_mu, "ce_std": c_sd,
                             "mAP_50": map50, "mAP_75": map75,
-                            "EAO": eao_mean,
+                            "success_auc": success_auc_mean,
                         }
                     summary_path = os.path.join(met_dir, "summary.json")
                     with open(summary_path, "w", encoding="utf-8") as f:
@@ -495,15 +495,15 @@ class PipelineRunner:
                 agg = {}
                 for sm in fold_summaries:
                     for model_name, m in sm.items():
-                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "mAP_50": [], "mAP_75": [], "EAO": []})
+                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "mAP_50": [], "mAP_75": [], "success_auc": []})
                         agg[model_name]["iou_mean"].append(m.get("iou_mean", 0.0))
                         agg[model_name]["ce_mean"].append(m.get("ce_mean", 0.0))
                         if "mAP_50" in m:
                             agg[model_name]["mAP_50"].append(m.get("mAP_50", 0.0))
                         if "mAP_75" in m:
                             agg[model_name]["mAP_75"].append(m.get("mAP_75", 0.0))
-                        if "EAO" in m:
-                            agg[model_name]["EAO"].append(m.get("EAO", 0.0))
+                        if "success_auc" in m:
+                            agg[model_name]["success_auc"].append(m.get("success_auc", 0.0))
                 comp_dir = os.path.join(out_dir, "comparison")
                 os.makedirs(comp_dir, exist_ok=True)
                 agg_out = {}
@@ -523,8 +523,8 @@ class PipelineRunner:
                         "mAP_50_std": mean_std(vals.get("mAP_50", []))[1],
                         "mAP_75_mean": mean_std(vals.get("mAP_75", []))[0],
                         "mAP_75_std": mean_std(vals.get("mAP_75", []))[1],
-                        "EAO_mean": mean_std(vals.get("EAO", []))[0],
-                        "EAO_std": mean_std(vals.get("EAO", []))[1],
+                        "success_auc_mean": mean_std(vals.get("success_auc", []))[0],
+                        "success_auc_std": mean_std(vals.get("success_auc", []))[1],
                     }
                 with open(os.path.join(comp_dir, "kfold_summary.json"), "w", encoding="utf-8") as f:
                     json.dump(agg_out, f, ensure_ascii=False, indent=2)

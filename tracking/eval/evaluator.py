@@ -137,35 +137,18 @@ class BasicEvaluator:
                 # center displacement relative to origin (0,0) for prediction
                 cx, cy = p.center
                 centers_mag.append((p.frame_index, float((cx ** 2 + cy ** 2) ** 0.5)))
-            # --- EAO (Expected Average Overlap) simplified implementation ---
-            # Construct IoU time series aligned to GT frames (missing predictions count as IoU=0)
-            gt_seq_frames_sorted: List[int] = sorted([int(fi) for fi, boxes in frames_gt.items() if boxes])
-            iou_ts: List[float] = []
-            for fi in gt_seq_frames_sorted:
-                gtb = (frames_gt.get(fi) or [None])[0]
-                if gtb is None:
-                    continue
-                pb = pred_map.get(int(fi))
-                iou_ts.append(bbox_iou(pb, gtb) if pb is not None else 0.0)
-            # Define the evaluation length range [L_min, L_max]
-            L_min = 1
-            L_max_default = 100
-            N = len(iou_ts)
-            eao_curve: List[Tuple[int, float]] = []  # (L, expected avg overlap for length L)
-            if N > 0:
-                L_max = min(L_max_default, N)
-                cumsum = [0.0]
-                s = 0.0
-                for v in iou_ts:
-                    s += float(v)
-                    cumsum.append(s)
-                for L in range(L_min, L_max + 1):
-                    avg_overlap_L = (cumsum[L] - cumsum[0]) / float(L)
-                    eao_curve.append((L, avg_overlap_L))
-                eao = sum(val for _, val in eao_curve) / len(eao_curve)
-            else:
-                L_max = 0
-                eao = 0.0
+            # --- Success curve & AUC ---
+            success_curve: List[Tuple[float, float]] = []  # (IoU threshold, success rate)
+            success_auc = 0.0
+            if ious:
+                thresholds = [i / 100.0 for i in range(0, 101)]
+                total_frames = float(len(ious))
+                success_rates: List[float] = []
+                for thr in thresholds:
+                    success_rate = sum(1 for val in ious if val >= thr) / total_frames
+                    success_curve.append((thr, success_rate))
+                    success_rates.append(success_rate)
+                success_auc = sum(success_rates) / len(success_rates)
             # detection-style metrics (single object) at IoU thresholds
             det50 = _det_counts_ap(preds, frames_gt, 0.5)
             det75 = _det_counts_ap(preds, frames_gt, 0.75)
@@ -186,9 +169,8 @@ class BasicEvaluator:
                 # raw counts for aggregation
                 "tp_50": det50["tp"], "fp_50": det50["fp"], "fn_50": det50["fn"],
                 "tp_75": det75["tp"], "fp_75": det75["fp"], "fn_75": det75["fn"],
-                # EAO metrics (per-sequence)
-                "EAO": float(eao),
-                "EAO_L": int(L_max),
+                # Success curve metric (per-sequence)
+                "success_auc": float(success_auc),
                 # --- Debug coverage fields ---
                 "debug_total_gt_frames": total_gt_frames,
                 "debug_total_pred_frames": total_pred_frames,
@@ -212,13 +194,13 @@ class BasicEvaluator:
             with open(os.path.join(out_dir, f"{model_name}_per_frame.csv"), "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerows(per_frame_rows)
-            # EAO curve csv
-            if eao_curve:
-                with open(os.path.join(out_dir, f"{model_name}_eao_curve.csv"), "w", newline="", encoding="utf-8") as f:
+            # Success curve csv
+            if success_curve:
+                with open(os.path.join(out_dir, f"{model_name}_success_curve.csv"), "w", newline="", encoding="utf-8") as f:
                     w = csv.writer(f)
-                    w.writerow(["L", "expected_avg_overlap"])
-                    for L, val in eao_curve:
-                        w.writerow([L, val])
+                    w.writerow(["iou_threshold", "success_rate"])
+                    for thr, val in success_curve:
+                        w.writerow([thr, val])
             # plots
             if plt is not None:
                 try:
@@ -276,18 +258,18 @@ class BasicEvaluator:
                         plt.tight_layout()
                         plt.savefig(os.path.join(out_dir, f"{model_name}_center_displacement.png"))
                         plt.close()
-                    # EAO curve plot
-                    if eao_curve:
+                    # Success curve plot
+                    if success_curve:
                         plt.figure()
-                        xs = [L for L, _ in eao_curve]
-                        ys = [v for _, v in eao_curve]
+                        xs = [thr for thr, _ in success_curve]
+                        ys = [v for _, v in success_curve]
                         plt.plot(xs, ys, linewidth=1.8)
-                        plt.title(f"EAO Curve - {model_name}")
-                        plt.xlabel("Sequence length L")
-                        plt.ylabel("Expected Average Overlap")
+                        plt.title(f"Success Curve - {model_name}")
+                        plt.xlabel("IoU threshold")
+                        plt.ylabel("Success rate")
                         plt.ylim(0.0, 1.0)
                         plt.tight_layout()
-                        plt.savefig(os.path.join(out_dir, f"{model_name}_eao_curve.png"))
+                        plt.savefig(os.path.join(out_dir, f"{model_name}_success_curve.png"))
                         plt.close()
                 except Exception:
                     pass

@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -27,6 +28,7 @@ except Exception as ex:  # pragma: no cover
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
+from ..utils.annotations import load_coco_vid
 from ..utils.init_bbox import resolve_first_frame_bbox
 
 
@@ -198,6 +200,139 @@ def _allow_mixformer_globals() -> None:
         add_safe(safe_types)
     except Exception:
         pass
+
+
+@contextmanager
+def _force_torch_load_weights_only(value: Optional[bool], warn: Optional[Callable[[], None]] = None):
+    """Temporarily patch torch.load to default to a specific weights_only value."""
+    if torch is None or value is None:
+        yield
+        return
+
+    candidate = getattr(torch, "load", None)
+    if not callable(candidate):
+        yield
+        return
+
+    original = candidate
+    if getattr(candidate, "_mixformer_forced_weights_only", False):
+        # Already patched elsewhere; just yield to avoid stacking
+        yield
+        return
+
+    def _patched_torch_load(*args: Any, **kwargs: Any):
+        if warn is not None:
+            try:
+                warn()
+            except Exception:
+                pass
+        kwargs.setdefault("weights_only", value)
+        return original(*args, **kwargs)
+
+    setattr(_patched_torch_load, "_mixformer_forced_weights_only", True)
+    torch.load = _patched_torch_load  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        torch.load = original  # type: ignore[assignment]
+
+
+def _extract_annotation_frames(annotation: Optional[Dict[str, Any]], video_path: Optional[str]) -> Dict[int, List[Tuple[float, float, float, float]]]:
+    """Return frame-index -> list[bbox] mapping from mixed annotation formats."""
+
+    def _normalize_boxes(raw_boxes: Any) -> List[Tuple[float, float, float, float]]:
+        boxes_out: List[Tuple[float, float, float, float]] = []
+        if not isinstance(raw_boxes, (list, tuple)):
+            return boxes_out
+        for box in raw_boxes:
+            if not isinstance(box, (list, tuple)) or len(box) < 4:
+                continue
+            try:
+                x, y, w, h = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+            except Exception:
+                continue
+            if not np.isfinite([x, y, w, h]).all():  # type: ignore[union-attr]
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            boxes_out.append((x, y, w, h))
+        return boxes_out
+
+    frames: Dict[int, List[Tuple[float, float, float, float]]] = {}
+    ann = annotation if isinstance(annotation, dict) else {}
+
+    raw_frames = ann.get("frames") if isinstance(ann.get("frames"), (dict, list)) else None
+    if isinstance(raw_frames, dict):
+        for key, raw_boxes in raw_frames.items():
+            try:
+                frame_idx = int(key)
+            except Exception:
+                continue
+            boxes = _normalize_boxes(raw_boxes)
+            if boxes:
+                frames[frame_idx] = boxes
+        if frames:
+            return frames
+
+    images = ann.get("images") if isinstance(ann.get("images"), list) else None
+    annotations = ann.get("annotations") if isinstance(ann.get("annotations"), list) else None
+    if images and annotations:
+        img_to_frame: Dict[int, int] = {}
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            img_id = img.get("id")
+            if img_id is None:
+                continue
+            try:
+                fi = img.get("frame_index")
+                if fi is None:
+                    fi = int(img_id) - 1
+                frame_idx = int(fi)
+                img_to_frame[int(img_id)] = frame_idx
+            except Exception:
+                continue
+        for ann_entry in annotations:
+            if not isinstance(ann_entry, dict):
+                continue
+            img_id = ann_entry.get("image_id")
+            if img_id is None:
+                continue
+            try:
+                key = int(img_id)
+            except Exception:
+                continue
+            frame_idx = img_to_frame.get(key)
+            if frame_idx is None:
+                continue
+            boxes = _normalize_boxes([ann_entry.get("bbox")])
+            if boxes:
+                frames.setdefault(frame_idx, []).extend(boxes)
+        if frames:
+            return frames
+
+    if video_path:
+        json_path = os.path.splitext(video_path)[0] + ".json"
+        if os.path.exists(json_path):
+            try:
+                loaded = load_coco_vid(json_path)
+                loaded_frames = loaded.get("frames", {})
+                normalized: Dict[int, List[Tuple[float, float, float, float]]] = {}
+                if isinstance(loaded_frames, dict):
+                    for key, raw_boxes in loaded_frames.items():
+                        try:
+                            frame_idx = int(key)
+                        except Exception:
+                            continue
+                        boxes = _normalize_boxes(raw_boxes)
+                        if boxes:
+                            normalized[frame_idx] = boxes
+                if normalized:
+                    return normalized
+            except Exception:
+                pass
+
+    return {}
 
 
 def _resolve_tracker(tracker_name: str) -> Tuple[Callable[..., Any], Callable[..., Any]]:
@@ -414,8 +549,9 @@ class MixFormerV2Tracker(TrackingModel):
 
         device = torch.device("cuda")
         settings = SimpleNamespace(static_model=self._checkpoint_arg)
-        net = build_mixformer2_vit_online(cfg, settings=settings, train=True)
-        checkpoint_obj = torch.load(self._checkpoint_arg, map_location="cpu")
+        with _force_torch_load_weights_only(False):
+            net = build_mixformer2_vit_online(cfg, settings=settings, train=True)
+            checkpoint_obj = torch.load(self._checkpoint_arg, map_location="cpu")
         ckpt_state = checkpoint_obj.get("net") if isinstance(checkpoint_obj, dict) else checkpoint_obj
         net.load_state_dict(ckpt_state, strict=False)
         net = net.to(device)
@@ -501,25 +637,15 @@ class MixFormerV2Tracker(TrackingModel):
         progress_cb = getattr(self, "progress_callback", None)
 
         def iter_video_samples(video_path, annotation):
-            frames = (annotation or {}).get("frames", {})
+            frames = _extract_annotation_frames(annotation, video_path)
             if not frames:
                 return
             idx_to_bbox = {}
-            for key, boxes in frames.items():
+            for frame_idx, boxes in frames.items():
                 if not boxes:
                     continue
-                try:
-                    frame_idx = int(key)
-                except Exception:
-                    continue
                 bbox = boxes[0]
-                if bbox and len(bbox) >= 4 and bbox[2] > 0 and bbox[3] > 0:
-                    idx_to_bbox[frame_idx] = (
-                        float(bbox[0]),
-                        float(bbox[1]),
-                        float(bbox[2]),
-                        float(bbox[3]),
-                    )
+                idx_to_bbox[int(frame_idx)] = bbox
             if len(idx_to_bbox) < 2:
                 return
             cap = cv2.VideoCapture(video_path)
@@ -708,22 +834,6 @@ class MixFormerV2Tracker(TrackingModel):
             else:
                 print(warn_msg)
 
-        patched_torch_load = False
-        original_torch_load: Optional[Callable[..., Any]] = None
-        if torch is not None:
-            candidate = getattr(torch, "load", None)
-            if callable(candidate) and not getattr(candidate, "_mixformer_forced_weights_only", False):
-                original_torch_load = candidate
-
-                def _patched_torch_load(*args: Any, **kwargs: Any):
-                    kwargs.setdefault("weights_only", False)
-                    _emit_weights_warning()
-                    return original_torch_load(*args, **kwargs)  # type: ignore[misc]
-
-                setattr(_patched_torch_load, "_mixformer_forced_weights_only", True)
-                torch.load = _patched_torch_load  # type: ignore[assignment]
-                patched_torch_load = True
-
         kwargs: Dict[str, Any] = {
             "yaml_name": self.parameter_name,
             "model": self._checkpoint_arg,
@@ -735,7 +845,7 @@ class MixFormerV2Tracker(TrackingModel):
         if self.update_interval is not None:
             kwargs["update_interval"] = self.update_interval
 
-        try:
+        with _force_torch_load_weights_only(False, warn=_emit_weights_warning):
             params = self._parameters_fn(**kwargs)
             if not hasattr(params, "debug"):
                 params.debug = 0
@@ -756,9 +866,6 @@ class MixFormerV2Tracker(TrackingModel):
                             print(warn_msg)
                     else:
                         print(warn_msg)
-        finally:
-            if patched_torch_load and torch is not None and original_torch_load is not None:
-                torch.load = original_torch_load  # type: ignore[assignment]
 
         original_load = getattr(tracker, "load_state", None)
         if callable(original_load):
