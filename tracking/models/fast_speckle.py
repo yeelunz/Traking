@@ -9,7 +9,7 @@ import numpy as np
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
 from ..core.registry import register_model
-from ..utils.init_bbox import resolve_first_frame_bbox
+from ..utils.init_bbox import detect_bbox_on_frame, resolve_first_frame_bbox
 
 
 def _median_displacement(pts0: np.ndarray, pts1: np.ndarray) -> Tuple[float, float]:
@@ -40,20 +40,28 @@ class FASTSpeckle(TrackingModel):
         # maintenance
         "min_features": 30,
         "reinit_interval": 10,  # frames
-    # fallback
-    "use_gftt_fallback": True,
-    # debug
-    "debug": False,
-    # first-frame init
-    "first_frame_source": "gt",
-    "first_frame_fallback": "gt",
-    "init_detector_weights": "best.pt",
-    "init_detector_conf": 0.25,
-    "init_detector_iou": 0.5,
-    "init_detector_imgsz": 640,
-    "init_detector_device": "auto",
-    "init_detector_classes": None,
-    "init_detector_max_det": 50,
+        # fallback
+        "use_gftt_fallback": True,
+        # debug
+        "debug": False,
+        # first-frame init
+        "first_frame_source": "gt",
+        "first_frame_fallback": "gt",
+        "init_detector_weights": "best.pt",
+        "init_detector_conf": 0.25,
+        "init_detector_iou": 0.5,
+        "init_detector_imgsz": 640,
+        "init_detector_device": "auto",
+        "init_detector_classes": None,
+        "init_detector_max_det": 50,
+        # low-confidence recovery
+        "low_confidence_reinit": {
+            "enabled": False,
+            "threshold": 0.3,
+            "min_interval": 15,
+            "detector": {},
+            "detector_min_conf": None,
+        },
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -86,6 +94,21 @@ class FASTSpeckle(TrackingModel):
             "classes": config.get("init_detector_classes", self.DEFAULT_CONFIG["init_detector_classes"]),
             "max_det": int(config.get("init_detector_max_det", self.DEFAULT_CONFIG["init_detector_max_det"])),
         }
+
+        lc_default = self.DEFAULT_CONFIG["low_confidence_reinit"]
+        lc_cfg = config.get("low_confidence_reinit", lc_default)
+        if isinstance(lc_cfg, bool):
+            lc_cfg = {"enabled": bool(lc_cfg)}
+        lc_cfg = dict(lc_cfg or {})
+        self.low_conf_reinit_enabled = bool(lc_cfg.get("enabled", lc_default["enabled"]))
+        self.low_conf_threshold = float(lc_cfg.get("threshold", lc_default["threshold"]))
+        self.low_conf_min_interval = max(1, int(lc_cfg.get("min_interval", lc_default["min_interval"])))
+        detector_override = lc_cfg.get("detector") or {}
+        if not isinstance(detector_override, dict):
+            detector_override = {}
+        self.low_conf_detector_params = {**self.init_detector_params, **detector_override}
+        min_conf_val = lc_cfg.get("detector_min_conf", lc_default.get("detector_min_conf"))
+        self.low_conf_detector_min_conf = None if min_conf_val in (None, "none", "") else float(min_conf_val)
 
         # build detector
         try:
@@ -199,24 +222,31 @@ class FASTSpeckle(TrackingModel):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
+
         preds: List[FramePrediction] = []
-        prev_gray = None
+        prev_gray: Optional[np.ndarray] = None
         bbox: Optional[Tuple[float, float, float, float]] = None
         pts_prev: Optional[np.ndarray] = None
         t = 0
         last_reinit = -10**9
+        last_detector_reinit = -10**9
+        base_feature_count = 0
+
         while True:
-            ok, frame = cap.read()
+            ok, frame_bgr = cap.read()
             if not ok:
                 break
-            frame = self._apply_preprocs(frame)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            frame_bgr = self._apply_preprocs(frame_bgr)
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
             if prev_gray is None:
                 h, w = gray.shape
                 initbb = self._resolve_first_bbox(video_path)
                 if initbb is None:
                     cap.release()
                     import os as _os
+
                     raise RuntimeError(
                         f"Failed to obtain first-frame bbox for video: {_os.path.basename(video_path)} "
                         f"(mode={self.first_frame_source})."
@@ -228,26 +258,30 @@ class FASTSpeckle(TrackingModel):
                 ih = float(max(1.0, min(gh, h - y)))
                 bbox = (x, y, iw, ih)
                 pts_prev = self._detect_in_roi(gray, bbox)
+                base_feature_count = len(pts_prev) if pts_prev is not None else 0
                 if self.debug:
                     try:
                         n = 0 if pts_prev is None else len(pts_prev)
                         print(f"[NCC] init roi=({int(x)},{int(y)},{int(iw)},{int(ih)}) features={n}")
                     except Exception:
                         pass
-                preds.append(FramePrediction(t, bbox, 1.0))
+                confidence_init = 1.0 if base_feature_count > 0 else 0.0
+                preds.append(FramePrediction(t, bbox, confidence_init))
                 prev_gray = gray
                 last_reinit = t
                 t += 1
                 continue
-            # decide if we should (re)detect
+
             need_reinit = (
-                pts_prev is None or len(pts_prev) < self.min_features or (t - last_reinit) >= self.reinit_interval
+                pts_prev is None
+                or len(pts_prev) < self.min_features
+                or (t - last_reinit) >= self.reinit_interval
             )
             if need_reinit and bbox is not None:
-                # use current frame for re-detect to adapt to appearance changes
                 new_pts = self._detect_in_roi(gray, bbox)
                 if new_pts is not None and len(new_pts) > 0:
                     pts_prev = new_pts
+                    base_feature_count = len(new_pts)
                     last_reinit = t
                 if self.debug:
                     try:
@@ -255,37 +289,135 @@ class FASTSpeckle(TrackingModel):
                         print(f"[NCC] reinit@{t}: features={n}")
                     except Exception:
                         pass
+
             if pts_prev is None or len(pts_prev) == 0 or bbox is None:
-                # keep previous bbox if tracking lost
+                confidence = 0.0
+                if (
+                    self.low_conf_reinit_enabled
+                    and (t - last_detector_reinit) >= self.low_conf_min_interval
+                ):
+                    det_bbox, det_conf = detect_bbox_on_frame(
+                        frame_bgr,
+                        self.low_conf_detector_params,
+                        self.low_conf_detector_min_conf,
+                    )
+                    if det_bbox is not None:
+                        bbox = det_bbox
+                        pts_prev = self._detect_in_roi(gray, bbox)
+                        base_feature_count = len(pts_prev) if pts_prev is not None else 0
+                        prev_gray = gray
+                        last_detector_reinit = t
+                        det_conf_val = float(det_conf) if det_conf is not None else None
+                        conf_out = 1.0
+                        if self.debug:
+                            try:
+                                det_msg = (
+                                    f" det_conf={det_conf_val:.3f}" if det_conf_val is not None else ""
+                                )
+                                print(
+                                    f"[NCC] detector reinit@{t}: conf={conf_out:.3f}{det_msg} bbox="
+                                    f"({int(bbox[0])},{int(bbox[1])},{int(bbox[2])},{int(bbox[3])})"
+                                )
+                            except Exception:
+                                pass
+                        preds.append(FramePrediction(t, bbox, max(0.0, min(1.0, conf_out))))
+                        t += 1
+                        continue
+
                 if bbox is not None:
-                    preds.append(FramePrediction(t, bbox, 1.0))
+                    preds.append(FramePrediction(t, bbox, confidence))
                 prev_gray = gray
                 t += 1
                 continue
-            # track with LK
-            pts_next, st, _err = cv2.calcOpticalFlowPyrLK(
-                prev_gray, gray, pts_prev.astype(np.float32), None,
-                winSize=(self.lk_win, self.lk_win), maxLevel=self.lk_max_level
+
+            pts_prev_np = np.asarray(pts_prev, dtype=np.float32)
+            pts_next, st, err = cv2.calcOpticalFlowPyrLK(
+                prev_gray,
+                gray,
+                pts_prev_np,
+                None,
+                winSize=(self.lk_win, self.lk_win),
+                maxLevel=self.lk_max_level,
             )
-            status = st.reshape(-1) == 1 if st is not None else np.zeros((len(pts_prev),), dtype=bool)
-            good_old = pts_prev[status]
-            good_new = (pts_next.reshape(-1, 2) if pts_next is not None else pts_prev)[status]
+            status = st.reshape(-1) == 1 if st is not None else np.zeros((pts_prev_np.shape[0],), dtype=bool)
+            good_old = pts_prev_np[status] if status.any() else pts_prev_np
+            next_points = pts_next.reshape(-1, 2) if pts_next is not None else pts_prev_np
+            good_new = next_points[status] if status.any() else next_points
+
             if len(good_old) >= 3 and len(good_new) >= 3:
                 dx, dy = _median_displacement(good_old, good_new)
                 x, y, w, h = bbox
                 x = max(0.0, x + dx)
                 y = max(0.0, y + dy)
-                # keep size fixed (speckle drift only translates)
                 bbox = (x, y, w, h)
+
+            valid_count = int(status.sum()) if status.size else len(good_new)
+            denom_reference = max(1, base_feature_count if base_feature_count > 0 else pts_prev_np.shape[0])
+            ratio = valid_count / float(denom_reference)
+
+            err_factor = 0.0
+            if err is not None:
+                try:
+                    err_vals = err.reshape(-1)[status] if status.any() else err.reshape(-1)
+                except Exception:
+                    err_vals = None
+                if err_vals is not None and err_vals.size > 0:
+                    median_err = float(np.median(err_vals))
+                    norm_denom = float((self.lk_win ** 2) * max(1, self.lk_max_level + 1))
+                    err_factor = float(np.clip(median_err / norm_denom, 0.0, 1.0))
+
+            confidence = float(np.clip(ratio * (1.0 - err_factor), 0.0, 1.0))
+
+            low_confidence = (
+                self.low_conf_reinit_enabled
+                and confidence < self.low_conf_threshold
+                and (t - last_detector_reinit) >= self.low_conf_min_interval
+            )
+            if low_confidence:
+                det_bbox, det_conf = detect_bbox_on_frame(
+                    frame_bgr,
+                    self.low_conf_detector_params,
+                    self.low_conf_detector_min_conf,
+                )
+                if det_bbox is not None:
+                    bbox = det_bbox
+                    pts_prev = self._detect_in_roi(gray, bbox)
+                    base_feature_count = len(pts_prev) if pts_prev is not None else 0
+                    prev_gray = gray
+                    last_detector_reinit = t
+                    det_conf_val = float(det_conf) if det_conf is not None else None
+                    conf_out = 1.0
+                    if self.debug:
+                        try:
+                            det_msg = (
+                                f" det_conf={det_conf_val:.3f}" if det_conf_val is not None else ""
+                            )
+                            print(
+                                f"[NCC] detector reinit@{t}: conf={conf_out:.3f}{det_msg} bbox="
+                                f"({int(bbox[0])},{int(bbox[1])},{int(bbox[2])},{int(bbox[3])})"
+                            )
+                        except Exception:
+                            pass
+                    preds.append(FramePrediction(t, bbox, max(0.0, min(1.0, conf_out))))
+                    t += 1
+                    continue
+
             if self.debug:
                 try:
-                    print(f"[NCC] frame={t} tracked={len(good_new)} bbox=({int(bbox[0])},{int(bbox[1])},{int(bbox[2])},{int(bbox[3])})")
+                    print(
+                        f"[NCC] frame={t} tracked={len(good_new)} bbox="
+                        f"({int(bbox[0])},{int(bbox[1])},{int(bbox[2])},{int(bbox[3])}) conf={confidence:.3f}"
+                    )
                 except Exception:
                     pass
-            preds.append(FramePrediction(t, bbox, 1.0))
+
+            preds.append(FramePrediction(t, bbox, confidence))
             prev_gray = gray
-            pts_prev = good_new if len(good_new) else pts_prev
+            pts_prev = good_new if len(good_new) else pts_prev_np
+            if pts_prev is not None and len(pts_prev) > 0:
+                base_feature_count = max(base_feature_count, len(pts_prev))
             t += 1
+
         cap.release()
         return preds
 

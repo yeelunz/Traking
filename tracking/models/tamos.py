@@ -41,7 +41,7 @@ except Exception as ex:  # pragma: no cover
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
-from ..utils.init_bbox import resolve_first_frame_bbox
+from ..utils.init_bbox import detect_bbox_on_frame, resolve_first_frame_bbox
 from ..utils.annotations import load_coco_vid
 
 
@@ -107,6 +107,13 @@ class TaMOsTracker(TrackingModel):
         "init_detector_device": "auto",
         "init_detector_classes": None,
         "init_detector_max_det": 50,
+        "low_confidence_reinit": {
+            "enabled": False,
+            "threshold": 0.3,
+            "min_interval": 15,
+            "detector": {},
+            "detector_min_conf": None,
+        },
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -192,6 +199,22 @@ class TaMOsTracker(TrackingModel):
             "classes": merged.get("init_detector_classes", self.DEFAULT_CONFIG["init_detector_classes"]),
             "max_det": int(merged.get("init_detector_max_det", self.DEFAULT_CONFIG["init_detector_max_det"])),
         }
+
+        lc_default = self.DEFAULT_CONFIG["low_confidence_reinit"]
+        lc_cfg = merged.get("low_confidence_reinit", lc_default)
+        if isinstance(lc_cfg, bool):
+            lc_cfg = {"enabled": bool(lc_cfg)}
+        lc_cfg = dict(lc_cfg or {})
+        self.low_conf_reinit_enabled = bool(lc_cfg.get("enabled", lc_default["enabled"]))
+        self.low_conf_threshold = float(lc_cfg.get("threshold", lc_default["threshold"]))
+        self.low_conf_min_interval = max(1, int(lc_cfg.get("min_interval", lc_default["min_interval"])))
+        detector_override = lc_cfg.get("detector") or {}
+        if not isinstance(detector_override, dict):
+            detector_override = {}
+        self.low_conf_detector_params = {**self.init_detector_params, **detector_override}
+        min_conf_val = lc_cfg.get("detector_min_conf", lc_default.get("detector_min_conf"))
+        self.low_conf_detector_min_conf = None if min_conf_val in (None, "none", "") else float(min_conf_val)
+
         self._finetuned_state_dict = None
         self._finetuned_summary = None
 
@@ -835,6 +858,7 @@ class TaMOsTracker(TrackingModel):
         preds: List[FramePrediction] = []
         frame_idx = 0
         last_bbox: Optional[Tuple[float, float, float, float]] = None
+        last_detector_reinit = -10**9
 
         try:
             while True:
@@ -879,11 +903,36 @@ class TaMOsTracker(TrackingModel):
                     if score_val is not None and score_val < self.min_presence_score:
                         bbox_tuple = None
 
+                    should_reinit = (
+                        self.low_conf_reinit_enabled
+                        and (score_val is None or score_val < self.low_conf_threshold)
+                        and (frame_idx - last_detector_reinit) >= self.low_conf_min_interval
+                    )
+
+                    if should_reinit:
+                        det_bbox, det_conf = detect_bbox_on_frame(
+                            frame_bgr,
+                            self.low_conf_detector_params,
+                            self.low_conf_detector_min_conf,
+                        )
+                        if det_bbox is not None:
+                            tracker = self._build_tracker()
+                            tracker.initialize(frame_rgb, {"init_bbox": [float(v) for v in det_bbox]})
+                            last_detector_reinit = frame_idx
+                            last_bbox = det_bbox
+                            conf_out = det_conf if det_conf is not None else score_val
+                            if conf_out is not None:
+                                conf_out = float(max(0.0, min(1.0, conf_out)))
+                            preds.append(FramePrediction(frame_idx, det_bbox, conf_out))
+                            frame_idx += 1
+                            continue
+
                     if _is_valid_bbox(bbox_tuple):
                         preds.append(FramePrediction(frame_idx, bbox_tuple, score_val))
                         last_bbox = bbox_tuple
                     elif self.fallback_last_prediction and last_bbox is not None:
-                        preds.append(FramePrediction(frame_idx, last_bbox, score_val))
+                        fallback_score = score_val if score_val is not None else 0.0
+                        preds.append(FramePrediction(frame_idx, last_bbox, fallback_score))
 
                 frame_idx += 1
         finally:

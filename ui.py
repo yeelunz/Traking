@@ -31,6 +31,145 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         e.ignore()
 
 
+class LowConfidenceReinitEditor(QWidget):
+    valueChanged = Signal()
+
+    SUPPORTED_DETECTOR_KEYS = {"weights"}
+
+    def __init__(self, defaults: Dict[str, Any], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._defaults = dict(defaults or {})
+        self._extra_detector_keys: Dict[str, Any] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.chk_enabled = QCheckBox("啟用低信心重新偵測")
+        self.chk_enabled.stateChanged.connect(self._emit_changed)
+        layout.addWidget(self.chk_enabled)
+
+        form = QFormLayout()
+        form.setContentsMargins(6, 0, 0, 0)
+        layout.addLayout(form)
+
+        self.spn_threshold = NoWheelDoubleSpinBox()
+        self.spn_threshold.setRange(0.0, 1.0)
+        self.spn_threshold.setSingleStep(0.0001)
+        self.spn_threshold.setDecimals(9)
+        self.spn_threshold.valueChanged.connect(lambda *_: self._emit_changed())
+        self.spn_threshold.setToolTip("Tracker 輸出的 confidence 低於此值時，才會啟動重新偵測流程。")
+        form.addRow("Tracker 信心門檻", self.spn_threshold)
+
+        self.spn_min_interval = NoWheelSpinBox()
+        self.spn_min_interval.setRange(1, 100000)
+        self.spn_min_interval.valueChanged.connect(lambda *_: self._emit_changed())
+        self.spn_min_interval.setToolTip("兩次重新偵測之間最少需要間隔的 frame 數，避免頻繁呼叫偵測器。")
+        form.addRow("最小間隔 (frame)", self.spn_min_interval)
+
+        detector_row = QHBoxLayout()
+        detector_row.setContentsMargins(0, 0, 0, 0)
+        self.edit_detector_weights = QLineEdit()
+        self.edit_detector_weights.setPlaceholderText("留空=沿用 init detector 的權重，例如 best.pt")
+        self.edit_detector_weights.editingFinished.connect(self._emit_changed)
+        detector_row.addWidget(self.edit_detector_weights)
+        form.addRow("重偵測權重", detector_row)
+
+        self.edit_detector_min_conf = QLineEdit()
+        self.edit_detector_min_conf.setPlaceholderText("留空=沿用 YOLO 預設 (通常 0.25)")
+        self.edit_detector_min_conf.editingFinished.connect(self._emit_changed)
+        self.edit_detector_min_conf.setToolTip("重新偵測後的框需要達到的 YOLO 置信門檻；留空則使用 YOLO 模型的原始 conf。")
+        form.addRow("偵測結果最低置信", self.edit_detector_min_conf)
+
+        hint = QLabel("註：Tracker 信心門檻用來判斷何時觸發重新偵測；偵測結果最低置信則過濾 YOLO 回傳的候選框。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6a737d; font-size:11px;")
+        layout.addWidget(hint)
+
+        layout.addStretch(1)
+
+    def _emit_changed(self):
+        self.valueChanged.emit()
+
+    def _parse_float(self, text: str) -> Optional[float]:
+        txt = text.strip()
+        if not txt:
+            return None
+        try:
+            return float(txt)
+        except Exception:
+            return None
+
+    def get_value(self) -> Dict[str, Any]:
+        cfg = {
+            "enabled": bool(self.chk_enabled.isChecked()),
+            "threshold": float(self.spn_threshold.value()),
+            "min_interval": int(self.spn_min_interval.value()),
+            "detector": {},
+            "detector_min_conf": None,
+        }
+
+        detector_cfg: Dict[str, Any] = dict(self._extra_detector_keys)
+        weights = self.edit_detector_weights.text().strip()
+        if weights:
+            detector_cfg["weights"] = weights
+        else:
+            detector_cfg.pop("weights", None)
+
+        if detector_cfg:
+            cfg["detector"] = detector_cfg
+        else:
+            cfg["detector"] = {}
+
+        min_conf = self._parse_float(self.edit_detector_min_conf.text())
+        cfg["detector_min_conf"] = min_conf
+
+        return cfg
+
+    def set_value(self, value: Any):
+        defaults = self._defaults
+        if isinstance(value, bool):
+            value = {"enabled": bool(value)}
+        if not isinstance(value, dict):
+            value = {}
+
+        self.chk_enabled.setChecked(bool(value.get("enabled", defaults.get("enabled", False))))
+
+        thr = value.get("threshold", defaults.get("threshold", 0.3))
+        try:
+            self.spn_threshold.setValue(float(thr))
+        except Exception:
+            self.spn_threshold.setValue(float(defaults.get("threshold", 0.3)))
+
+        interval = value.get("min_interval", defaults.get("min_interval", 15))
+        try:
+            self.spn_min_interval.setValue(max(1, int(interval)))
+        except Exception:
+            self.spn_min_interval.setValue(int(defaults.get("min_interval", 15)))
+
+        detector_cfg = value.get("detector") or {}
+        if not isinstance(detector_cfg, dict):
+            detector_cfg = {}
+
+        weights = detector_cfg.get("weights") or ""
+        self.edit_detector_weights.setText(str(weights))
+
+        self._extra_detector_keys = {
+            k: v for k, v in detector_cfg.items() if k not in self.SUPPORTED_DETECTOR_KEYS
+        }
+        if weights:
+            self._extra_detector_keys.pop("weights", None)
+
+        min_conf = value.get("detector_min_conf", defaults.get("detector_min_conf"))
+        if min_conf in (None, "", "none"):
+            self.edit_detector_min_conf.clear()
+        else:
+            try:
+                self.edit_detector_min_conf.setText(str(float(min_conf)))
+            except Exception:
+                self.edit_detector_min_conf.setText(str(min_conf))
+
+
 class SimpleRunnerUI(QMainWindow):
     """UI: 預設即時雙向同步。沒有模式切換、沒有存檔（僅載入）。
     - Builder (左) 為主，但 Raw (右) 也可直接改；雙向解析。
@@ -51,6 +190,7 @@ class SimpleRunnerUI(QMainWindow):
         self.model_params: Dict[str, Dict[str, Any]] = {}
         self._current_pre_name: Optional[str] = None
         self._current_model_name: Optional[str] = None
+        self._active_model_defaults: Dict[str, Any] = {}
         self._pre_bindings: List[Tuple[str, Any, Any]] = []
         self._model_bindings: List[Tuple[str, Any, Any]] = []
         self._syncing = False
@@ -177,7 +317,11 @@ class SimpleRunnerUI(QMainWindow):
 
     # ---------------- Utility / Setup -----------------
     def _setup_ratio_spin(self, sp: NoWheelDoubleSpinBox, val: float):
-        sp.setRange(0.0, 1.0); sp.setSingleStep(0.05); sp.setDecimals(3); sp.setValue(val); sp.valueChanged.connect(self._on_builder_changed)
+        sp.setRange(0.0, 1.0)
+        sp.setSingleStep(0.0001)
+        sp.setDecimals(6)
+        sp.setValue(val)
+        sp.valueChanged.connect(self._on_builder_changed)
 
     def _wrap_box(self, title: str, w: QWidget):
         gb = QGroupBox(title); l = QVBoxLayout(gb); l.setContentsMargins(4,4,4,4); l.addWidget(w); return gb
@@ -433,8 +577,10 @@ class SimpleRunnerUI(QMainWindow):
             self._save_model_form(self._current_model_name)
         self._clear_form(self.model_form_layout)
         self._model_bindings = []
-        defaults = dict(getattr(MODEL_REGISTRY[name], 'DEFAULT_CONFIG', {}))
+        defaults_base = dict(getattr(MODEL_REGISTRY[name], 'DEFAULT_CONFIG', {}))
+        self._active_model_defaults = defaults_base
         user = self.model_params.get(name, {})
+        defaults = dict(defaults_base)
         defaults.update(user)
         if name in ('CSRT', 'OpticalFlowLK'): defaults.pop('init_box', None)
         for k, v in defaults.items():
@@ -509,6 +655,20 @@ class SimpleRunnerUI(QMainWindow):
 
             register(combo, 'currentIndexChanged')
             return combo, _get_value, _set_value
+        if scope == 'model' and key == 'low_confidence_reinit':
+            defaults = {}
+            if isinstance(self._active_model_defaults, dict):
+                defaults = dict(self._active_model_defaults.get('low_confidence_reinit', {}))
+            widget = LowConfidenceReinitEditor(defaults, parent=self)
+
+            def _get():
+                return widget.get_value()
+
+            def _set(v):
+                widget.set_value(v)
+
+            register(widget, 'valueChanged')
+            return widget, _get, _set
         if isinstance(value, bool):
             w = QCheckBox(); register(w, 'stateChanged')
             return w, lambda: bool(w.isChecked()), lambda v: w.setChecked(bool(v))

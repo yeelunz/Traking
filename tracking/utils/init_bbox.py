@@ -79,22 +79,12 @@ def _get_yolo_model(weights: str):
     return model
 
 
-def _first_frame_from_yolo(
-    video_path: str,
+def _infer_best_bbox_from_frame(
+    frame: Any,
     detector: Dict[str, Any],
-) -> Optional[Tuple[float, float, float, float]]:
-    if cv2 is None:
-        raise RuntimeError("OpenCV is required for YOLO-based initialization.")
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-    try:
-        ok, frame = cap.read()
-    finally:
-        cap.release()
-    if not ok:
-        return None
-
+) -> Tuple[Optional[Tuple[float, float, float, float]], Optional[float]]:
+    if frame is None:
+        return None, None
     weights = str(detector.get("weights") or "best.pt")
     model = _get_yolo_model(weights)
 
@@ -128,19 +118,19 @@ def _first_frame_from_yolo(
         raise RuntimeError(f"YOLO inference failed: {exc}") from exc
 
     if not results:
-        return None
+        return None, None
     result = results[0]
     boxes = getattr(result, "boxes", None)
     if boxes is None or len(boxes) == 0:
-        return None
+        return None, None
 
     try:
         confs = boxes.conf.cpu().numpy().astype(float)
         xyxy = boxes.xyxy.cpu().numpy().astype(float)
     except Exception:
-        return None
+        return None, None
     if confs.size == 0 or xyxy.size == 0:
-        return None
+        return None, None
     best_idx = int(np.argmax(confs))
     x1, y1, x2, y2 = xyxy[best_idx]
     w = max(1.0, float(x2 - x1))
@@ -151,7 +141,45 @@ def _first_frame_from_yolo(
     y = float(max(0.0, min(height - 1.0, y1)))
     w = float(min(w, max(1.0, width - x)))
     h = float(min(h, max(1.0, height - y)))
-    return x, y, w, h
+    return (x, y, w, h), float(confs[best_idx])
+
+
+def _first_frame_from_yolo(
+    video_path: str,
+    detector: Dict[str, Any],
+) -> Optional[Tuple[float, float, float, float]]:
+    if cv2 is None:
+        raise RuntimeError("OpenCV is required for YOLO-based initialization.")
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+    try:
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok:
+        return None
+
+    bbox, _ = _infer_best_bbox_from_frame(frame, detector)
+    return bbox
+
+
+def detect_bbox_on_frame(
+    frame_bgr: Any,
+    detector: Optional[Dict[str, Any]] = None,
+    min_confidence: Optional[float] = None,
+) -> Tuple[Optional[Tuple[float, float, float, float]], Optional[float]]:
+    """Run YOLO detection on a single BGR frame and return the best bbox and confidence."""
+
+    if frame_bgr is None:
+        return None, None
+    detector_cfg = detector or {}
+    bbox, conf = _infer_best_bbox_from_frame(frame_bgr, detector_cfg)
+    if conf is None:
+        return None, None
+    if min_confidence is not None and conf < float(min_confidence):
+        return None, None
+    return bbox, conf
 
 
 def resolve_first_frame_bbox(
