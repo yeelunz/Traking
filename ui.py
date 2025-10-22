@@ -1,5 +1,6 @@
 from __future__ import annotations
-import json, os
+import copy
+import json, os, re, time
 from typing import Optional, Dict, Any, List, Tuple
 
 from PySide6.QtCore import Qt, QRegularExpression, QTimer, QObject, Signal, QThread
@@ -198,6 +199,15 @@ class SimpleRunnerUI(QMainWindow):
         self._updating_raw_programmatically = False
         self._run_thread: Optional[QThread] = None
         self._run_worker: Optional[QObject] = None
+        self._queue_items: List[Dict[str, Any]] = []
+        self._queue_pending: List[Dict[str, Any]] = []
+        self._queue_running: bool = False
+        self._queue_error: bool = False
+        self._queue_total: int = 0
+        self._queue_completed: int = 0
+        self._queue_results_root: Optional[str] = None
+        self._queue_current_label: Optional[str] = None
+        self._setting_exp_name = False
 
         # --- Root layout ---
         central = QWidget(); self.setCentralWidget(central)
@@ -220,6 +230,13 @@ class SimpleRunnerUI(QMainWindow):
         btn_root = QPushButton("選…"); btn_root.clicked.connect(self.browse_root)
         ds_row.addWidget(self.edit_root, 1); ds_row.addWidget(btn_root)
         left_layout.addLayout(ds_row)
+
+        exp_row = QHBoxLayout(); exp_row.addWidget(QLabel("實驗名稱:"))
+        self.edit_exp_name = QLineEdit(); self.edit_exp_name.setPlaceholderText("留空會自動依前處理 / 模型產生")
+        self.edit_exp_name.textChanged.connect(self._on_builder_changed)
+        btn_exp_reset = QPushButton("重設"); btn_exp_reset.clicked.connect(self._reset_experiment_name)
+        exp_row.addWidget(self.edit_exp_name, 1); exp_row.addWidget(btn_exp_reset)
+        left_layout.addLayout(exp_row)
 
         # Split group
         gb_split = QGroupBox("資料切分"); fl_split = QFormLayout(gb_split)
@@ -286,6 +303,23 @@ class SimpleRunnerUI(QMainWindow):
         self.lbl_status = QLabel("Ready")
         act_row.addWidget(self.btn_load); act_row.addWidget(self.btn_run); act_row.addWidget(self.progress, 1); act_row.addWidget(self.lbl_status)
         left_layout.addLayout(act_row)
+
+        queue_group = QGroupBox("排程隊列")
+        queue_layout = QVBoxLayout(queue_group); queue_layout.setContentsMargins(6,6,6,6)
+        header_row = QHBoxLayout()
+        self.btn_queue_add = QPushButton("加入排程"); self.btn_queue_add.clicked.connect(self._queue_add_current)
+        self.btn_queue_remove = QPushButton("移除選取"); self.btn_queue_remove.clicked.connect(self._queue_remove_selected)
+        self.btn_queue_clear = QPushButton("清空"); self.btn_queue_clear.clicked.connect(self._queue_clear)
+        header_row.addWidget(self.btn_queue_add); header_row.addWidget(self.btn_queue_remove); header_row.addWidget(self.btn_queue_clear); header_row.addStretch(1)
+        queue_layout.addLayout(header_row)
+        self.list_queue = QListWidget(); self.list_queue.setSelectionMode(QAbstractItemView.SingleSelection)
+        queue_layout.addWidget(self.list_queue, 1)
+        run_row = QHBoxLayout()
+        self.btn_queue_run = QPushButton("執行排程"); self.btn_queue_run.clicked.connect(self.run_queue)
+        run_row.addWidget(self.btn_queue_run); run_row.addStretch(1)
+        queue_layout.addLayout(run_row)
+        left_layout.addWidget(queue_group)
+
         left_layout.addStretch(1)
 
         root_hsplit.addWidget(left_scroll)
@@ -325,6 +359,40 @@ class SimpleRunnerUI(QMainWindow):
 
     def _wrap_box(self, title: str, w: QWidget):
         gb = QGroupBox(title); l = QVBoxLayout(gb); l.setContentsMargins(4,4,4,4); l.addWidget(w); return gb
+
+    def _set_experiment_name(self, name: str):
+        if not hasattr(self, 'edit_exp_name'):
+            return
+        text = name or ""
+        self._setting_exp_name = True
+        try:
+            self.edit_exp_name.blockSignals(True)
+            self.edit_exp_name.setText(text)
+        finally:
+            self.edit_exp_name.blockSignals(False)
+            self._setting_exp_name = False
+
+    def _sanitize_experiment_name(self, name: str) -> str:
+        text = (name or "").strip()
+        if not text:
+            return "experiment"
+        text = re.sub(r"[\r\n]+", "_", text)
+        text = re.sub(r"[\\/:*?\"<>|]", "_", text)
+        text = text.strip(" _")
+        return text or "experiment"
+
+    def _generate_default_experiment_name(self, pre_list: List[str], model: str) -> str:
+        pre = "_".join(pre_list) if pre_list else "no_pre"
+        mdl = model or "model"
+        return f"exp_{pre}_{mdl}"
+
+    def _reset_experiment_name(self):
+        pre_list = [self.list_pre_sel.item(i).text() for i in range(self.list_pre_sel.count())]
+        model = self.combo_model.currentText()
+        default = self._generate_default_experiment_name(pre_list, model)
+        self._set_experiment_name(default)
+        if not self._syncing:
+            self._on_builder_changed(force=True)
 
     # ---------------- File ops -----------------
     def browse_and_load(self):
@@ -391,6 +459,16 @@ class SimpleRunnerUI(QMainWindow):
         mdl_params = {**defaults, **mdl_user}
         if model in ('CSRT', 'OpticalFlowLK'): mdl_params.pop('init_box', None)
         pipeline_steps.append({'type': 'model', 'name': model, 'params': mdl_params})
+        exp_name_text = self.edit_exp_name.text().strip()
+        if not exp_name_text:
+            default_name = self._generate_default_experiment_name(pre_list, model)
+            if self.edit_exp_name.text() != default_name:
+                self._set_experiment_name(default_name)
+            exp_name_text = default_name
+        sanitized_name = self._sanitize_experiment_name(exp_name_text)
+        if sanitized_name != exp_name_text:
+            self._set_experiment_name(sanitized_name)
+        exp_name_final = sanitized_name
         cfg = {
             'seed': 42,
             'dataset': {
@@ -402,7 +480,7 @@ class SimpleRunnerUI(QMainWindow):
                 }
             },
             'experiments': [
-                {'name': f"exp_{('_'.join(pre_list) if pre_list else 'no_pre')}_{model}", 'pipeline': pipeline_steps}
+                {'name': exp_name_final, 'pipeline': pipeline_steps}
             ],
             'evaluation': {'evaluator': evaluator}
         }
@@ -439,6 +517,8 @@ class SimpleRunnerUI(QMainWindow):
 
     # ---------------- Synchronization -----------------
     def _on_builder_changed(self, force: bool = False):
+        if self._setting_exp_name and not force:
+            return
         if self._syncing:  # currently applying parsed raw into builder
             return
         # If user currently editing raw (pending parse) skip builder->raw except forced
@@ -544,6 +624,12 @@ class SimpleRunnerUI(QMainWindow):
                         if mname in ('CSRT', 'OpticalFlowLK'): raw_params.pop('init_box', None)
                         self.model_params[mname] = raw_params
                         self._on_model_changed(mname)
+            exp_name_loaded = first.get('name')
+            if isinstance(exp_name_loaded, str) and exp_name_loaded.strip():
+                self._set_experiment_name(exp_name_loaded)
+            else:
+                fallback = self._generate_default_experiment_name(pre_names, self.combo_model.currentText())
+                self._set_experiment_name(fallback)
         # Evaluator
         ev = (cfg.get('evaluation') or {}).get('evaluator')
         if isinstance(ev, str):
@@ -773,6 +859,9 @@ class SimpleRunnerUI(QMainWindow):
     # ---------------- Run -----------------
     # ---------------- Run (threaded with progress) -----------------
     def run_pipeline(self):
+        if self._queue_running:
+            QMessageBox.information(self, '排程執行中', '排程目前正在執行，請先等待完成。')
+            return
         if self._run_thread is not None:
             QMessageBox.information(self, '執行中', 'Pipeline 已在執行。')
             return
@@ -836,23 +925,205 @@ class SimpleRunnerUI(QMainWindow):
         self._run_thread.start()
 
     def _on_run_finished(self):
-        self.log('完成。')
-        self._set_status('完成', good=True)
+        if self._queue_running:
+            self.log('排程項目完成。')
+        else:
+            self.log('完成。')
+            self._set_status('完成', good=True)
         self._end_progress()
+        self._queue_handle_run_completion(True)
 
     def _on_run_error(self, msg: str):
         QMessageBox.critical(self, '執行失敗', msg)
         self._set_status('失敗', good=False)
         self._end_progress()
+        self._queue_handle_run_completion(False)
 
     def _end_progress(self):
         self.progress.hide(); self.progress.setRange(0,100)
-        self.btn_run.setEnabled(True); self.btn_load.setEnabled(True)
+        if not self._queue_running:
+            self.btn_run.setEnabled(True); self.btn_load.setEnabled(True)
 
     def _cleanup_run_thread(self):
         if self._run_thread:
             self._run_thread.quit(); self._run_thread.wait(5000)
             self._run_thread = None; self._run_worker = None
+
+    # ---- Queue scheduling helpers ----
+    def _queue_default_results_root(self) -> str:
+        try:
+            proj_root = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            proj_root = os.getcwd()
+        return os.path.join(proj_root, 'results')
+
+    def _queue_add_current(self):
+        if self._queue_running:
+            QMessageBox.warning(self, '排程進行中', '排程執行期間無法新增項目。')
+            return
+        cfg = self.build_config_dict()
+        snapshot = copy.deepcopy(cfg)
+        experiments = snapshot.get('experiments') or []
+        exp = experiments[0] if experiments else {}
+        pipeline_steps = exp.get('pipeline') or []
+        model_name = pipeline_steps[-1].get('name') if pipeline_steps else self.combo_model.currentText()
+        pre_names = [step.get('name') for step in pipeline_steps if step.get('type') == 'preproc']
+        dataset_root = (snapshot.get('dataset') or {}).get('root', '')
+        display_name = self.edit_exp_name.text().strip()
+        label_base = display_name or exp.get('name') or f"Exp{len(self._queue_items)+1}"
+        label_parts = [label_base, f"model={model_name}"]
+        if pre_names:
+            label_parts.append(f"pre={' + '.join(pre_names)}")
+        if dataset_root:
+            label_parts.append(os.path.basename(dataset_root))
+        label = " | ".join(label_parts)
+        entry = {'config': snapshot, 'label': label}
+        self._queue_items.append(entry)
+        item = QListWidgetItem(label)
+        tooltip_lines = [f"資料集: {dataset_root or '(未設定)'}", f"模型: {model_name}"]
+        if pre_names:
+            tooltip_lines.append(f"前處理: {', '.join(pre_names)}")
+        item.setToolTip("\n".join(tooltip_lines))
+        self.list_queue.addItem(item)
+        self.log(f"已加入排程：{label}")
+
+    def _queue_remove_selected(self):
+        if self._queue_running:
+            QMessageBox.warning(self, '排程進行中', '排程執行期間無法移除。')
+            return
+        row = self.list_queue.currentRow()
+        if row < 0:
+            return
+        self.list_queue.takeItem(row)
+        self._queue_items.pop(row)
+
+    def _queue_clear(self):
+        if self._queue_running:
+            QMessageBox.warning(self, '排程進行中', '排程執行期間無法清空排程。')
+            return
+        self.list_queue.clear()
+        self._queue_items.clear()
+
+    def run_queue(self):
+        if self._queue_running:
+            QMessageBox.information(self, '排程執行中', '排程已在執行，請先等待完成。')
+            return
+        if self._run_thread is not None:
+            QMessageBox.information(self, '執行中', 'Pipeline 已在執行。')
+            return
+        if not self._queue_items:
+            QMessageBox.information(self, '排程為空', '請先加入至少一組實驗。')
+            return
+        if self._raw_user_edit:
+            QMessageBox.warning(self, '尚未驗證', 'Raw 尚未驗證完成，請等待或停止輸入。')
+            return
+        default_root = self._queue_default_results_root()
+        schedule_root: Optional[str] = None
+        if len(self._queue_items) > 1:
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            schedule_root = os.path.join(default_root, f"{stamp}_schedule_{len(self._queue_items)}exp")
+            try:
+                os.makedirs(schedule_root, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, '建立排程資料夾失敗', str(e))
+                return
+        queue_snapshot: List[Dict[str, Any]] = []
+        for idx, item in enumerate(self._queue_items, start=1):
+            cfg_copy = copy.deepcopy(item['config'])
+            out_cfg = cfg_copy.setdefault('output', {})
+            out_cfg['results_root'] = schedule_root or default_root
+            if schedule_root:
+                sched_meta = out_cfg.setdefault('schedule', {})
+                sched_meta.setdefault('batch_root', schedule_root)
+                sched_meta['order'] = idx
+                sched_meta['total'] = len(self._queue_items)
+            queue_snapshot.append({'config': cfg_copy, 'label': item['label'], 'index': idx})
+        self._queue_pending = queue_snapshot
+        self._queue_total = len(queue_snapshot)
+        self._queue_completed = 0
+        self._queue_running = True
+        self._queue_error = False
+        self._queue_results_root = schedule_root
+        self._queue_current_label = None
+        self.btn_queue_add.setEnabled(False)
+        self.btn_queue_remove.setEnabled(False)
+        self.btn_queue_clear.setEnabled(False)
+        self.btn_queue_run.setEnabled(False)
+        self.list_queue.setEnabled(False)
+        self.btn_run.setEnabled(False)
+        self.btn_load.setEnabled(False)
+        self.log(f"排程開始，共 {self._queue_total} 組實驗。")
+        if schedule_root:
+            self.log(f"排程結果將存於：{schedule_root}")
+        self._set_status(f"排程 0/{self._queue_total} 準備中…")
+        self._queue_start_next()
+
+    def _queue_start_next(self):
+        if not self._queue_running:
+            return
+        if not self._queue_pending:
+            self._finish_queue()
+            return
+        payload = self._queue_pending.pop(0)
+        idx = self._queue_completed + 1
+        label = payload.get('label', f"Exp{idx}")
+        self._queue_current_label = label
+        if self.list_queue.count():
+            display_item = self.list_queue.item(0)
+            display_item.setText(f"{label}（執行中 {idx}/{self._queue_total}）")
+        self.log(f"[Queue] 開始第 {idx}/{self._queue_total}: {label}")
+        self._set_status(f"排程 {idx}/{self._queue_total} 執行中…")
+        self._start_run_thread(payload['config'])
+
+    def _queue_handle_run_completion(self, success: bool):
+        if not self._queue_running:
+            return
+        if self.list_queue.count():
+            self.list_queue.takeItem(0)
+        if self._queue_items:
+            self._queue_items.pop(0)
+        label = self._queue_current_label or ''
+        self._queue_completed += 1
+        if success:
+            self.log(f"[Queue] 完成 {self._queue_completed}/{self._queue_total}: {label}")
+            if self._queue_pending:
+                self._set_status(f"排程 {self._queue_completed}/{self._queue_total} 完成，準備下一個…")
+                QTimer.singleShot(0, self._queue_start_next)
+            else:
+                self._finish_queue()
+        else:
+            self._queue_error = True
+            self.log(f"[Queue] 失敗：{label}。剩餘排程已取消。")
+            self._queue_pending.clear()
+            self._finish_queue()
+        self._queue_current_label = None
+
+    def _finish_queue(self):
+        if not self._queue_running:
+            return
+        success = not self._queue_error
+        if success and self._queue_results_root:
+            self.log(f"排程結果資料夾: {self._queue_results_root}")
+        self._queue_running = False
+        self._queue_pending = []
+        self._queue_total = 0
+        self._queue_completed = 0
+        self._queue_results_root = None
+        self._queue_current_label = None
+        self.btn_queue_add.setEnabled(True)
+        self.btn_queue_remove.setEnabled(True)
+        self.btn_queue_clear.setEnabled(True)
+        self.btn_queue_run.setEnabled(True)
+        self.list_queue.setEnabled(True)
+        self.btn_run.setEnabled(True)
+        self.btn_load.setEnabled(True)
+        if success:
+            self._set_status("排程完成", good=True)
+            self.log("排程全部完成。")
+        else:
+            self._set_status("排程中途失敗", good=False)
+            self.log("排程已停止，請檢查錯誤訊息後再試一次。")
+        self._queue_error = False
 
     # ---- Progress event handler ----
     def _on_progress_event(self, stage: str, cur: int, tot: int, extra: dict):
