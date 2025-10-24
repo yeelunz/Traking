@@ -33,7 +33,17 @@ def _resolve_weights_path(weights: str) -> str:
     for path in ordered:
         if os.path.exists(path):
             return path
-    return ordered[-1] if ordered else weights
+    return weights
+
+
+def resolve_weights_path(weights: str) -> str:
+    """Public helper that resolves model weight paths relative to the repository root.
+
+    Returns the original string when the file does not exist, so third-party
+    model aliases (e.g. ultralytics hub identifiers) continue to function.
+    """
+
+    return _resolve_weights_path(weights)
 
 
 def _first_frame_from_gt(video_path: str) -> Optional[Tuple[float, float, float, float]]:

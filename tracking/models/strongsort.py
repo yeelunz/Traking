@@ -36,6 +36,7 @@ except Exception as ex:  # pragma: no cover - make failure explicit at runtime
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
+from ..utils.init_bbox import resolve_weights_path
 
 
 def _bbox_iou_xyxy(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
@@ -148,6 +149,7 @@ class StrongSortTracker(TrackingModel):
 
         # --- Detector configuration ---
         self.weights = str(config.get("weights", self.DEFAULT_CONFIG["weights"]))
+        self._weights_path = resolve_weights_path(self.weights)
         self.det_conf = float(config.get("conf", self.DEFAULT_CONFIG["conf"]))
         self.det_iou = float(config.get("iou", self.DEFAULT_CONFIG["iou"]))
         self.imgsz = int(config.get("imgsz", self.DEFAULT_CONFIG["imgsz"]))
@@ -175,13 +177,13 @@ class StrongSortTracker(TrackingModel):
 
         # Instantiate detector with corruption-safe retry (same approach as YOLO/OC-SORT wrappers)
         try:
-            self.detector = YOLO(self.weights)
+            self.detector = YOLO(self._weights_path)
         except Exception as e:
             try:
                 import os
-                if os.path.isfile(self.weights) and os.path.getsize(self.weights) < 2048:
-                    os.remove(self.weights)
-                    self.detector = YOLO(self.weights)
+                if os.path.isfile(self._weights_path) and os.path.getsize(self._weights_path) < 2048:
+                    os.remove(self._weights_path)
+                    self.detector = YOLO(self._weights_path)
                 else:
                     raise
             except Exception:

@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -517,6 +518,7 @@ class MixFormerV2Tracker(TrackingModel):
         self.preprocs: List[PreprocessingModule] = []
         self._finetuned_state_dict: Optional[Dict[str, Any]] = None
         self._finetuned_summary: Optional[Dict[str, Any]] = None
+        self._finetuned_checkpoint_path: Optional[str] = None
 
     # ------------------------------------------------------------------
     # TrackingModel API
@@ -818,6 +820,30 @@ class MixFormerV2Tracker(TrackingModel):
         self._finetuned_summary = summary
         if log_file:
             _write_log(f"summary={json.dumps(summary, ensure_ascii=False)}")
+
+        if output_dir:
+            ckpt_timestamp = time.strftime("%Y%m%d_%H%M%S")
+            ckpt_name = f"mixformerv2_finetuned_{ckpt_timestamp}.pt.tar"
+            ckpt_path = os.path.join(output_dir, ckpt_name)
+            checkpoint_payload: Dict[str, Any] = {
+                "net": finetuned_state,
+                "summary": summary,
+                "base_checkpoint": self._checkpoint_arg,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            try:
+                torch.save(checkpoint_payload, ckpt_path)
+                summary["finetuned_checkpoint"] = ckpt_path
+                self._finetuned_checkpoint_path = ckpt_path
+                self._checkpoint_arg = ckpt_path
+                _log(f"[Train] Saved finetuned checkpoint → {ckpt_path}")
+                if log_file:
+                    _write_log(f"checkpoint={ckpt_path}")
+            except Exception as exc:
+                warn_msg = f"[Train][Warn] Failed to save finetuned checkpoint: {exc}"
+                _log(warn_msg)
+                if log_file:
+                    _write_log(warn_msg)
 
         return summary
 

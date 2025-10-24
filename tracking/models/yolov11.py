@@ -14,6 +14,7 @@ except Exception as e:  # pragma: no cover - environment without ultralytics
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
 from ..core.registry import register_model
+from ..utils.init_bbox import resolve_weights_path
 
 
 @register_model("YOLOv11")
@@ -50,6 +51,7 @@ class YOLOv11Model(TrackingModel):
 
         # --- Config params ---
         self.weights = str(config.get("weights", self.DEFAULT_CONFIG["weights"]))
+        self._weights_path = resolve_weights_path(self.weights)
         self.conf = float(config.get("conf", self.DEFAULT_CONFIG["conf"]))
         self.iou = float(config.get("iou", self.DEFAULT_CONFIG["iou"]))
         self.imgsz = int(config.get("imgsz", self.DEFAULT_CONFIG["imgsz"]))
@@ -72,20 +74,20 @@ class YOLOv11Model(TrackingModel):
 
         # --- Build / load weights with corruption fallback ---
         try:
-            self.model = YOLO(self.weights)
+            self.model = YOLO(self._weights_path)
         except Exception as e:
             try:
-                if os.path.exists(self.weights) and os.path.isfile(self.weights):
+                if os.path.exists(self._weights_path) and os.path.isfile(self._weights_path):
                     size = -1
                     try:
-                        size = os.path.getsize(self.weights)
+                        size = os.path.getsize(self._weights_path)
                     except Exception:
                         pass
                     if 0 <= size < 1024:
-                        try: os.remove(self.weights)
+                        try: os.remove(self._weights_path)
                         except Exception: pass
                         try:
-                            self.model = YOLO(self.weights)
+                            self.model = YOLO(self._weights_path)
                             e = None
                         except Exception:
                             pass

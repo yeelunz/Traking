@@ -1,7 +1,7 @@
 from __future__ import annotations
 import copy
 import json, os, re, time
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 
 from PySide6.QtCore import Qt, QRegularExpression, QTimer, QObject, Signal, QThread
 from PySide6.QtGui import QRegularExpressionValidator
@@ -40,15 +40,110 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
         e.ignore()
 
 
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, e):
+        e.ignore()
+
+
+class ModelWeightsComboBox(NoWheelComboBox):
+    def __init__(self, fetch_weights: Optional[Callable[[], List[str]]], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._fetch_weights = fetch_weights or (lambda: [])
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        try:
+            le = self.lineEdit()
+            if le is not None:
+                le.setPlaceholderText("選擇或輸入模型檔案")
+        except Exception:
+            pass
+        self.refresh_items()
+
+    def _normalize_entry(self, entry: str) -> str:
+        return entry.replace("\\", "/")
+
+    def refresh_items(self):
+        try:
+            obtained = list(self._fetch_weights())
+        except Exception:
+            obtained = []
+        normalized = []
+        seen = set()
+        for entry in obtained:
+            if not entry:
+                continue
+            norm = self._normalize_entry(str(entry))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            normalized.append(norm)
+        prev_text = self.currentText()
+        if self.isEditable():
+            try:
+                line_text = self.lineEdit().text()
+                if line_text:
+                    prev_text = line_text
+            except Exception:
+                pass
+        self.blockSignals(True)
+        self.clear()
+        for entry in normalized:
+            self.addItem(entry, entry)
+        if prev_text:
+            norm_prev = self._normalize_entry(prev_text)
+            idx = self.findData(norm_prev)
+            if idx < 0:
+                idx = self.findText(norm_prev)
+            if idx >= 0:
+                self.setCurrentIndex(idx)
+            else:
+                self.setEditText(prev_text)
+        else:
+            self.setCurrentIndex(-1)
+            if self.isEditable():
+                self.setEditText("")
+        self.blockSignals(False)
+
+    def set_current_value(self, value: Any):
+        text = "" if value is None else str(value)
+        self.refresh_items()
+        norm = self._normalize_entry(text)
+        if norm:
+            idx = self.findData(norm)
+            if idx < 0:
+                idx = self.findText(norm)
+            if idx >= 0:
+                self.setCurrentIndex(idx)
+            else:
+                self.setEditText(text)
+        else:
+            self.setCurrentIndex(-1)
+            if self.isEditable():
+                self.setEditText("")
+
+    def current_value(self) -> str:
+        return self.currentText().strip()
+
+    def showPopup(self):
+        self.refresh_items()
+        super().showPopup()
+
 class LowConfidenceReinitEditor(QWidget):
     valueChanged = Signal()
 
     SUPPORTED_DETECTOR_KEYS = {"weights"}
 
-    def __init__(self, defaults: Dict[str, Any], parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        defaults: Dict[str, Any],
+        weights_provider: Optional[Callable[[], List[str]]] = None,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self._defaults = dict(defaults or {})
         self._extra_detector_keys: Dict[str, Any] = {}
+        self._weights_provider = weights_provider
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -78,9 +173,21 @@ class LowConfidenceReinitEditor(QWidget):
 
         detector_row = QHBoxLayout()
         detector_row.setContentsMargins(0, 0, 0, 0)
-        self.edit_detector_weights = QLineEdit()
-        self.edit_detector_weights.setPlaceholderText("留空=沿用 init detector 的權重，例如 best.pt")
-        self.edit_detector_weights.editingFinished.connect(self._emit_changed)
+        if self._weights_provider is not None:
+            self.edit_detector_weights = ModelWeightsComboBox(self._weights_provider, parent=self)
+            self.edit_detector_weights.refresh_items()
+            self.edit_detector_weights.currentIndexChanged.connect(lambda *_: self._emit_changed())
+            self.edit_detector_weights.editTextChanged.connect(lambda *_: self._emit_changed())
+            try:
+                le = self.edit_detector_weights.lineEdit()
+                if le is not None:
+                    le.setPlaceholderText("留空=沿用 init detector 的權重，例如 best.pt")
+            except Exception:
+                pass
+        else:
+            self.edit_detector_weights = QLineEdit()
+            self.edit_detector_weights.editingFinished.connect(self._emit_changed)
+            self.edit_detector_weights.setPlaceholderText("留空=沿用 init detector 的權重，例如 best.pt")
         detector_row.addWidget(self.edit_detector_weights)
         form.addRow("重偵測權重", detector_row)
 
@@ -119,7 +226,17 @@ class LowConfidenceReinitEditor(QWidget):
         }
 
         detector_cfg: Dict[str, Any] = dict(self._extra_detector_keys)
-        weights = self.edit_detector_weights.text().strip()
+        weights_widget = self.edit_detector_weights
+        weights = ""
+        if hasattr(weights_widget, 'current_value') and callable(getattr(weights_widget, 'current_value', None)):
+            try:
+                weights = str(weights_widget.current_value()).strip()
+            except Exception:
+                weights = str(getattr(weights_widget, 'currentText', lambda: "")()).strip()
+        elif hasattr(weights_widget, 'currentText'):
+            weights = str(weights_widget.currentText()).strip()
+        else:
+            weights = str(getattr(weights_widget, 'text', lambda: "")()).strip()
         if weights:
             detector_cfg["weights"] = weights
         else:
@@ -161,7 +278,10 @@ class LowConfidenceReinitEditor(QWidget):
             detector_cfg = {}
 
         weights = detector_cfg.get("weights") or ""
-        self.edit_detector_weights.setText(str(weights))
+        if hasattr(self.edit_detector_weights, 'set_current_value') and callable(getattr(self.edit_detector_weights, 'set_current_value', None)):
+            self.edit_detector_weights.set_current_value(weights)
+        elif hasattr(self.edit_detector_weights, 'setText'):
+            self.edit_detector_weights.setText(str(weights))
 
         self._extra_detector_keys = {
             k: v for k, v in detector_cfg.items() if k not in self.SUPPORTED_DETECTOR_KEYS
@@ -254,7 +374,7 @@ class SimpleRunnerUI(QMainWindow):
 
         # Split group
         gb_split = QGroupBox("資料切分"); fl_split = QFormLayout(gb_split)
-        self.split_method = QComboBox(); self.split_method.addItems(["video_level"]); self.split_method.currentIndexChanged.connect(self._on_builder_changed)
+        self.split_method = NoWheelComboBox(); self.split_method.addItems(["video_level"]); self.split_method.currentIndexChanged.connect(self._on_builder_changed)
         self.split_r_train = NoWheelDoubleSpinBox(); self._setup_ratio_spin(self.split_r_train, 0.8)
         self.split_r_test = NoWheelDoubleSpinBox(); self._setup_ratio_spin(self.split_r_test, 0.2)
         self.kfold = NoWheelSpinBox(); self.kfold.setRange(1,20); self.kfold.setValue(1); self.kfold.valueChanged.connect(self._on_builder_changed)
@@ -287,7 +407,7 @@ class SimpleRunnerUI(QMainWindow):
         # Model + params
         gb_model = QGroupBox("Model"); vb_model = QVBoxLayout(gb_model)
         row_m = QHBoxLayout(); row_m.addWidget(QLabel("Name:"))
-        self.combo_model = QComboBox()
+        self.combo_model = NoWheelComboBox()
         # 排除已停用的 CSRT 模型
         for n in sorted(MODEL_REGISTRY.keys()):
             if n == 'CSRT':
@@ -300,7 +420,7 @@ class SimpleRunnerUI(QMainWindow):
 
         # Evaluation
         gb_eval = QGroupBox("Evaluation"); fl_eval = QFormLayout(gb_eval)
-        self.combo_eval = QComboBox(); [self.combo_eval.addItem(n) for n in sorted(EVAL_REGISTRY.keys())]
+        self.combo_eval = NoWheelComboBox(); [self.combo_eval.addItem(n) for n in sorted(EVAL_REGISTRY.keys())]
         self.combo_eval.currentIndexChanged.connect(self._on_builder_changed)
         self.chk_viz = QCheckBox("Visualize"); self.chk_viz.stateChanged.connect(self._on_builder_changed)
         self.spn_viz_samples = NoWheelSpinBox(); self.spn_viz_samples.setRange(1,10000); self.spn_viz_samples.setValue(10); self.spn_viz_samples.valueChanged.connect(self._on_builder_changed)
@@ -334,21 +454,21 @@ class SimpleRunnerUI(QMainWindow):
         form_class_basic.addRow("Label 檔案", label_row_widget)
 
         # Target level combo
-        self.combo_class_level = QComboBox()
+        self.combo_class_level = NoWheelComboBox()
         self.combo_class_level.addItem("影片 (video)", "video")
         self.combo_class_level.addItem("主體 (subject)", "subject")
         self.combo_class_level.currentIndexChanged.connect(self._on_builder_changed)
         form_class_basic.addRow("Target Level", self.combo_class_level)
 
         # Feature extractor selection
-        self.combo_class_feature = QComboBox()
+        self.combo_class_feature = NoWheelComboBox()
         for name in sorted(FEATURE_EXTRACTOR_REGISTRY.keys()):
             self.combo_class_feature.addItem(name)
         self.combo_class_feature.currentIndexChanged.connect(self._on_class_feature_index_changed)
         form_class_basic.addRow("Feature Extractor", self.combo_class_feature)
 
         # Classifier selection
-        self.combo_class_classifier = QComboBox()
+        self.combo_class_classifier = NoWheelComboBox()
         for name in sorted(CLASSIFIER_REGISTRY.keys()):
             self.combo_class_classifier.addItem(name)
         self.combo_class_classifier.currentIndexChanged.connect(self._on_class_classifier_index_changed)
@@ -386,12 +506,18 @@ class SimpleRunnerUI(QMainWindow):
         queue_group = QGroupBox("排程隊列")
         queue_layout = QVBoxLayout(queue_group); queue_layout.setContentsMargins(6,6,6,6)
         header_row = QHBoxLayout()
+        self.btn_queue_import = QPushButton("匯入排程…"); self.btn_queue_import.clicked.connect(self._queue_import_from_file)
         self.btn_queue_add = QPushButton("加入排程"); self.btn_queue_add.clicked.connect(self._queue_add_current)
         self.btn_queue_remove = QPushButton("移除選取"); self.btn_queue_remove.clicked.connect(self._queue_remove_selected)
         self.btn_queue_clear = QPushButton("清空"); self.btn_queue_clear.clicked.connect(self._queue_clear)
-        header_row.addWidget(self.btn_queue_add); header_row.addWidget(self.btn_queue_remove); header_row.addWidget(self.btn_queue_clear); header_row.addStretch(1)
+        header_row.addWidget(self.btn_queue_import)
+        header_row.addWidget(self.btn_queue_add)
+        header_row.addWidget(self.btn_queue_remove)
+        header_row.addWidget(self.btn_queue_clear)
+        header_row.addStretch(1)
         queue_layout.addLayout(header_row)
         self.list_queue = QListWidget(); self.list_queue.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_queue.itemDoubleClicked.connect(self._on_queue_item_double_clicked)
         queue_layout.addWidget(self.list_queue, 1)
         run_row = QHBoxLayout()
         self.btn_queue_run = QPushButton("執行排程"); self.btn_queue_run.clicked.connect(self.run_queue)
@@ -438,6 +564,35 @@ class SimpleRunnerUI(QMainWindow):
 
     def _wrap_box(self, title: str, w: QWidget):
         gb = QGroupBox(title); l = QVBoxLayout(gb); l.setContentsMargins(4,4,4,4); l.addWidget(w); return gb
+
+    def _models_root_dir(self) -> str:
+        try:
+            return os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+        except Exception:
+            return os.path.join(os.getcwd(), "models")
+
+    def _get_model_weights(self) -> List[str]:
+        root = self._models_root_dir()
+        if not os.path.isdir(root):
+            return []
+        patterns = (".pt", ".pth", ".onnx", ".engine")
+        entries: List[str] = []
+        for cur_root, _, files in os.walk(root):
+            for fname in files:
+                if not fname.lower().endswith(patterns):
+                    continue
+                path = os.path.join(cur_root, fname)
+                rel = os.path.relpath(path, root).replace("\\", "/")
+                normalized = f"models/{rel}" if rel else "models"
+                entries.append(normalized)
+        # stable order
+        seen = set()
+        ordered: List[str] = []
+        for entry in sorted(entries, key=lambda x: x.lower()):
+            if entry not in seen:
+                ordered.append(entry)
+                seen.add(entry)
+        return ordered
 
     def _set_experiment_name(self, name: str):
         if not hasattr(self, 'edit_exp_name'):
@@ -888,7 +1043,7 @@ class SimpleRunnerUI(QMainWindow):
             sig = getattr(widget, signal, None)
             if sig: sig.connect(lambda *_: self._on_param_widget_changed(scope))
         if scope == 'model' and key == 'first_frame_source':
-            combo = QComboBox()
+            combo = NoWheelComboBox()
             choices: List[Tuple[str, str]] = [
                 ("Ground Truth (GT)", "gt"),
                 ("YOLO 檢測", "yolo"),
@@ -934,7 +1089,7 @@ class SimpleRunnerUI(QMainWindow):
             defaults = {}
             if isinstance(self._active_model_defaults, dict):
                 defaults = dict(self._active_model_defaults.get('low_confidence_reinit', {}))
-            widget = LowConfidenceReinitEditor(defaults, parent=self)
+            widget = LowConfidenceReinitEditor(defaults, weights_provider=self._get_model_weights, parent=self)
 
             def _get():
                 return widget.get_value()
@@ -944,6 +1099,19 @@ class SimpleRunnerUI(QMainWindow):
 
             register(widget, 'valueChanged')
             return widget, _get, _set
+        if scope == 'model' and key in ('weights', 'init_detector_weights'):
+            combo_weights = ModelWeightsComboBox(self._get_model_weights, parent=self)
+            combo_weights.refresh_items()
+            combo_weights.currentIndexChanged.connect(lambda *_: self._on_param_widget_changed(scope))
+            combo_weights.editTextChanged.connect(lambda *_: self._on_param_widget_changed(scope))
+
+            def _get_weights_value() -> str:
+                return combo_weights.current_value()
+
+            def _set_weights_value(v: Any):
+                combo_weights.set_current_value(v)
+
+            return combo_weights, _get_weights_value, _set_weights_value
         if isinstance(value, bool):
             w = QCheckBox(); register(w, 'stateChanged')
             return w, lambda: bool(w.isChecked()), lambda v: w.setChecked(bool(v))
@@ -1267,6 +1435,195 @@ class SimpleRunnerUI(QMainWindow):
             self._run_thread = None; self._run_worker = None
 
     # ---- Queue scheduling helpers ----
+    def _queue_iter_config_variants(self, cfg: Dict[str, Any]):
+        if not isinstance(cfg, dict):
+            return
+        experiments = cfg.get('experiments')
+        if not isinstance(experiments, list) or len(experiments) <= 1:
+            yield copy.deepcopy(cfg)
+            return
+        base = copy.deepcopy(cfg)
+        for exp in experiments:
+            if not isinstance(exp, dict):
+                continue
+            variant = copy.deepcopy(base)
+            variant['experiments'] = [copy.deepcopy(exp)]
+            yield variant
+
+    def _queue_extract_summary(self, cfg: Dict[str, Any]) -> Tuple[str, List[str], str, str]:
+        dataset_root = ''
+        try:
+            dataset_root = str((cfg.get('dataset') or {}).get('root', '') or '')
+        except Exception:
+            dataset_root = ''
+        experiments = cfg.get('experiments') or []
+        exp = experiments[0] if experiments and isinstance(experiments[0], dict) else {}
+        exp_name = str(exp.get('name') or '').strip() if isinstance(exp, dict) else ''
+        pipeline = exp.get('pipeline') if isinstance(exp, dict) else None
+        pre_names: List[str] = []
+        model_name = ''
+        if isinstance(pipeline, list):
+            for step in pipeline:
+                if not isinstance(step, dict):
+                    continue
+                step_type = step.get('type')
+                step_name = step.get('name')
+                if step_type == 'preproc' and step_name:
+                    pre_names.append(str(step_name))
+                elif step_type == 'model' and step_name:
+                    model_name = str(step_name)
+        if not model_name:
+            model_name = str(self.combo_model.currentText() or '')
+        return exp_name, pre_names, model_name, dataset_root
+
+    def _queue_build_label(self, cfg: Dict[str, Any], preferred_label: Optional[str] = None) -> str:
+        exp_name, pre_names, model_name, dataset_root = self._queue_extract_summary(cfg)
+        if preferred_label:
+            custom = preferred_label.strip()
+            if custom:
+                return custom
+        label_base = (exp_name or '').strip()
+        if not label_base:
+            label_base = f"Exp{len(self._queue_items) + 1}"
+        parts = [label_base]
+        if model_name:
+            parts.append(f"model={model_name}")
+        if pre_names:
+            parts.append("pre=" + " + ".join(pre_names))
+        if dataset_root:
+            safe_root = dataset_root.rstrip("\\/") or dataset_root
+            parts.append(os.path.basename(os.path.normpath(safe_root)))
+        return " | ".join(parts)
+
+    def _queue_build_tooltip(self, cfg: Dict[str, Any]) -> str:
+        _, pre_names, model_name, dataset_root = self._queue_extract_summary(cfg)
+        lines = [f"資料集: {dataset_root or '(未設定)'}"]
+        if model_name:
+            lines.append(f"模型: {model_name}")
+        if pre_names:
+            lines.append(f"前處理: {', '.join(pre_names)}")
+        return "\n".join(lines)
+
+    def _on_queue_item_double_clicked(self, item: QListWidgetItem):
+        if item is None:
+            return
+        row = self.list_queue.row(item)
+        if row < 0 or row >= len(self._queue_items):
+            return
+        entry = self._queue_items[row]
+        cfg = entry.get('config') if isinstance(entry, dict) else None
+        if not isinstance(cfg, dict):
+            return
+        snapshot = copy.deepcopy(cfg)
+        text = self._serialize_cfg(snapshot)
+        self._set_raw_text_programmatically(text)
+        self._raw_user_edit = False
+        self._highlight_raw_error(False)
+        label = entry.get('label', '') if isinstance(entry, dict) else ''
+        status = f"排程檢視：{label}" if label else "排程檢視"
+        self._set_status(status, good=True)
+        self.log(f"[QueueInspect] 已顯示排程配置：{label or row + 1}")
+
+    def _queue_append_entry(self, cfg: Dict[str, Any], label: Optional[str] = None) -> bool:
+        if not isinstance(cfg, dict):
+            return False
+        snapshot = copy.deepcopy(cfg)
+        label_text = self._queue_build_label(snapshot, label)
+        entry = {'config': snapshot, 'label': label_text}
+        self._queue_items.append(entry)
+        item = QListWidgetItem(label_text)
+        tooltip = self._queue_build_tooltip(snapshot)
+        if tooltip:
+            item.setToolTip(tooltip)
+        self.list_queue.addItem(item)
+        self.log(f"已加入排程：{label_text}")
+        return True
+
+    def _queue_read_schedule_file(self, path: str):
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(text)
+            if data is not None:
+                return data
+        except Exception:
+            pass
+        try:
+            return json.loads(text)
+        except Exception as exc:
+            raise ValueError(exc)
+
+    def _queue_parse_schedule_data(self, data: Any) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+
+        def _consume(obj: Any, base_label: Optional[str] = None):
+            if not isinstance(obj, dict):
+                return
+            variants = list(self._queue_iter_config_variants(obj))
+            total = len(variants)
+            for idx, variant in enumerate(variants, start=1):
+                label = base_label
+                if base_label and total > 1:
+                    label = f"{base_label} #{idx}"
+                entries.append({'config': variant, 'label': label})
+
+        if isinstance(data, dict):
+            queue_section = data.get('queue')
+            if isinstance(queue_section, list) and queue_section:
+                for item in queue_section:
+                    if not isinstance(item, dict):
+                        continue
+                    cfg_obj = item.get('config') if isinstance(item.get('config'), dict) else item
+                    lbl = item.get('label') if isinstance(item.get('label'), str) else None
+                    _consume(cfg_obj, lbl)
+            else:
+                _consume(data)
+        elif isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                cfg_obj = item.get('config') if isinstance(item.get('config'), dict) else item
+                lbl = item.get('label') if isinstance(item.get('label'), str) else None
+                _consume(cfg_obj, lbl)
+        return entries
+
+    def _queue_import_from_file(self):
+        if self._queue_running:
+            QMessageBox.warning(self, '排程進行中', '排程執行期間無法匯入設定。')
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "選擇排程設定檔",
+            os.getcwd(),
+            "YAML/JSON (*.yaml *.yml *.json);;All Files (*)",
+        )
+        if not paths:
+            return
+        total_added = 0
+        for path in paths:
+            try:
+                data = self._queue_read_schedule_file(path)
+            except Exception as exc:
+                self.log(f"[QueueImport][錯誤] 無法讀取 {path}: {exc}")
+                QMessageBox.warning(self, '匯入失敗', f"{os.path.basename(path)} 讀取失敗：{exc}")
+                continue
+            items = self._queue_parse_schedule_data(data)
+            if not items:
+                self.log(f"[QueueImport] {path} 未找到有效設定。")
+                QMessageBox.information(self, '匯入結果', f"{os.path.basename(path)} 沒有可用的排程設定。")
+                continue
+            added = 0
+            for item in items:
+                if self._queue_append_entry(item.get('config'), item.get('label')):
+                    added += 1
+            total_added += added
+            self.log(f"[QueueImport] {os.path.basename(path)} 匯入 {added} 項。")
+        if total_added:
+            self._set_status(f"已匯入 {total_added} 組排程", good=True)
+        else:
+            self._set_status("匯入排程設定未成功", good=False)
+
     def _queue_default_results_root(self) -> str:
         try:
             proj_root = os.path.dirname(os.path.abspath(__file__))
@@ -1279,30 +1636,7 @@ class SimpleRunnerUI(QMainWindow):
             QMessageBox.warning(self, '排程進行中', '排程執行期間無法新增項目。')
             return
         cfg = self.build_config_dict()
-        snapshot = copy.deepcopy(cfg)
-        experiments = snapshot.get('experiments') or []
-        exp = experiments[0] if experiments else {}
-        pipeline_steps = exp.get('pipeline') or []
-        model_name = pipeline_steps[-1].get('name') if pipeline_steps else self.combo_model.currentText()
-        pre_names = [step.get('name') for step in pipeline_steps if step.get('type') == 'preproc']
-        dataset_root = (snapshot.get('dataset') or {}).get('root', '')
-        display_name = self.edit_exp_name.text().strip()
-        label_base = display_name or exp.get('name') or f"Exp{len(self._queue_items)+1}"
-        label_parts = [label_base, f"model={model_name}"]
-        if pre_names:
-            label_parts.append(f"pre={' + '.join(pre_names)}")
-        if dataset_root:
-            label_parts.append(os.path.basename(dataset_root))
-        label = " | ".join(label_parts)
-        entry = {'config': snapshot, 'label': label}
-        self._queue_items.append(entry)
-        item = QListWidgetItem(label)
-        tooltip_lines = [f"資料集: {dataset_root or '(未設定)'}", f"模型: {model_name}"]
-        if pre_names:
-            tooltip_lines.append(f"前處理: {', '.join(pre_names)}")
-        item.setToolTip("\n".join(tooltip_lines))
-        self.list_queue.addItem(item)
-        self.log(f"已加入排程：{label}")
+        self._queue_append_entry(cfg)
 
     def _queue_remove_selected(self):
         if self._queue_running:
@@ -1362,6 +1696,7 @@ class SimpleRunnerUI(QMainWindow):
         self._queue_error = False
         self._queue_results_root = schedule_root
         self._queue_current_label = None
+        self.btn_queue_import.setEnabled(False)
         self.btn_queue_add.setEnabled(False)
         self.btn_queue_remove.setEnabled(False)
         self.btn_queue_clear.setEnabled(False)
@@ -1427,6 +1762,7 @@ class SimpleRunnerUI(QMainWindow):
         self._queue_completed = 0
         self._queue_results_root = None
         self._queue_current_label = None
+        self.btn_queue_import.setEnabled(True)
         self.btn_queue_add.setEnabled(True)
         self.btn_queue_remove.setEnabled(True)
         self.btn_queue_clear.setEnabled(True)
