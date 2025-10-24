@@ -12,6 +12,8 @@ from ..core.registry import PREPROC_REGISTRY, MODEL_REGISTRY, EVAL_REGISTRY
 from ..utils.annotations import load_coco_vid
 from ..core.interfaces import FramePrediction
 from ..data.dataset_manager import COCOJsonDatasetManager, SimpleDataset
+# classification modules
+from ..classification.engine import run_subject_classification
 # import built-in plugins to populate registries
 from ..preproc import clahe  # noqa: F401
 from ..models import template_matching  # noqa: F401
@@ -197,6 +199,7 @@ class PipelineRunner:
                 predictions_all = {}
                 # aggregate across entire dataset (all videos) per model
                 dataset_agg = {}
+                per_model_video_predictions = {}
                 met_dir = os.path.join(out_dir_base, "metrics")
                 os.makedirs(met_dir, exist_ok=True)
                 eval_cfg = self.cfg.get("evaluation", {}) or {}
@@ -209,6 +212,7 @@ class PipelineRunner:
                 for model_name, _m in use_models:
                     display_name = getattr(_m, 'name', model_name)
                     predictions_all.setdefault(display_name, [])
+                    per_model_video_predictions.setdefault(display_name, {})
                 # iterate videos with optional progress bar
                 iterable = dataset
                 total_videos = None
@@ -249,6 +253,7 @@ class PipelineRunner:
                         disp = getattr(model, 'name', model_name)
                         pv_predictions[disp] = preds
                         predictions_all.setdefault(disp, []).extend(preds)
+                        per_model_video_predictions.setdefault(disp, {})[vp] = list(preds)
                     # --- NEW: write per-video predictions for easier debugging/inspection ---
                     try:
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
@@ -427,6 +432,8 @@ class PipelineRunner:
                         ], f, ensure_ascii=False, indent=2)
                     self._log(f"Predictions saved: {outp}", to_console=(tqdm is None))
 
+                return per_model_video_predictions
+
             # k-fold within training for validation
             if k_fold > 1:
                 self._log(f"Running {k_fold}-Fold validation on training set…")
@@ -485,7 +492,7 @@ class PipelineRunner:
                             self._log(
                                 f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}"
                             )
-                    run_on_dataset(val_ds, fold_dir, models_list=fold_models)
+                    _ = run_on_dataset(val_ds, fold_dir, models_list=fold_models)
                     try:
                         with open(os.path.join(fold_dir, "metrics", "summary.json"), "r", encoding="utf-8") as f:
                             fold_summaries.append(json.load(f))
@@ -583,4 +590,18 @@ class PipelineRunner:
                     self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
             test_dir = os.path.join(out_dir, "test")
             os.makedirs(test_dir, exist_ok=True)
-            run_on_dataset(test_ds, test_dir, models_list=final_models)
+            test_predictions = run_on_dataset(test_ds, test_dir, models_list=final_models)
+
+            # optional classification stage
+            clf_cfg = self.cfg.get("classification", {}) or {}
+            try:
+                run_subject_classification(
+                    clf_cfg,
+                    self.dataset_root,
+                    train_ds,
+                    test_predictions,
+                    out_dir,
+                    self._log,
+                )
+            except Exception as _e_cls:
+                self._log(f"[Classification] Error: {_e_cls}")

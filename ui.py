@@ -13,12 +13,20 @@ from PySide6.QtWidgets import (
 )
 
 from tracking.orchestrator.runner import PipelineRunner
-from tracking.core.registry import PREPROC_REGISTRY, MODEL_REGISTRY, EVAL_REGISTRY
+from tracking.core.registry import (
+    PREPROC_REGISTRY,
+    MODEL_REGISTRY,
+    EVAL_REGISTRY,
+    FEATURE_EXTRACTOR_REGISTRY,
+    CLASSIFIER_REGISTRY,
+)
 # populate registries
 from tracking.preproc import clahe  # noqa: F401
 from tracking.models import template_matching, optical_flow_lk, faster_rcnn, yolov11, fast_speckle  # noqa: F401
 """注意: CSRT 模型已被停用 (不再匯入)。若需恢復，請在 tracking/models/__init__.py 取消註解 csrt 匯入。"""
 from tracking.eval import evaluator  # noqa: F401
+from tracking.classification import feature_extractors as _cls_feat  # noqa: F401
+from tracking.classification import classifiers as _cls_clf  # noqa: F401
 
 
 # ---- Wheel-safe spin boxes -------------------------------------------------
@@ -208,6 +216,12 @@ class SimpleRunnerUI(QMainWindow):
         self._queue_results_root: Optional[str] = None
         self._queue_current_label: Optional[str] = None
         self._setting_exp_name = False
+        self.class_feature_params: Dict[str, Dict[str, Any]] = {}
+        self.class_classifier_params: Dict[str, Dict[str, Any]] = {}
+        self._current_class_feature: Optional[str] = None
+        self._current_class_classifier: Optional[str] = None
+        self._class_feature_bindings: List[Tuple[str, Any, Any]] = []
+        self._class_classifier_bindings: List[Tuple[str, Any, Any]] = []
 
         # --- Root layout ---
         central = QWidget(); self.setCentralWidget(central)
@@ -294,6 +308,71 @@ class SimpleRunnerUI(QMainWindow):
         h_viz = QHBoxLayout(); h_viz.addWidget(self.chk_viz); h_viz.addWidget(QLabel("samples")); h_viz.addWidget(self.spn_viz_samples); h_viz.addStretch(1)
         box_viz = QWidget(); box_viz.setLayout(h_viz); fl_eval.addRow("Visualization", box_viz)
         left_layout.addWidget(gb_eval)
+
+        # Classification (optional)
+        gb_class = QGroupBox("Classification (可選)")
+        vb_class = QVBoxLayout(gb_class)
+        self.chk_class_enabled = QCheckBox("啟用分類階段")
+        self.chk_class_enabled.stateChanged.connect(self._on_classification_toggled)
+        vb_class.addWidget(self.chk_class_enabled)
+
+        form_class_basic = QFormLayout()
+        form_class_basic.setContentsMargins(6, 0, 0, 0)
+
+        # Label file row
+        self.edit_class_label = QLineEdit()
+        self.edit_class_label.setPlaceholderText("留空 = dataset.root/ann.txt")
+        self.edit_class_label.editingFinished.connect(self._on_builder_changed)
+        btn_class_label = QPushButton("選…")
+        btn_class_label.clicked.connect(self._browse_class_label_file)
+        self.btn_class_label = btn_class_label
+        label_row_widget = QWidget()
+        label_row_layout = QHBoxLayout(label_row_widget)
+        label_row_layout.setContentsMargins(0, 0, 0, 0)
+        label_row_layout.addWidget(self.edit_class_label, 1)
+        label_row_layout.addWidget(btn_class_label)
+        form_class_basic.addRow("Label 檔案", label_row_widget)
+
+        # Target level combo
+        self.combo_class_level = QComboBox()
+        self.combo_class_level.addItem("影片 (video)", "video")
+        self.combo_class_level.addItem("主體 (subject)", "subject")
+        self.combo_class_level.currentIndexChanged.connect(self._on_builder_changed)
+        form_class_basic.addRow("Target Level", self.combo_class_level)
+
+        # Feature extractor selection
+        self.combo_class_feature = QComboBox()
+        for name in sorted(FEATURE_EXTRACTOR_REGISTRY.keys()):
+            self.combo_class_feature.addItem(name)
+        self.combo_class_feature.currentIndexChanged.connect(self._on_class_feature_index_changed)
+        form_class_basic.addRow("Feature Extractor", self.combo_class_feature)
+
+        # Classifier selection
+        self.combo_class_classifier = QComboBox()
+        for name in sorted(CLASSIFIER_REGISTRY.keys()):
+            self.combo_class_classifier.addItem(name)
+        self.combo_class_classifier.currentIndexChanged.connect(self._on_class_classifier_index_changed)
+        form_class_basic.addRow("Classifier", self.combo_class_classifier)
+
+        vb_class.addLayout(form_class_basic)
+
+        self.class_feature_form_layout = QFormLayout()
+        self.gb_class_feat = QGroupBox("Feature Extractor 參數（即時）")
+        self.gb_class_feat.setLayout(self.class_feature_form_layout)
+        vb_class.addWidget(self.gb_class_feat)
+
+        self.class_classifier_form_layout = QFormLayout()
+        self.gb_class_clf = QGroupBox("Classifier 參數（即時）")
+        self.gb_class_clf.setLayout(self.class_classifier_form_layout)
+        vb_class.addWidget(self.gb_class_clf)
+
+        left_layout.addWidget(gb_class)
+
+        if self.combo_class_feature.count():
+            self._on_class_feature_changed(self.combo_class_feature.currentText(), from_builder=True)
+        if self.combo_class_classifier.count():
+            self._on_class_classifier_changed(self.combo_class_classifier.currentText(), from_builder=True)
+        self._update_classification_enabled_state()
 
         # Actions
         act_row = QHBoxLayout()
@@ -446,19 +525,28 @@ class SimpleRunnerUI(QMainWindow):
     def build_config_dict(self) -> Dict[str, Any]:
         ds_root = self.edit_root.text().strip()
         pre_list = [self.list_pre_sel.item(i).text() for i in range(self.list_pre_sel.count())]
-        # Preserve edits
-        self._save_current_pre_form(); self._save_model_form()
+
+        # Preserve edits from dynamic forms
+        self._save_current_pre_form()
+        self._save_model_form()
+        self._save_class_feature_form()
+        self._save_class_classifier_form()
+
         model = self.combo_model.currentText()
         evaluator = self.combo_eval.currentText()
-        pipeline_steps = []
-        for p in pre_list:
-            params = dict(self.pre_params.get(p) or getattr(PREPROC_REGISTRY[p], 'DEFAULT_CONFIG', {}))
-            pipeline_steps.append({'type': 'preproc', 'name': p, 'params': params})
-        defaults = getattr(MODEL_REGISTRY[model], 'DEFAULT_CONFIG', {})
-        mdl_user = self.model_params.get(model) or {}
-        mdl_params = {**defaults, **mdl_user}
-        if model in ('CSRT', 'OpticalFlowLK'): mdl_params.pop('init_box', None)
-        pipeline_steps.append({'type': 'model', 'name': model, 'params': mdl_params})
+
+        pipeline_steps: List[Dict[str, Any]] = []
+        for name in pre_list:
+            params = dict(self.pre_params.get(name) or getattr(PREPROC_REGISTRY[name], 'DEFAULT_CONFIG', {}))
+            pipeline_steps.append({'type': 'preproc', 'name': name, 'params': params})
+
+        model_defaults = getattr(MODEL_REGISTRY[model], 'DEFAULT_CONFIG', {})
+        model_overrides = self.model_params.get(model) or {}
+        model_params = {**model_defaults, **model_overrides}
+        if model in ('CSRT', 'OpticalFlowLK'):
+            model_params.pop('init_box', None)
+        pipeline_steps.append({'type': 'model', 'name': model, 'params': model_params})
+
         exp_name_text = self.edit_exp_name.text().strip()
         if not exp_name_text:
             default_name = self._generate_default_experiment_name(pre_list, model)
@@ -469,24 +557,53 @@ class SimpleRunnerUI(QMainWindow):
         if sanitized_name != exp_name_text:
             self._set_experiment_name(sanitized_name)
         exp_name_final = sanitized_name
-        cfg = {
+
+        cfg: Dict[str, Any] = {
             'seed': 42,
             'dataset': {
                 'root': ds_root,
                 'split': {
                     'method': self.split_method.currentText(),
                     'ratios': [self.split_r_train.value(), self.split_r_test.value()],
-                    'k_fold': int(self.kfold.value())
-                }
+                    'k_fold': int(self.kfold.value()),
+                },
             },
             'experiments': [
                 {'name': exp_name_final, 'pipeline': pipeline_steps}
             ],
-            'evaluation': {'evaluator': evaluator}
+            'evaluation': {'evaluator': evaluator},
         }
         if self.chk_viz.isChecked():
-            cfg.setdefault('evaluation', {}).setdefault('visualize', {})['enabled'] = True
-            cfg['evaluation']['visualize']['samples'] = int(self.spn_viz_samples.value())
+            viz_cfg = cfg.setdefault('evaluation', {}).setdefault('visualize', {})
+            viz_cfg['enabled'] = True
+            viz_cfg['samples'] = int(self.spn_viz_samples.value())
+
+        # Classification configuration (always emitted for discoverability)
+        class_enabled = bool(self.chk_class_enabled.isChecked())
+        target_level = str(self.combo_class_level.currentData() or self.combo_class_level.currentText() or 'video').lower()
+        feature_name = self.combo_class_feature.currentText() if self.combo_class_feature.count() else ''
+        classifier_name = self.combo_class_classifier.currentText() if self.combo_class_classifier.count() else ''
+        feature_params = dict(self.class_feature_params.get(feature_name, {})) if feature_name else {}
+        classifier_params = dict(self.class_classifier_params.get(classifier_name, {})) if classifier_name else {}
+        fallback_feature = feature_name or (self.combo_class_feature.itemText(0) if self.combo_class_feature.count() else 'basic')
+        fallback_classifier = classifier_name or (self.combo_class_classifier.itemText(0) if self.combo_class_classifier.count() else 'random_forest')
+        class_cfg: Dict[str, Any] = {
+            'enabled': class_enabled,
+            'target_level': target_level,
+            'feature_extractor': {
+                'name': fallback_feature,
+                'params': feature_params,
+            },
+            'classifier': {
+                'name': fallback_classifier,
+                'params': classifier_params,
+            },
+        }
+        label_path = self.edit_class_label.text().strip()
+        if label_path:
+            class_cfg['label_file'] = label_path
+        cfg['classification'] = class_cfg
+
         return cfg
 
     def _serialize_cfg(self, cfg: Dict[str, Any]) -> str:
@@ -639,6 +756,78 @@ class SimpleRunnerUI(QMainWindow):
         self.chk_viz.setChecked(bool(viz.get('enabled', self.chk_viz.isChecked())))
         try: self.spn_viz_samples.setValue(int(viz.get('samples', self.spn_viz_samples.value())))
         except Exception: pass
+        # Classification
+        class_cfg = cfg.get('classification') or {}
+        if not isinstance(class_cfg, dict):
+            class_cfg = {}
+
+        self.chk_class_enabled.blockSignals(True)
+        self.chk_class_enabled.setChecked(bool(class_cfg.get('enabled', self.chk_class_enabled.isChecked())))
+        self.chk_class_enabled.blockSignals(False)
+
+        label_file = class_cfg.get('label_file')
+        self.edit_class_label.blockSignals(True)
+        if isinstance(label_file, str):
+            self.edit_class_label.setText(label_file)
+        else:
+            self.edit_class_label.clear()
+        self.edit_class_label.blockSignals(False)
+
+        target_level = str(class_cfg.get('target_level', self.combo_class_level.currentData() or 'video')).lower()
+        idx_level = self.combo_class_level.findData(target_level)
+        if idx_level < 0:
+            idx_level = 0
+        self.combo_class_level.blockSignals(True)
+        self.combo_class_level.setCurrentIndex(idx_level)
+        self.combo_class_level.blockSignals(False)
+
+        feature_cfg = class_cfg.get('feature_extractor') or {}
+        feat_name = feature_cfg.get('name')
+        feat_params = feature_cfg.get('params') or {}
+        if feat_name and self.combo_class_feature.findText(feat_name) < 0:
+            self.combo_class_feature.addItem(feat_name)
+        if self.combo_class_feature.count():
+            if feat_name:
+                idx_feat = self.combo_class_feature.findText(feat_name)
+                if idx_feat < 0:
+                    idx_feat = 0
+            else:
+                idx_feat = self.combo_class_feature.currentIndex()
+            self.combo_class_feature.blockSignals(True)
+            if idx_feat >= 0:
+                self.combo_class_feature.setCurrentIndex(idx_feat)
+            self.combo_class_feature.blockSignals(False)
+            active_feat = self.combo_class_feature.currentText()
+            if feat_name:
+                self.class_feature_params[feat_name] = dict(feat_params)
+                self._on_class_feature_changed(feat_name, from_builder=True)
+            else:
+                self._on_class_feature_changed(active_feat, from_builder=True)
+
+        classifier_cfg = class_cfg.get('classifier') or {}
+        clf_name = classifier_cfg.get('name')
+        clf_params = classifier_cfg.get('params') or {}
+        if clf_name and self.combo_class_classifier.findText(clf_name) < 0:
+            self.combo_class_classifier.addItem(clf_name)
+        if self.combo_class_classifier.count():
+            if clf_name:
+                idx_clf = self.combo_class_classifier.findText(clf_name)
+                if idx_clf < 0:
+                    idx_clf = 0
+            else:
+                idx_clf = self.combo_class_classifier.currentIndex()
+            self.combo_class_classifier.blockSignals(True)
+            if idx_clf >= 0:
+                self.combo_class_classifier.setCurrentIndex(idx_clf)
+            self.combo_class_classifier.blockSignals(False)
+            active_clf = self.combo_class_classifier.currentText()
+            if clf_name:
+                self.class_classifier_params[clf_name] = dict(clf_params)
+                self._on_class_classifier_changed(clf_name, from_builder=True)
+            else:
+                self._on_class_classifier_changed(active_clf, from_builder=True)
+
+        self._update_classification_enabled_state()
         # Refresh forms (preproc current selection)
         self._on_pre_selected_changed(self.list_pre_sel.currentRow())
 
@@ -819,9 +1008,137 @@ class SimpleRunnerUI(QMainWindow):
         register(w, 'editingFinished')
         return w, _get, _set
 
+    def _on_classification_toggled(self):
+        self._update_classification_enabled_state()
+        self._on_builder_changed()
+
+    def _browse_class_label_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "選擇 ann.txt",
+            self.edit_class_label.text() or os.getcwd(),
+            "Text (*.txt);;All Files (*)",
+        )
+        if path:
+            self.edit_class_label.setText(path)
+            self._on_builder_changed()
+
+    def _on_class_feature_index_changed(self, idx: int):
+        name = self.combo_class_feature.itemText(idx) if idx >= 0 else None
+        self._on_class_feature_changed(name)
+
+    def _on_class_feature_changed(self, name: Optional[str], from_builder: bool = False):
+        self._save_class_feature_form()
+        self._clear_form(self.class_feature_form_layout)
+        self._class_feature_bindings = []
+        self._current_class_feature = name
+        if not name:
+            self.class_feature_params.setdefault('', {})
+            if not from_builder:
+                self._on_builder_changed()
+            return
+        defaults: Dict[str, Any] = {}
+        feat_cls = FEATURE_EXTRACTOR_REGISTRY.get(name)
+        if feat_cls is not None:
+            base = getattr(feat_cls, 'DEFAULT_CONFIG', {})
+            if isinstance(base, dict):
+                defaults.update(base)
+        stored = self.class_feature_params.get(name, {})
+        params = dict(defaults)
+        params.update(stored)
+        self.class_feature_params[name] = dict(stored)
+        for key, value in params.items():
+            widget, getter, setter = self._make_editor(key, value, scope='classification_feature')
+            setter(value)
+            self.class_feature_form_layout.addRow(QLabel(key), widget)
+            self._class_feature_bindings.append((key, getter, setter))
+        if not params:
+            hint = QLabel("此特徵擷取器無額外參數。")
+            hint.setStyleSheet("color:#6a737d; font-size:11px;")
+            self.class_feature_form_layout.addRow(hint)
+        if not from_builder:
+            self._on_builder_changed()
+
+    def _save_class_feature_form(self):
+        if not self._current_class_feature:
+            return
+        if self._class_feature_bindings:
+            self.class_feature_params[self._current_class_feature] = {
+                key: getter() for key, getter, _ in self._class_feature_bindings
+            }
+        else:
+            self.class_feature_params.setdefault(self._current_class_feature, {})
+
+    def _on_class_classifier_index_changed(self, idx: int):
+        name = self.combo_class_classifier.itemText(idx) if idx >= 0 else None
+        self._on_class_classifier_changed(name)
+
+    def _on_class_classifier_changed(self, name: Optional[str], from_builder: bool = False):
+        self._save_class_classifier_form()
+        self._clear_form(self.class_classifier_form_layout)
+        self._class_classifier_bindings = []
+        self._current_class_classifier = name
+        if not name:
+            self.class_classifier_params.setdefault('', {})
+            if not from_builder:
+                self._on_builder_changed()
+            return
+        defaults: Dict[str, Any] = {}
+        clf_cls = CLASSIFIER_REGISTRY.get(name)
+        if clf_cls is not None:
+            base = getattr(clf_cls, 'DEFAULT_CONFIG', {})
+            if isinstance(base, dict):
+                defaults.update(base)
+        stored = self.class_classifier_params.get(name, {})
+        params = dict(defaults)
+        params.update(stored)
+        self.class_classifier_params[name] = dict(stored)
+        for key, value in params.items():
+            widget, getter, setter = self._make_editor(key, value, scope='classification_classifier')
+            setter(value)
+            self.class_classifier_form_layout.addRow(QLabel(key), widget)
+            self._class_classifier_bindings.append((key, getter, setter))
+        if not params:
+            hint = QLabel("此分類器無額外參數。")
+            hint.setStyleSheet("color:#6a737d; font-size:11px;")
+            self.class_classifier_form_layout.addRow(hint)
+        if not from_builder:
+            self._on_builder_changed()
+
+    def _save_class_classifier_form(self):
+        if not self._current_class_classifier:
+            return
+        if self._class_classifier_bindings:
+            self.class_classifier_params[self._current_class_classifier] = {
+                key: getter() for key, getter, _ in self._class_classifier_bindings
+            }
+        else:
+            self.class_classifier_params.setdefault(self._current_class_classifier, {})
+
+    def _update_classification_enabled_state(self):
+        enabled = self.chk_class_enabled.isChecked()
+        widgets = [
+            getattr(self, 'edit_class_label', None),
+            getattr(self, 'btn_class_label', None),
+            getattr(self, 'combo_class_level', None),
+            getattr(self, 'combo_class_feature', None),
+            getattr(self, 'combo_class_classifier', None),
+            getattr(self, 'gb_class_feat', None),
+            getattr(self, 'gb_class_clf', None),
+        ]
+        for widget in widgets:
+            if widget is not None:
+                widget.setEnabled(enabled)
+
     def _on_param_widget_changed(self, scope: str):
-        if scope == 'preproc': self._save_current_pre_form()
-        elif scope == 'model': self._save_model_form()
+        if scope == 'preproc':
+            self._save_current_pre_form()
+        elif scope == 'model':
+            self._save_model_form()
+        elif scope == 'classification_feature':
+            self._save_class_feature_form()
+        elif scope == 'classification_classifier':
+            self._save_class_classifier_form()
         self._on_builder_changed()
 
     # ---------------- Preproc selection ops -----------------

@@ -45,4 +45,17 @@ evaluation:
     enabled: true
     samples: 10
 
+classification:
+  enabled: false
+  # label_file: "C:/path/to/ann.txt"  # defaults to dataset.root/ann.txt
+  target_level: "video"
+  feature_extractor:
+    name: "basic"
+    params: {}
+  classifier:
+    name: "random_forest"
+    params:
+      n_estimators: 200
+      random_state: 42
+
 # Note: output/results_root intentionally omitted — UI enforces project-local results folder.

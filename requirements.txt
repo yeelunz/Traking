@@ -25,3 +25,6 @@ einops
  
 # Progress bars
 tqdm
+scikit-learn
+xgboost
+lightgbm

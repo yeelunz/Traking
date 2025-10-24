@@ -26,6 +26,7 @@ Dependencies:
 - pyyaml (if using YAML configs)
  - PySide6 (optional, for the simple UI)
  - matplotlib (for plots and k-fold aggregates)
+ - scikit-learn (for subject-level classification metrics)
 
 Notes on trackers:
 - CSRT tracker requires `opencv-contrib-python` (cv2.legacy). If you want to use CSRT, uninstall opencv-python and install the contrib build instead.
@@ -51,6 +52,80 @@ Notes:
 - TaMOs integration example: copy `pipeline.tamos.yaml`, set `dataset.root`, and ensure at least one TaMOs checkpoint (e.g. `tamos_resnet50.pth.tar`) is in `libs/pytracking/pytracking/networks/`. Each video still needs a `<video>.json` with the first-frame bounding box; the wrapper will optionally recycle the previous box if the presence score dips below your threshold. For fine-tuning, set `fine_tune.enabled: true`, fill in the training command (for example call into `python -m ltr.run_training tracking tamos_resnet50`), and point `fine_tune.checkpoint` at the resulting `.pth.tar`—the wrapper will adopt it for subsequent predictions.
 - NCC (FASTSpeckle), TaMOs, and MixFormerV2 now share an optional `low_confidence_reinit` block in their configs. Enable it to have the pipeline call the bundled YOLOv11 detector whenever the tracker’s confidence (presence score for TaMOs, MixFormerV2; feature-based ratio for NCC) drops below `threshold`. You can override detector parameters via `low_confidence_reinit.detector`, set a `min_interval` between refreshes, and require a minimum detection confidence. NCC also surfaces its confidence score in `FramePrediction`, making downstream gating or analytics easier.
 - If you previously installed dependencies before the ToMP/TaMOs support landed, run `pip install timm>=0.9.12` to pull in the missing backbone dependency.
+
+### Classification stage (optional)
+- Place an `ann.txt` file in your dataset root. Each line is `<subject_id> <label>` (0 = healthy, 1 = diseased). Videos whose file name begins with the subject ID (e.g. `001Rest.mp4`, `001Grasp.mp4`) will inherit that label automatically.
+- Add a `classification` block to your pipeline config to enable the stage after tracking evaluation (defaults to **video-level** classification to preserve sample count; switch to subject-level later by setting `target_level: "subject"`)。分類階段會自動沿用 pipeline 中第一個模型的預測結果；若同時排程多個 tracker，可手動在 Raw config 加入 `source_model` 指定來源（UI 不再提供選項，以免混淆）。
+
+	```yaml
+	classification:
+		enabled: true
+		label_file: "C:/dataset/ann.txt"   # optional, defaults to <dataset.root>/ann.txt
+		target_level: "video"               # "video" (default) or "subject"
+		feature_extractor:
+			name: "texture_hybrid"           # 新增：結合動態 + 紋理特徵
+			params:
+				dynamic_params:
+					aggregate_stats: ["mean", "std", "max"]
+				texture_patch_size: 96          # bbox patch resize 尺寸（像素）
+				texture_hist_bins: 16           # 灰階直方圖 bin 數
+				max_texture_frames: 3           # 每支影片取樣幀數（平均切分）
+		classifier:
+			name: "random_forest"
+			params:
+				n_estimators: 300
+				random_state: 42
+	```
+	- 想要測試不同 CNN backbone 對紋理特徵的影響時，可將 `feature_extractor.name` 換成 `"backbone_texture"`，支援 **MobileNetV2 / ResNet34 / DenseNet121 / EfficientNetB2**，並提供隨機投影降維以避免高維嵌入蓋過動態特徵：
+
+		```yaml
+		feature_extractor:
+			name: "backbone_texture"
+			params:
+				backbone: "EfficientNetB2"      # 可改為 MobileNetV2 / ResNet34 / DenseNet121
+				pretrained: false                # 無網路環境可設 false；若 GPU/網路可用可改 true
+				reduction_method: "random_projection"
+				reduced_dim: 32                  # 投影後的維度，預設 64
+				pool_stats: ["mean", "std"]      # 聚合方式，支援 mean/std/min/max
+				max_texture_frames: 2            # 每支影片取樣的幀數
+				device: "cpu"                    # 自動回退；若要用 GPU 可改成 "cuda" 或指定編號
+				zscore_patch: true               # 進骨幹前對 patch 做 z-score 標準化
+				dynamic_params:
+					aggregate_stats: ["mean", "std"]
+		classifier:
+			name: "random_forest"
+			params:
+				n_estimators: 300
+				random_state: 42
+		```
+	- 隨機投影會在每支影片第一次執行時建立固定的投影矩陣（預設亂數種子 `1337`），同一個 `BackboneTextureFeatureExtractor` 物件之後的影片皆會沿用相同映射，確保特徵維度一致。若 `reduced_dim` 大於 backbone 原生維度，系統會自動停用降維直接輸出原始全局平均池化向量。
+- Ground-truth trajectories from the training split are used to train the classifier. Inference is performed on tracker predictions from the held-out test split to mimic clinical deployment. Outputs (`classification/summary.json`, `predictions.json`, `classifier.pkl`, etc.) are written inside each experiment folder. Each prediction row records the `entity_id` (video when `target_level: "video"`, subject when `"subject"`), the owning `subject_id`, and the originating video path(s).
+- Feature extractors and classifiers can be extended via the registries in `tracking/classification/feature_extractors.py` and `tracking/classification/classifiers.py`.
+- 目前內建的分類器包含：
+	- `random_forest`（預設）：支援 `n_estimators`、`max_depth`、`class_weight` 等常見參數。
+	- `logistic_regression`：可設定 `penalty`（含 `elasticnet`）、`C`、`l1_ratio`、`solver`，預設採 L2 正則與 `lbfgs`。
+	- `svm`：包裝 `sklearn.svm.SVC`，預設 `probability: true` 以輸出機率；可調整 `kernel`、`gamma`、`C` 等。
+	- `xgboost`：需要安裝 `xgboost`，支援 `n_estimators`、`max_depth`、`learning_rate`、`scale_pos_weight`、`tree_method` 等設定。
+	- `lightgbm`：需要安裝 `lightgbm`，支援 `num_leaves`、`learning_rate`、`n_estimators`、`objective` 等設定。
+
+	範例（SVM + backbone 紋理）：
+	```yaml
+	classification:
+		enabled: true
+		feature_extractor:
+			name: "backbone_texture"
+			params:
+				backbone: "MobileNetV2"
+				reduced_dim: 16
+				pool_stats: ["mean", "std"]
+		classifier:
+			name: "svm"
+			params:
+				C: 1.0
+				kernel: "rbf"
+				gamma: "scale"
+				probability: true
+	```
 
 UI (optional):
 ```bat
@@ -85,6 +160,8 @@ Use the UI to load/edit a YAML/JSON config and run the pipeline with live logs.
 ```
 選 Dataset Root → 選擇/排序 Preproc → 編輯各參數 → 選 Model + 參數 → 選 Evaluator / Visualization → (必要時改 Raw) → 執行
 ```
+
+若需要分類評估，可在 Builder 左側勾選「Classification (可選)」，設定 `ann.txt` 路徑、`target_level`（預設 `video`）以及特徵擷取器 / 分類器參數；執行排程或單次實驗時會一併產出 `classification/` 結果。`texture_hybrid` 會自動裁切 tracker/GT 的 bbox patch 計算灰階統計、梯度與直方圖，再與動態特徵拼接；若僅需動態特徵，可改回 `basic`。
 
 ### Raw 編輯行為
 | 狀態 | 描述 |
