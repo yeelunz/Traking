@@ -6,9 +6,8 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 try:
-    from skimage.segmentation import morphological_chan_vese, morphological_geodesic_active_contour  # type: ignore
+    from skimage.segmentation import morphological_geodesic_active_contour  # type: ignore
 except Exception:  # pragma: no cover - scikit-image is optional in unit tests
-    morphological_chan_vese = None  # type: ignore
     morphological_geodesic_active_contour = None  # type: ignore
 
 try:
@@ -146,6 +145,71 @@ def _guided_filter(image: np.ndarray, guide: np.ndarray, radius: int = 4, eps: f
     return q
 
 
+def _ellipse_axes(base_bbox: Tuple[float, float, float, float], roi_shape: Tuple[int, int], scale: float) -> Tuple[int, int]:
+    _, _, bbox_w, bbox_h = base_bbox
+    roi_h, roi_w = roi_shape
+    max_x = max(1, roi_w // 2)
+    max_y = max(1, roi_h // 2)
+    min_x = 2 if max_x >= 2 else 1
+    min_y = 2 if max_y >= 2 else 1
+    axis_x = int(round(bbox_w * scale))
+    axis_y = int(round(bbox_h * scale))
+    axis_x = max(min_x, min(max_x, axis_x))
+    axis_y = max(min_y, min(max_y, axis_y))
+    return max(1, axis_x), max(1, axis_y)
+
+
+def _fallback_center_ellipse(roi_shape: Tuple[int, int], base_bbox: Tuple[float, float, float, float]) -> np.ndarray:
+    roi_h, roi_w = roi_shape
+    mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    cx = roi_w // 2
+    cy = roi_h // 2
+    axes = _ellipse_axes(base_bbox, roi_shape, scale=0.25)
+    cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+    return mask
+
+
+def _run_grabcut_seed(roi: np.ndarray, base_bbox: Tuple[float, float, float, float]) -> np.ndarray:
+    roi_h, roi_w = roi.shape[:2]
+    seed_mask = np.full((roi_h, roi_w), cv2.GC_PR_FGD, dtype=np.uint8)
+
+    ring = int(np.clip(min(roi_h, roi_w) * 0.05, 10, 20))
+    if ring > 0:
+        seed_mask[:ring, :] = cv2.GC_BGD
+        seed_mask[-ring:, :] = cv2.GC_BGD
+        seed_mask[:, :ring] = cv2.GC_BGD
+        seed_mask[:, -ring:] = cv2.GC_BGD
+
+    cx = roi_w // 2
+    cy = roi_h // 2
+    axes = _ellipse_axes(base_bbox, (roi_h, roi_w), scale=0.15)
+    cv2.ellipse(seed_mask, (cx, cy), axes, 0, 0, 360, cv2.GC_FGD, -1)
+
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+
+    if roi.ndim == 2 or roi.shape[2] == 1:
+        roi_for_gc = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+    else:
+        roi_for_gc = cv2.cvtColor(roi, cv2.COLOR_RGB2BGR)
+
+    try:
+        cv2.grabCut(roi_for_gc, seed_mask, None, bgd_model, fgd_model, 4, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return _fallback_center_ellipse((roi_h, roi_w), base_bbox)
+
+    foreground = np.where(
+        (seed_mask == cv2.GC_FGD) | (seed_mask == cv2.GC_PR_FGD),
+        255,
+        0,
+    ).astype(np.uint8)
+
+    if np.count_nonzero(foreground) == 0:
+        return _fallback_center_ellipse((roi_h, roi_w), base_bbox)
+
+    return foreground
+
+
 class AutoMaskGenerator:
     """YOLO + Chan–Vese helper used by the segmentation annotator."""
 
@@ -164,10 +228,7 @@ class AutoMaskGenerator:
         margin: float = 0.2,
         num_iter: int = 300,
     ) -> List[AutoMaskResult]:
-        """Run detection and locally-refined Chan–Vese segmentation on a frame."""
-
-        if morphological_chan_vese is None:
-            raise RuntimeError("scikit-image is required for morphological Chan–Vese segmentation.")
+        """Run detection and locally refine segmentation using GrabCut + MGAC."""
 
         results = self.model.predict(frame, conf=self.conf, device=self.device, verbose=False)
         if not results:
@@ -201,22 +262,13 @@ class AutoMaskGenerator:
                 continue
 
             roi_gray = _ensure_gray(roi)
-            init_mask = np.zeros_like(roi_gray, dtype=np.uint8)
-            cx = roi_gray.shape[1] // 2
-            cy = roi_gray.shape[0] // 2
-            axes = (max(1, roi_gray.shape[1] // 3), max(1, roi_gray.shape[0] // 3))
-            cv2.ellipse(init_mask, (cx, cy), axes, 0, 0, 360, 1, -1)
+            mask = _run_grabcut_seed(roi, base_bbox)
+            if np.count_nonzero(mask) == 0:
+                mask = _fallback_center_ellipse(roi_gray.shape, base_bbox)
 
-            level_set = init_mask.astype(bool)
-            seg = morphological_chan_vese(
-                roi_gray,
-                max(1, num_iter),
-                init_level_set=level_set,
-                smoothing=3,
-                lambda1=1,
-                lambda2=1,
-            )
-            mask = seg.astype(np.uint8) * 255
+            mask_bool = mask > 0
+            if not mask_bool.any():
+                continue
 
             # 邊緣阻力：導入局部梯度資訊
             edges = cv2.Canny((roi_gray * 255).astype(np.uint8), 30, 80)
@@ -227,13 +279,14 @@ class AutoMaskGenerator:
                 mask = morphological_geodesic_active_contour(
                     edge_weight,
                     max(60, num_iter // 4),
-                    init_level_set=(mask > 0),
+                    init_level_set=mask_bool,
                     smoothing=1,
                     threshold="auto",
                     balloon=-1,
                 ).astype(np.uint8) * 255
             else:
-                mask = (mask.astype(np.float32) * edge_weight > 0.5).astype(np.uint8) * 255
+                blended = mask_bool.astype(np.float32) * edge_weight
+                mask = (blended > 0.5).astype(np.uint8) * 255
 
             kernel = np.ones((3, 3), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
