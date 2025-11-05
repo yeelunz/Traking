@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -55,20 +55,15 @@ class ConfidenceSignals:
 class ConfidenceConfig:
     """Hyper-parameters controlling the confidence estimator behaviour."""
 
-    raw_score_weight: float = 0.32
-    token_consistency_weight: float = 0.18
-    distribution_sharpness_weight: float = 0.18
-    attention_focus_weight: float = 0.12
-    short_iou_weight: float = 0.10
-    drift_weight: float = 0.10
+    distribution_logit_weight: float = 1.0
+    drift_logit_weight: float = 0.8
+    token_logit_weight: float = 0.4
 
-    score_floor: float = 0.5
-    score_gamma: float = 6.0
     token_gamma: float = 1.2
     distribution_beta: float = 2.0
-    smoothing_alpha: float = 0.2
+    smoothing_alpha: float = 0.7
 
-    drift_normalizer: float = 3.0
+    drift_normalizer: float = 2.5
     default_score: float = 0.6
 
 
@@ -85,18 +80,6 @@ class ConfidenceEstimator:
 
     def __init__(self, config: Optional[ConfidenceConfig] = None):
         self.cfg = config or ConfidenceConfig()
-        if all(
-            weight <= 0.0
-            for weight in (
-                self.cfg.raw_score_weight,
-                self.cfg.token_consistency_weight,
-                self.cfg.distribution_sharpness_weight,
-                self.cfg.attention_focus_weight,
-                self.cfg.short_iou_weight,
-                self.cfg.drift_weight,
-            )
-        ):
-            raise ValueError("At least one confidence weight must be positive.")
         self.reset()
 
     def reset(self) -> None:
@@ -142,33 +125,26 @@ class ConfidenceEstimator:
         prev_bbox = self._prev_bbox if self._prev_bbox is not None else bbox
         prev_confidence = self._prev_confidence
 
-        score_component = self._score_component(raw_score, signals)
         token_component = self._token_component(signals)
         distribution_component = self._distribution_component(signals)
-        attention_component = self._attention_component(signals)
-        short_iou_component = self._short_iou_component(bbox, prev_bbox if self._prev_bbox is not None else None)
         drift_component = self._drift_component(bbox, anchor_bbox if self._anchor_bbox is not None else None)
 
-        weighted_components = [
-            (self.cfg.raw_score_weight, score_component, "raw_score"),
-            (self.cfg.token_consistency_weight, token_component, "token"),
-            (self.cfg.distribution_sharpness_weight, distribution_component, "distribution"),
-            (self.cfg.attention_focus_weight, attention_component, "attention"),
-            (self.cfg.short_iou_weight, short_iou_component, "short_iou"),
-            (self.cfg.drift_weight, drift_component, "drift"),
-        ]
-        numerator = 0.0
-        denominator = 0.0
+        logit = 0.0
         raw_components: Dict[str, float] = {}
-        for weight, value, label in weighted_components:
-            if weight <= 0.0 or value is None:
-                continue
-            clamped = max(0.0, min(1.0, float(value)))
-            numerator += weight * clamped
-            denominator += weight
-            raw_components[label] = clamped
+        if distribution_component is not None:
+            distribution_component = max(0.0, min(1.0, float(distribution_component)))
+            raw_components["distribution"] = distribution_component
+            logit += self.cfg.distribution_logit_weight * distribution_component
+        if drift_component is not None:
+            drift_component = max(0.0, min(1.0, float(drift_component)))
+            raw_components["drift"] = drift_component
+            logit += self.cfg.drift_logit_weight * drift_component
+        if token_component is not None:
+            token_component = max(0.0, min(1.0, float(token_component)))
+            raw_components["token"] = token_component
+            logit += self.cfg.token_logit_weight * token_component
 
-        blended = numerator / denominator if denominator > 0.0 else 0.0
+        blended = 1.0 / (1.0 + math.exp(-logit))
         if prev_confidence is None:
             confidence = blended
         else:
@@ -176,6 +152,7 @@ class ConfidenceEstimator:
             confidence = (1.0 - alpha) * prev_confidence + alpha * blended
         confidence = max(0.0, min(1.0, confidence))
         raw_components["blended"] = blended
+        raw_components["logit"] = logit
 
         state = ConfidenceState(
             frame_index=frame_index,
@@ -194,18 +171,6 @@ class ConfidenceEstimator:
     # ------------------------------------------------------------------
     # Component helpers
     # ------------------------------------------------------------------
-    def _score_component(self, raw_score: Optional[float], signals: Optional[ConfidenceSignals]) -> float:
-        if signals is not None and signals.raw_logit is not None:
-            value = 1.0 / (1.0 + math.exp(-self.cfg.score_gamma * float(signals.raw_logit)))
-            return max(0.0, min(1.0, value))
-        score = raw_score if raw_score is not None else self.cfg.default_score
-        score = max(0.0, min(1.0, score))
-        if score <= self.cfg.score_floor:
-            return 0.0
-        delta = score - self.cfg.score_floor
-        value = 1.0 - math.exp(-self.cfg.score_gamma * delta)
-        return max(0.0, min(1.0, value))
-
     def _token_component(self, signals: Optional[ConfidenceSignals]) -> Optional[float]:
         if signals is None or signals.token_vectors is None:
             return None
@@ -252,29 +217,6 @@ class ConfidenceEstimator:
         mean_entropy = float(np.mean(entropies))
         value = math.exp(-self.cfg.distribution_beta * mean_entropy)
         return max(0.0, min(1.0, value))
-
-    def _attention_component(self, signals: Optional[ConfidenceSignals]) -> Optional[float]:
-        if signals is None:
-            return None
-        if signals.attention_distribution is not None:
-            attn = np.asarray(signals.attention_distribution, dtype=np.float32)
-            if attn.ndim >= 2 and attn.shape[-1] > 0:
-                attn = np.maximum(attn, 1e-8)
-                attn = attn / attn.sum(axis=-1, keepdims=True)
-                entropy = -(attn * np.log(attn)).sum(axis=-1)
-                max_entropy = math.log(float(attn.shape[-1])) if attn.shape[-1] > 1 else 0.0
-                if max_entropy > 0.0:
-                    norm_entropy = np.clip(entropy / max_entropy, 0.0, 1.0)
-                    focus = 1.0 - float(np.mean(norm_entropy))
-                    return max(0.0, min(1.0, focus))
-        if signals.attention_focus is not None:
-            return max(0.0, min(1.0, float(signals.attention_focus)))
-        return None
-
-    def _short_iou_component(self, bbox: BBox, prev_bbox: Optional[BBox]) -> float:
-        if prev_bbox is None:
-            return 1.0
-        return _bbox_iou(prev_bbox, bbox)
 
     def _drift_component(self, bbox: BBox, anchor_bbox: Optional[BBox]) -> float:
         if anchor_bbox is None:

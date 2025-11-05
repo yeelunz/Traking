@@ -9,6 +9,8 @@ class FramePrediction:
     frame_index: int
     bbox: Tuple[float, float, float, float]  # x,y,w,h
     score: Optional[float] = None
+    confidence: Optional[float] = None
+    confidence_components: Optional[Dict[str, float]] = None
 
     @property
     def center(self) -> Tuple[float, float]:

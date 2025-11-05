@@ -4,6 +4,7 @@ PySide6
 matplotlib
 pillow
 opencv-contrib-python
+scikit-image
 # For Faster R-CNN model
 torch
 torchvision

@@ -152,6 +152,9 @@ class BasicEvaluator:
             # detection-style metrics (single object) at IoU thresholds
             det50 = _det_counts_ap(preds, frames_gt, 0.5)
             det75 = _det_counts_ap(preds, frames_gt, 0.75)
+            drift_rate = 0.0
+            if len(ces) > 1:
+                drift_rate = sum(abs(ces[idx] - ces[idx - 1]) for idx in range(1, len(ces))) / (len(ces) - 1)
             summary = {
                 "iou_mean": sum(ious) / len(ious) if ious else 0.0,
                 "iou_std": (sum((x - (sum(ious) / len(ious))) ** 2 for x in ious) / len(ious)) ** 0.5 if ious else 0.0,
@@ -164,13 +167,14 @@ class BasicEvaluator:
                 "sum_ce": float(sum(ces)),
                 "sum_ce_sq": float(sum(x * x for x in ces)),
                 # mAP-like metrics (single-object precision at IoU threshold)
-                "mAP_50": det50["ap"],
-                "mAP_75": det75["ap"],
+                "success_rate_50": det50["ap"],
+                "success_rate_75": det75["ap"],
                 # raw counts for aggregation
                 "tp_50": det50["tp"], "fp_50": det50["fp"], "fn_50": det50["fn"],
                 "tp_75": det75["tp"], "fp_75": det75["fp"], "fn_75": det75["fn"],
                 # Success curve metric (per-sequence)
                 "success_auc": float(success_auc),
+                "drift_rate": float(drift_rate),
                 # --- Debug coverage fields ---
                 "debug_total_gt_frames": total_gt_frames,
                 "debug_total_pred_frames": total_pred_frames,

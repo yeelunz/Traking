@@ -25,7 +25,7 @@ experiments:
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -44,7 +44,7 @@ experiments:
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -63,7 +63,7 @@ experiments:
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -82,7 +82,7 @@ experiments:
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -101,7 +101,7 @@ experiments:
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -120,7 +120,7 @@ experiments:
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -132,14 +132,14 @@ experiments:
       - type: model
         name: YOLOv11
         params:
-          weights: "yolov11n.pt"
+          weights: "yolo11n.pt"
           conf: 0.25
           iou: 0.65
           imgsz: 640
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -151,14 +151,14 @@ experiments:
       - type: model
         name: YOLOv11
         params:
-          weights: "yolov11l.pt"
+          weights: "yolo11l.pt"
           conf: 0.25
           iou: 0.65
           imgsz: 640
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -170,14 +170,14 @@ experiments:
       - type: model
         name: YOLOv11
         params:
-          weights: "yolov12n.pt"
+          weights: "yolo12n.pt"
           conf: 0.25
           iou: 0.65
           imgsz: 640
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0
@@ -189,14 +189,14 @@ experiments:
       - type: model
         name: YOLOv11
         params:
-          weights: "yolov12l.pt"
+          weights: "yolo12l.pt"
           conf: 0.25
           iou: 0.65
           imgsz: 640
           max_det: 100
           device: cuda
           batch: 16
-          epochs: 50
+          epochs: 5
           lr0: 0.01
           patience: 50
           workers: 0

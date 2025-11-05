@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -31,6 +32,7 @@ from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingMode
 from ..core.registry import register_model
 from ..utils.annotations import load_coco_vid
 from ..utils.init_bbox import detect_bbox_on_frame, resolve_first_frame_bbox
+from ..utils.confidence import ConfidenceConfig, ConfidenceEstimator, ConfidenceSignals
 
 
 _MIXFORMER_ROOT = Path(__file__).resolve().parents[2] / "libs" / "MixFormerV2"
@@ -413,6 +415,7 @@ class MixFormerV2Tracker(TrackingModel):
             "detector": {},
             "detector_min_conf": None,
         },
+        "confidence_estimator": {},
     }
 
     def __init__(self, config: Dict[str, Any]):
@@ -494,6 +497,16 @@ class MixFormerV2Tracker(TrackingModel):
         self.low_conf_detector_params = {**self.init_detector_params, **detector_override}
         min_conf_val = lc_cfg.get("detector_min_conf", lc_default.get("detector_min_conf"))
         self.low_conf_detector_min_conf = None if min_conf_val in (None, "none", "") else float(min_conf_val)
+
+        confidence_cfg_raw = merged.get("confidence_estimator")
+        if confidence_cfg_raw in (None, False):
+            self.confidence_config = ConfidenceConfig()
+        else:
+            if not isinstance(confidence_cfg_raw, dict):
+                raise TypeError("confidence_estimator config must be a mapping of ConfidenceConfig fields")
+            valid_fields = {f.name for f in fields(ConfidenceConfig)}
+            filtered_cfg = {k: confidence_cfg_raw[k] for k in confidence_cfg_raw if k in valid_fields}
+            self.confidence_config = ConfidenceConfig(**filtered_cfg)
 
         checkpoint_cfg = merged.get("checkpoint", self.DEFAULT_CONFIG["checkpoint"])
         if isinstance(checkpoint_cfg, (list, tuple)):
@@ -924,7 +937,144 @@ class MixFormerV2Tracker(TrackingModel):
 
             tracker.load_state = _load_with_weights  # type: ignore[attr-defined]
 
+        self._install_confidence_capture(tracker)
         return tracker
+
+    def _install_confidence_capture(self, tracker: Any) -> None:
+        if torch is None:
+            return
+        if getattr(tracker, "_confidence_attn_hook", None) is not None:
+            return
+        network = getattr(tracker, "network", None)
+        if network is None:
+            return
+        backbone = getattr(network, "backbone", None)
+        if backbone is None:
+            return
+        search_tokens = getattr(backbone, "num_patches_s", None)
+        template_tokens = getattr(backbone, "num_patches_t", None)
+        blocks = getattr(backbone, "blocks", None)
+        if search_tokens is None or template_tokens is None or not blocks:
+            return
+        last_block = blocks[-1]
+        attn_module = getattr(last_block, "attn", None)
+        if attn_module is None:
+            return
+        attn_drop = getattr(attn_module, "attn_drop", None)
+        if attn_drop is None:
+            return
+
+        tracker._last_attention_distribution = None
+        tracker._last_attention_focus = None
+
+        expected_query = search_tokens + 4
+        search_start = template_tokens * 2
+        search_end = search_start + search_tokens
+
+        def _attn_hook(_module, _inputs, output):
+            if not torch.is_tensor(output):
+                return
+            if output.dim() != 4 or output.size(2) != expected_query:
+                return
+            attn_tensor = output.detach()
+            if attn_tensor.numel() == 0:
+                return
+            attn_mean = attn_tensor.mean(dim=1)  # average over heads -> (B, q_len, k_len)
+            reg_attention = attn_mean[:, -4:, :]
+            if reg_attention.size(-1) < search_end:
+                return
+            reg_to_search = reg_attention[..., search_start:search_end]
+            reg_to_search = torch.relu(reg_to_search)
+            reg_sum = reg_to_search.sum(dim=-1, keepdim=True) + 1e-6
+            probs = reg_to_search / reg_sum
+            tracker._last_attention_distribution = probs.detach().cpu()
+            log_probs = torch.log(probs + 1e-6)
+            entropy = -(probs * log_probs).sum(dim=-1)
+            denom = math.log(float(probs.size(-1))) if probs.size(-1) > 1 else 1.0
+            if denom <= 0.0:
+                focus = 0.0
+            else:
+                norm_entropy = torch.clamp(entropy / denom, 0.0, 1.0)
+                focus = 1.0 - norm_entropy.mean().item()
+            tracker._last_attention_focus = max(0.0, min(1.0, float(focus)))
+
+        tracker._confidence_attn_hook = attn_drop.register_forward_hook(_attn_hook)
+
+    def _collect_confidence_signals(self, tracker: Any) -> Optional[ConfidenceSignals]:
+        features = getattr(tracker, "_last_confidence_features", None)
+        attention_distribution = getattr(tracker, "_last_attention_distribution", None)
+        attention_focus = getattr(tracker, "_last_attention_focus", None)
+
+        def _tensor_to_numpy(value: Any, squeeze: bool = False) -> Optional[np.ndarray]:
+            if value is None:
+                return None
+            if torch is not None and torch.is_tensor(value):
+                arr = value.detach().cpu().numpy()
+            else:
+                try:
+                    arr = np.asarray(value)
+                except Exception:
+                    return None
+            if squeeze:
+                arr = np.squeeze(arr)
+            return arr.copy() if hasattr(arr, "copy") else np.array(arr)
+
+        tokens_array: Optional[np.ndarray] = None
+        distributions: Dict[str, np.ndarray] = {}
+        raw_logit: Optional[float] = None
+
+        if isinstance(features, dict):
+            reg_tokens = _tensor_to_numpy(features.get("reg_tokens"))
+            if reg_tokens is not None:
+                if reg_tokens.ndim == 3:
+                    b, n, c = reg_tokens.shape
+                    reg_tokens = reg_tokens.reshape(b * n, c)
+                elif reg_tokens.ndim == 1:
+                    reg_tokens = reg_tokens.reshape(1, -1)
+                tokens_array = reg_tokens.astype(np.float32, copy=False)
+
+            for key, label in (
+                ("prob_l", "left"),
+                ("prob_t", "top"),
+                ("prob_r", "right"),
+                ("prob_b", "bottom"),
+            ):
+                arr = _tensor_to_numpy(features.get(key), squeeze=True)
+                if arr is None:
+                    continue
+                arr = arr.astype(np.float32, copy=False)
+                if arr.ndim == 0:
+                    arr = arr.reshape(1)
+                else:
+                    arr = arr.reshape(-1)
+                if arr.size > 0:
+                    distributions[label] = arr
+
+            score_logits = _tensor_to_numpy(features.get("score_logits"), squeeze=True)
+            if score_logits is not None:
+                flat = score_logits.reshape(-1)
+                if flat.size > 0 and np.isfinite(flat[0]):
+                    raw_logit = float(flat[0])
+
+        attention_array = _tensor_to_numpy(attention_distribution)
+        if attention_array is not None:
+            if attention_array.ndim >= 2:
+                batch_dims = attention_array.shape[:-1]
+                last_dim = attention_array.shape[-1]
+                attention_array = attention_array.reshape(-1, last_dim)
+            attention_array = attention_array.astype(np.float32, copy=False)
+
+        if not isinstance(features, dict) and attention_array is None and attention_focus is None:
+            return None
+
+        edge_distributions = distributions if distributions else None
+        return ConfidenceSignals(
+            raw_logit=raw_logit,
+            token_vectors=tokens_array,
+            edge_distributions=edge_distributions,
+            attention_distribution=attention_array,
+            attention_focus=attention_focus,
+        )
 
     def _predict_frame(self, tracker: Any, frame_rgb: np.ndarray) -> _MixFormerResult:
         out = tracker.track(frame_rgb, {})
@@ -966,6 +1116,8 @@ class MixFormerV2Tracker(TrackingModel):
             )
 
         tracker = self._build_tracker()
+        confidence_estimator = ConfidenceEstimator(self.confidence_config)
+        confidence_estimator.reset()
 
         preds: List[FramePrediction] = []
         frame_idx = 0
@@ -982,21 +1134,52 @@ class MixFormerV2Tracker(TrackingModel):
                     init_bbox_list = [float(v) for v in init_bbox]
                     tracker.initialize(frame_rgb, {"init_bbox": init_bbox_list})
                     init_bbox_tuple = tuple(init_bbox_list)
-                    preds.append(FramePrediction(frame_idx, init_bbox_tuple, 1.0))
+                    init_state = confidence_estimator.update(frame_idx, init_bbox_tuple, 1.0)
+                    preds.append(
+                        FramePrediction(
+                            frame_idx,
+                            init_bbox_tuple,
+                            1.0,
+                            confidence=init_state.confidence,
+                            confidence_components=dict(init_state.raw_components),
+                        )
+                    )
                     last_bbox = init_bbox_tuple
                 else:
                     result = self._predict_frame(tracker, frame_rgb)
                     score_val = result.score
+                    has_valid_bbox = _is_valid_bbox(result.bbox)
 
-                    should_reinit = (
-                        self.low_conf_reinit_enabled
-                        and (
-                            not _is_valid_bbox(result.bbox)
-                            or score_val is None
-                            or score_val < self.low_conf_threshold
-                        )
-                        and (frame_idx - last_detector_reinit) >= self.low_conf_min_interval
-                    )
+                    signals = self._collect_confidence_signals(tracker)
+                    raw_for_estimator = score_val if score_val is not None else 0.0
+                    if isinstance(raw_for_estimator, (float, int)):
+                        raw_for_estimator = max(0.0, min(1.0, float(raw_for_estimator)))
+                    else:
+                        raw_for_estimator = 0.0
+
+                    confidence_preview = None
+                    if has_valid_bbox:
+                        try:
+                            preview_state = confidence_estimator.evaluate(
+                                frame_index=frame_idx,
+                                bbox=result.bbox,
+                                raw_score=raw_for_estimator,
+                                signals=signals,
+                                commit=False,
+                            )
+                            confidence_preview = preview_state.confidence
+                        except Exception:
+                            confidence_preview = None
+
+                    should_reinit = False
+                    if self.low_conf_reinit_enabled and (frame_idx - last_detector_reinit) >= self.low_conf_min_interval:
+                        if not has_valid_bbox:
+                            should_reinit = True
+                        else:
+                            if confidence_preview is not None:
+                                should_reinit = confidence_preview < self.low_conf_threshold
+                            else:
+                                should_reinit = score_val is None or score_val < self.low_conf_threshold
 
                     if should_reinit:
                         det_bbox, det_conf = detect_bbox_on_frame(
@@ -1007,21 +1190,61 @@ class MixFormerV2Tracker(TrackingModel):
                         if det_bbox is not None:
                             tracker = self._build_tracker()
                             tracker.initialize(frame_rgb, {"init_bbox": [float(v) for v in det_bbox]})
+                            confidence_estimator.reset()
                             last_detector_reinit = frame_idx
                             last_bbox = det_bbox
-                            conf_out = det_conf if det_conf is not None else score_val
-                            if conf_out is not None:
-                                conf_out = float(max(0.0, min(1.0, conf_out)))
-                            preds.append(FramePrediction(frame_idx, det_bbox, conf_out))
+                            det_score: Optional[float] = None
+                            if det_conf is not None:
+                                try:
+                                    det_score = max(0.0, min(1.0, float(det_conf)))
+                                except Exception:
+                                    det_score = None
+                            det_state = confidence_estimator.update(
+                                frame_idx,
+                                det_bbox,
+                                det_score if det_score is not None else 0.0,
+                                signals=None,
+                            )
+                            preds.append(
+                                FramePrediction(
+                                    frame_idx,
+                                    det_bbox,
+                                    det_score,
+                                    confidence=det_state.confidence,
+                                    confidence_components=dict(det_state.raw_components),
+                                )
+                            )
                             frame_idx += 1
                             continue
 
-                    if _is_valid_bbox(result.bbox) and (score_val is None or score_val >= self.min_confidence):
-                        preds.append(FramePrediction(frame_idx, result.bbox, score_val))
+                    output_bbox: Optional[Tuple[float, float, float, float]] = None
+                    output_score: Optional[float] = None
+
+                    if has_valid_bbox and (score_val is None or score_val >= self.min_confidence):
+                        output_bbox = result.bbox
+                        output_score = score_val
                         last_bbox = result.bbox
                     elif self.fallback_last_prediction and _is_valid_bbox(last_bbox):
-                        fallback_score = score_val if score_val is not None else 0.0
-                        preds.append(FramePrediction(frame_idx, last_bbox, fallback_score))
+                        output_bbox = last_bbox
+                        output_score = score_val if score_val is not None else 0.0
+
+                    if output_bbox is not None:
+                        state = confidence_estimator.evaluate(
+                            frame_index=frame_idx,
+                            bbox=output_bbox,
+                            raw_score=raw_for_estimator,
+                            signals=signals,
+                            commit=True,
+                        )
+                        preds.append(
+                            FramePrediction(
+                                frame_idx,
+                                output_bbox,
+                                output_score,
+                                confidence=state.confidence,
+                                confidence_components=dict(state.raw_components),
+                            )
+                        )
                 frame_idx += 1
         finally:
             cap.release()

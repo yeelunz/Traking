@@ -15,9 +15,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: gt
 
   - name: mixformer_ablation_init_large
@@ -25,9 +24,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: yolov11
           init_detector_weights: "best(large).pt"
 
@@ -36,9 +34,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: yolov11
           init_detector_weights: best.pt
 
@@ -47,9 +44,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: yolov11
           init_detector_weights: "best(large).pt"
           low_confidence_reinit:
@@ -64,9 +60,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: yolov11
           init_detector_weights: best.pt
           low_confidence_reinit:
@@ -81,9 +76,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: yolov11
           init_detector_weights: "best(large).pt"
           low_confidence_reinit:
@@ -98,9 +92,8 @@ experiments:
       - type: model
         name: MixFormerV2
         params:
-          train_enabled: true
-          train_epochs: 15
-          train_freeze_backbone: false
+          train_enabled: false
+          checkpoint: "models/mixformerv2_finetuned_20251024_192207.pt.tar"
           first_frame_source: yolov11
           init_detector_weights: best.pt
           low_confidence_reinit:
@@ -112,3 +105,6 @@ experiments:
 
 evaluation:
   evaluator: BasicEvaluator
+  visualize:
+    enabled: true
+    samples: 20

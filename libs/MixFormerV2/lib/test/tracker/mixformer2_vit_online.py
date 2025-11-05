@@ -20,6 +20,9 @@ class MixFormerOnline(BaseTracker):
         self.network = network.cuda()
         self.network.eval()
         self.attn_weights = []
+        self._last_confidence_features = None
+        self._last_attention_distribution = None
+        self._last_attention_focus = None
 
         self.preprocessor = Preprocessor_wo_mask()
         self.state = None
@@ -96,6 +99,7 @@ class MixFormerOnline(BaseTracker):
         with torch.no_grad():
             # TODO: use forward_test() in test
             out_dict = self.network(self.template, self.online_template, search, softmax=True, run_score_head=True)
+        self._cache_confidence_features(out_dict)
 
         pred_boxes = out_dict['pred_boxes'].view(-1, 4)
         pred_score = out_dict['pred_scores'].view(1).sigmoid().item()
@@ -155,6 +159,23 @@ class MixFormerOnline(BaseTracker):
                     "conf_score": pred_score}
         else:
             return {"target_bbox": self.state, "conf_score": pred_score}
+
+    def _cache_confidence_features(self, out_dict):
+        features = {}
+        try:
+            reg_tokens = out_dict.get('reg_tokens', None)
+        except AttributeError:
+            reg_tokens = None
+        if reg_tokens is not None:
+            features['reg_tokens'] = reg_tokens.detach().cpu()
+        for key in ('prob_l', 'prob_t', 'prob_r', 'prob_b'):
+            tensor = out_dict.get(key)
+            if tensor is not None:
+                features[key] = tensor.detach().cpu()
+        score_logits = out_dict.get('pred_scores')
+        if score_logits is not None:
+            features['score_logits'] = score_logits.detach().cpu()
+        self._last_confidence_features = features if features else None
 
     def map_box_back(self, pred_box: list, resize_factor: float):
         cx_prev, cy_prev = self.state[0] + 0.5 * self.state[2], self.state[1] + 0.5 * self.state[3]

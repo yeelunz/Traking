@@ -233,16 +233,20 @@ class PipelineRunner:
                     # reduce noisy console logs during progress; keep in file only when tqdm is present
                     self._log(f"Predicting video: {os.path.basename(vp)}", to_console=(tqdm is None))
                     pv_predictions = {}
+                    per_video_infer_stats: Dict[str, Dict[str, float]] = {}
                     # per-video per-model bar
                     model_iter = use_models
                     if tqdm is not None and len(use_models) > 1:
                         model_iter = tqdm(use_models, desc=f"Models@{os.path.basename(vp)}", unit="mdl", leave=False)
                     for model_name, model in model_iter:
+                        frames_targeted = None
+                        start_time = time.perf_counter()
                         try:
                             # If we only evaluate GT frames and the model supports sparse inference,
                             # request predictions only on those frames (useful for detection-based ML models)
                             if restrict_to_gt_frames and hasattr(model, 'predict_frames'):
                                 gt_frames_sorted = sorted([int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes])
+                                frames_targeted = gt_frames_sorted
                                 preds = model.predict_frames(vp, gt_frames_sorted)  # type: ignore[attr-defined]
                             else:
                                 preds = model.predict(vp)
@@ -250,10 +254,23 @@ class PipelineRunner:
                             # Log the failure and continue to next model/video
                             self._log(f"[ERROR] Predict failed | model={getattr(model,'name',model_name)} video={os.path.basename(vp)} error={e}")
                             preds = []
+                        elapsed = time.perf_counter() - start_time
                         disp = getattr(model, 'name', model_name)
                         pv_predictions[disp] = preds
                         predictions_all.setdefault(disp, []).extend(preds)
                         per_model_video_predictions.setdefault(disp, {})[vp] = list(preds)
+                        unique_frames = {int(getattr(p, 'frame_index', -1)) for p in preds if getattr(p, 'frame_index', None) is not None}
+                        frames_processed = 0
+                        if frames_targeted:
+                            frames_processed = len(frames_targeted)
+                        elif unique_frames:
+                            frames_processed = len(unique_frames)
+                        elif preds:
+                            frames_processed = len(preds)
+                        per_video_infer_stats[disp] = {
+                            "time": per_video_infer_stats.get(disp, {}).get("time", 0.0) + float(elapsed),
+                            "frames": per_video_infer_stats.get(disp, {}).get("frames", 0.0) + float(frames_processed),
+                        }
                     # --- NEW: write per-video predictions for easier debugging/inspection ---
                     try:
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
@@ -262,10 +279,14 @@ class PipelineRunner:
                         for display_name, pl in pv_predictions.items():
                             outp_video = os.path.join(pred_dir, f"{display_name}.json")
                             with open(outp_video, "w", encoding="utf-8") as f:
-                                json.dump([
-                                    {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score}
-                                    for p in pl
-                                ], f, ensure_ascii=False, indent=2)
+                                rows = []
+                                for p in pl:
+                                    row = {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score}
+                                    conf_val = getattr(p, "confidence", None)
+                                    if conf_val is not None:
+                                        row["confidence"] = conf_val
+                                    rows.append(row)
+                                json.dump(rows, f, ensure_ascii=False, indent=2)
                         self._log(f"Per-video predictions saved: {pred_dir}", to_console=(tqdm is None))
                     except Exception:
                         pass
@@ -330,6 +351,10 @@ class PipelineRunner:
                                 "tp_75": 0, "fp_75": 0, "fn_75": 0,
                                 # Success AUC aggregation (average across videos)
                                 "sum_success_auc": 0.0, "videos": 0,
+                                # Inference performance aggregation
+                                "sum_infer_time": 0.0, "sum_infer_frames": 0.0,
+                                # Drift aggregation (per-video statistic)
+                                "sum_drift_rate": 0.0, "drift_samples": 0,
                             })
                             agg["count"] += int(sm.get("count", 0))
                             agg["sum_iou"] += float(sm.get("sum_iou", 0.0))
@@ -346,6 +371,13 @@ class PipelineRunner:
                             if "success_auc" in sm:
                                 agg["sum_success_auc"] += float(sm.get("success_auc", 0.0))
                                 agg["videos"] += 1
+                            stats = per_video_infer_stats.get(display_name)
+                            if stats:
+                                agg["sum_infer_time"] += float(stats.get("time", 0.0))
+                                agg["sum_infer_frames"] += float(stats.get("frames", 0.0))
+                            if "drift_rate" in sm:
+                                agg["sum_drift_rate"] += float(sm.get("drift_rate", 0.0))
+                                agg["drift_samples"] += 1
                         self._log(f"Evaluated metrics written to: {vid_met_dir}", to_console=(tqdm is None))
 
                         # Optional visualization: draw up to N GT frames per video with GT/pred boxes
@@ -406,17 +438,24 @@ class PipelineRunner:
                         # micro-precision as AP at single threshold
                         tp50, fp50 = int(a.get("tp_50", 0)), int(a.get("fp_50", 0))
                         tp75, fp75 = int(a.get("tp_75", 0)), int(a.get("fp_75", 0))
-                        map50 = (tp50 / (tp50 + fp50)) if (tp50 + fp50) > 0 else 0.0
-                        map75 = (tp75 / (tp75 + fp75)) if (tp75 + fp75) > 0 else 0.0
+                        success_rate_50 = (tp50 / (tp50 + fp50)) if (tp50 + fp50) > 0 else 0.0
+                        success_rate_75 = (tp75 / (tp75 + fp75)) if (tp75 + fp75) > 0 else 0.0
                         # Average Success AUC across videos (if any present)
                         vcnt = max(1, int(a.get("videos", 0)))
                         success_auc_mean = float(a.get("sum_success_auc", 0.0)) / vcnt if int(a.get("videos", 0)) > 0 else 0.0
+                        infer_time_total = float(a.get("sum_infer_time", 0.0))
+                        infer_frames_total = float(a.get("sum_infer_frames", 0.0))
+                        fps = (infer_frames_total / infer_time_total) if infer_time_total > 0.0 else 0.0
+                        drift_samples = int(a.get("drift_samples", 0))
+                        drift_rate_mean = (float(a.get("sum_drift_rate", 0.0)) / drift_samples) if drift_samples > 0 else 0.0
                         summary_out[model_name] = {
                             "frames_count": n,
                             "iou_mean": i_mu, "iou_std": i_sd,
                             "ce_mean": c_mu, "ce_std": c_sd,
-                            "mAP_50": map50, "mAP_75": map75,
+                            "success_rate_50": success_rate_50, "success_rate_75": success_rate_75,
                             "success_auc": success_auc_mean,
+                            "fps": fps,
+                            "drift_rate": drift_rate_mean,
                         }
                     summary_path = os.path.join(met_dir, "summary.json")
                     with open(summary_path, "w", encoding="utf-8") as f:
@@ -427,9 +466,17 @@ class PipelineRunner:
                 for display_name, preds in predictions_all.items():
                     outp = os.path.join(pred_dir, f"{display_name}.json")
                     with open(outp, "w", encoding="utf-8") as f:
-                        json.dump([
-                            {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score} for p in preds
-                        ], f, ensure_ascii=False, indent=2)
+                        rows = []
+                        for p in preds:
+                            row = {"frame_index": p.frame_index, "bbox": list(p.bbox), "score": p.score}
+                            conf_val = getattr(p, "confidence", None)
+                            if conf_val is not None:
+                                row["confidence"] = conf_val
+                            components = getattr(p, "confidence_components", None)
+                            if components:
+                                row["components"] = {k: float(v) for k, v in components.items()}
+                            rows.append(row)
+                        json.dump(rows, f, ensure_ascii=False, indent=2)
                     self._log(f"Predictions saved: {outp}", to_console=(tqdm is None))
 
                 return per_model_video_predictions
@@ -502,15 +549,23 @@ class PipelineRunner:
                 agg = {}
                 for sm in fold_summaries:
                     for model_name, m in sm.items():
-                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "mAP_50": [], "mAP_75": [], "success_auc": []})
+                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "success_rate_50": [], "success_rate_75": [], "success_auc": [], "fps": [], "drift_rate": []})
                         agg[model_name]["iou_mean"].append(m.get("iou_mean", 0.0))
                         agg[model_name]["ce_mean"].append(m.get("ce_mean", 0.0))
-                        if "mAP_50" in m:
-                            agg[model_name]["mAP_50"].append(m.get("mAP_50", 0.0))
-                        if "mAP_75" in m:
-                            agg[model_name]["mAP_75"].append(m.get("mAP_75", 0.0))
+                        if "success_rate_50" in m:
+                            agg[model_name]["success_rate_50"].append(m.get("success_rate_50", 0.0))
+                        elif "mAP_50" in m:
+                            agg[model_name]["success_rate_50"].append(m.get("mAP_50", 0.0))
+                        if "success_rate_75" in m:
+                            agg[model_name]["success_rate_75"].append(m.get("success_rate_75", 0.0))
+                        elif "mAP_75" in m:
+                            agg[model_name]["success_rate_75"].append(m.get("mAP_75", 0.0))
                         if "success_auc" in m:
                             agg[model_name]["success_auc"].append(m.get("success_auc", 0.0))
+                        if "fps" in m:
+                            agg[model_name]["fps"].append(m.get("fps", 0.0))
+                        if "drift_rate" in m:
+                            agg[model_name]["drift_rate"].append(m.get("drift_rate", 0.0))
                 comp_dir = os.path.join(out_dir, "comparison")
                 os.makedirs(comp_dir, exist_ok=True)
                 agg_out = {}
@@ -526,12 +581,16 @@ class PipelineRunner:
                     agg_out[model_name] = {
                         "iou_mean_mean": i_mu, "iou_mean_std": i_sd,
                         "ce_mean_mean": c_mu, "ce_mean_std": c_sd,
-                        "mAP_50_mean": mean_std(vals.get("mAP_50", []))[0],
-                        "mAP_50_std": mean_std(vals.get("mAP_50", []))[1],
-                        "mAP_75_mean": mean_std(vals.get("mAP_75", []))[0],
-                        "mAP_75_std": mean_std(vals.get("mAP_75", []))[1],
+                        "success_rate_50_mean": mean_std(vals.get("success_rate_50", []))[0],
+                        "success_rate_50_std": mean_std(vals.get("success_rate_50", []))[1],
+                        "success_rate_75_mean": mean_std(vals.get("success_rate_75", []))[0],
+                        "success_rate_75_std": mean_std(vals.get("success_rate_75", []))[1],
                         "success_auc_mean": mean_std(vals.get("success_auc", []))[0],
                         "success_auc_std": mean_std(vals.get("success_auc", []))[1],
+                        "fps_mean": mean_std(vals.get("fps", []))[0],
+                        "fps_std": mean_std(vals.get("fps", []))[1],
+                        "drift_rate_mean": mean_std(vals.get("drift_rate", []))[0],
+                        "drift_rate_std": mean_std(vals.get("drift_rate", []))[1],
                     }
                 with open(os.path.join(comp_dir, "kfold_summary.json"), "w", encoding="utf-8") as f:
                     json.dump(agg_out, f, ensure_ascii=False, indent=2)

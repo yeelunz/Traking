@@ -133,6 +133,21 @@ python ui.py
 ```
 Use the UI to load/edit a YAML/JSON config and run the pipeline with live logs.
 
+### 🔍 Tracking Tools Workbench
+
+若想快速檢視排程成果與信心診斷，使用新的「Tools Workbench」桌面應用：
+
+```bat
+python tools\tools_workbench.py
+```
+
+功能概覽：
+- **排程結果瀏覽**：原本的 `schedule_results_viewer` 介面已整合為第一個分頁，可以排序、複製或匯出實驗指標。
+- **信心診斷**：第二個分頁會掃描排程資料夾底下的 `test/predictions/*.json`，使用 `ConfidenceEstimator` 得到平滑化的信心值，並計算 P10/P05、最低值、連續低信心段落長度、平均 IoU/漂移等統計。選取任一列即可檢視 Top 8 最低信心影格及建議，並可透過「複製重點指標」按鈕一次複製所有實驗的關鍵信心指標以供後續分析。
+- **更多工具**：第三個分頁為占位，後續可在此加入新的分析或除錯功能。
+
+信心診斷的低信心門檻預設為 0.6，可在分頁右上角調整並重新分析。若原始追蹤分數長期鎖在 1.0、漂移組件偏低或低信心段落過長，建議啟用/調整 `low_confidence_reinit` 或檢查初始標註品質。
+
 ### 排程多組實驗
 - 左側面板底部新增「排程隊列」，可以用「加入排程」把目前的設定快照加入待執行清單。
 - 任何時候都可以在 Builder 區塊的「實驗名稱」欄位自訂實驗名稱；結果資料夾會沿用這個名稱，留空則依前處理 / 模型自動產生。

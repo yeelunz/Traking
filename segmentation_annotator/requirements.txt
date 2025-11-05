@@ -1,0 +1,5 @@
+numpy
+opencv-python
+PySide6
+scikit-image
+ultralytics>=8.3.0
