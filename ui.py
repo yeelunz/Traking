@@ -19,6 +19,7 @@ from tracking.core.registry import (
     EVAL_REGISTRY,
     FEATURE_EXTRACTOR_REGISTRY,
     CLASSIFIER_REGISTRY,
+    SEGMENTATION_MODEL_REGISTRY,
 )
 # populate registries
 from tracking.preproc import clahe  # noqa: F401
@@ -27,6 +28,7 @@ from tracking.models import template_matching, optical_flow_lk, faster_rcnn, yol
 from tracking.eval import evaluator  # noqa: F401
 from tracking.classification import feature_extractors as _cls_feat  # noqa: F401
 from tracking.classification import classifiers as _cls_clf  # noqa: F401
+from tracking import segmentation as _seg_pkg  # noqa: F401
 
 
 # ---- Wheel-safe spin boxes -------------------------------------------------
@@ -323,6 +325,7 @@ class SimpleRunnerUI(QMainWindow):
         self._pre_bindings: List[Tuple[str, Any, Any]] = []
         self._model_bindings: List[Tuple[str, Any, Any]] = []
         self._syncing = False
+        self._applying_cfg = False
         self._raw_user_edit = False
         self._updating_raw_programmatically = False
         self._run_thread: Optional[QThread] = None
@@ -374,7 +377,7 @@ class SimpleRunnerUI(QMainWindow):
 
         # Split group
         gb_split = QGroupBox("資料切分"); fl_split = QFormLayout(gb_split)
-        self.split_method = NoWheelComboBox(); self.split_method.addItems(["video_level"]); self.split_method.currentIndexChanged.connect(self._on_builder_changed)
+        self.split_method = NoWheelComboBox(); self.split_method.addItems(["video_level", "subject_level"]); self.split_method.currentIndexChanged.connect(self._on_builder_changed)
         self.split_r_train = NoWheelDoubleSpinBox(); self._setup_ratio_spin(self.split_r_train, 0.8)
         self.split_r_test = NoWheelDoubleSpinBox(); self._setup_ratio_spin(self.split_r_test, 0.2)
         self.kfold = NoWheelSpinBox(); self.kfold.setRange(1,20); self.kfold.setValue(1); self.kfold.valueChanged.connect(self._on_builder_changed)
@@ -418,15 +421,112 @@ class SimpleRunnerUI(QMainWindow):
         self.model_form_layout = QFormLayout(); gb_model_params = QGroupBox("Model 參數（即時）"); gb_model_params.setLayout(self.model_form_layout); vb_model.addWidget(gb_model_params)
         left_layout.addWidget(gb_model)
 
+        # Segmentation stage
+        gb_seg = QGroupBox("Segmentation")
+        vb_seg = QVBoxLayout(gb_seg)
+        self.chk_seg_train = QCheckBox("訓練分割模型")
+        self.chk_seg_train.setChecked(True)
+        self.chk_seg_train.stateChanged.connect(self._on_seg_train_toggled)
+        vb_seg.addWidget(self.chk_seg_train)
+        seg_form = QFormLayout()
+        self.combo_seg_model = NoWheelComboBox()
+        for key in sorted(SEGMENTATION_MODEL_REGISTRY.keys()):
+            label = "UNet++" if key.lower() == "unetpp" else key.upper()
+            self.combo_seg_model.addItem(label, key)
+        auto_mask_label = "Auto Mask (弱分割)"
+        def _item_data_key(row: int) -> str:
+            data = self.combo_seg_model.itemData(row)
+            if data is None:
+                return ""
+            return str(data)
+
+        if all(_item_data_key(i).lower() != "auto_mask" for i in range(self.combo_seg_model.count())):
+            self.combo_seg_model.insertItem(0, auto_mask_label, "auto_mask")
+        default_idx = self.combo_seg_model.findData('unetpp')
+        if default_idx < 0:
+            default_idx = self.combo_seg_model.findText('UNet++')
+        if default_idx >= 0:
+            self.combo_seg_model.setCurrentIndex(default_idx)
+        self.combo_seg_model.currentIndexChanged.connect(self._on_seg_method_changed)
+        seg_form.addRow("Method", self.combo_seg_model)
+
+        self.combo_seg_checkpoint = ModelWeightsComboBox(self._get_segmentation_weights, parent=self)
+        self.combo_seg_checkpoint.refresh_items()
+        self.combo_seg_checkpoint.currentIndexChanged.connect(self._on_builder_changed)
+        self.combo_seg_checkpoint.editTextChanged.connect(self._on_builder_changed)
+        try:
+            le_ckpt = self.combo_seg_checkpoint.lineEdit()
+            if le_ckpt is not None:
+                le_ckpt.setPlaceholderText("留空 = 使用本地訓練產出的權重")
+        except Exception:
+            pass
+        seg_form.addRow("推論 checkpoint", self.combo_seg_checkpoint)
+
+        self.edit_seg_encoder = QLineEdit("resnet34"); self.edit_seg_encoder.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow("Encoder", self.edit_seg_encoder)
+        self.edit_seg_weights = QLineEdit("imagenet"); self.edit_seg_weights.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow("Encoder Weights", self.edit_seg_weights)
+
+        self.seg_padding_min = NoWheelDoubleSpinBox(); self.seg_padding_min.setRange(0.0, 0.5); self.seg_padding_min.setDecimals(3); self.seg_padding_min.setValue(0.10); self.seg_padding_min.valueChanged.connect(self._on_builder_changed)
+        self.seg_padding_max = NoWheelDoubleSpinBox(); self.seg_padding_max.setRange(0.0, 0.5); self.seg_padding_max.setDecimals(3); self.seg_padding_max.setValue(0.15); self.seg_padding_max.valueChanged.connect(self._on_builder_changed)
+        self.seg_padding_inf = NoWheelDoubleSpinBox(); self.seg_padding_inf.setRange(0.0, 0.5); self.seg_padding_inf.setDecimals(3); self.seg_padding_inf.setValue(0.15); self.seg_padding_inf.valueChanged.connect(self._on_builder_changed)
+        self.seg_jitter = NoWheelDoubleSpinBox(); self.seg_jitter.setRange(0.0, 0.5); self.seg_jitter.setDecimals(3); self.seg_jitter.setValue(0.05); self.seg_jitter.valueChanged.connect(self._on_builder_changed)
+        seg_form.addRow("Train padding min", self.seg_padding_min)
+        seg_form.addRow("Train padding max", self.seg_padding_max)
+        seg_form.addRow("Inference padding", self.seg_padding_inf)
+        seg_form.addRow("Random jitter", self.seg_jitter)
+
+        self.seg_epochs = NoWheelSpinBox(); self.seg_epochs.setRange(1, 2000); self.seg_epochs.setValue(20); self.seg_epochs.valueChanged.connect(self._on_builder_changed)
+        self.seg_batch = NoWheelSpinBox(); self.seg_batch.setRange(1, 2048); self.seg_batch.setValue(8); self.seg_batch.valueChanged.connect(self._on_builder_changed)
+        self.seg_num_workers = NoWheelSpinBox(); self.seg_num_workers.setRange(0, 64); self.seg_num_workers.setValue(0); self.seg_num_workers.valueChanged.connect(self._on_builder_changed)
+        seg_form.addRow("Epochs", self.seg_epochs)
+        seg_form.addRow("Batch size", self.seg_batch)
+        seg_form.addRow("Workers", self.seg_num_workers)
+
+        self.seg_lr = QLineEdit("0.001"); self.seg_lr.editingFinished.connect(self._on_builder_changed)
+        self.seg_weight_decay = QLineEdit("1e-5"); self.seg_weight_decay.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow("Learning rate", self.seg_lr)
+        seg_form.addRow("Weight decay", self.seg_weight_decay)
+
+        self.seg_threshold = NoWheelDoubleSpinBox(); self.seg_threshold.setRange(0.0, 1.0); self.seg_threshold.setDecimals(3); self.seg_threshold.setValue(0.5); self.seg_threshold.valueChanged.connect(self._on_builder_changed)
+        self.seg_val_ratio = NoWheelDoubleSpinBox(); self.seg_val_ratio.setRange(0.0, 0.9); self.seg_val_ratio.setDecimals(3); self.seg_val_ratio.setValue(0.0); self.seg_val_ratio.valueChanged.connect(self._on_builder_changed)
+        self.seg_seed = NoWheelSpinBox(); self.seg_seed.setRange(0, 999999); self.seg_seed.setValue(0); self.seg_seed.valueChanged.connect(self._on_builder_changed)
+        self.seg_redundancy = NoWheelSpinBox(); self.seg_redundancy.setRange(1, 32); self.seg_redundancy.setValue(1); self.seg_redundancy.valueChanged.connect(self._on_builder_changed)
+        self.seg_dice_weight = NoWheelDoubleSpinBox(); self.seg_dice_weight.setRange(0.0, 10.0); self.seg_dice_weight.setDecimals(3); self.seg_dice_weight.setValue(1.0); self.seg_dice_weight.valueChanged.connect(self._on_builder_changed)
+        self.seg_bce_weight = NoWheelDoubleSpinBox(); self.seg_bce_weight.setRange(0.0, 10.0); self.seg_bce_weight.setDecimals(3); self.seg_bce_weight.setValue(1.0); self.seg_bce_weight.valueChanged.connect(self._on_builder_changed)
+        self.edit_seg_device = QLineEdit("auto"); self.edit_seg_device.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow("Mask threshold", self.seg_threshold)
+        seg_form.addRow("Validation ratio", self.seg_val_ratio)
+        seg_form.addRow("Seed", self.seg_seed)
+        seg_form.addRow("Redundancy", self.seg_redundancy)
+        seg_form.addRow("Dice weight", self.seg_dice_weight)
+        seg_form.addRow("BCE weight", self.seg_bce_weight)
+        seg_form.addRow("Device", self.edit_seg_device)
+
+        vb_seg.addLayout(seg_form)
+        self._seg_train_widgets = [
+            self.seg_padding_min,
+            self.seg_padding_max,
+            self.seg_epochs,
+            self.seg_batch,
+            self.seg_num_workers,
+            self.seg_lr,
+            self.seg_weight_decay,
+            self.seg_val_ratio,
+            self.seg_seed,
+            self.seg_redundancy,
+            self.seg_dice_weight,
+            self.seg_bce_weight,
+            self.seg_jitter,
+        ]
+        self._update_segmentation_train_state()
+        left_layout.addWidget(gb_seg)
+
         # Evaluation
         gb_eval = QGroupBox("Evaluation"); fl_eval = QFormLayout(gb_eval)
         self.combo_eval = NoWheelComboBox(); [self.combo_eval.addItem(n) for n in sorted(EVAL_REGISTRY.keys())]
         self.combo_eval.currentIndexChanged.connect(self._on_builder_changed)
-        self.chk_viz = QCheckBox("Visualize"); self.chk_viz.stateChanged.connect(self._on_builder_changed)
-        self.spn_viz_samples = NoWheelSpinBox(); self.spn_viz_samples.setRange(1,10000); self.spn_viz_samples.setValue(10); self.spn_viz_samples.valueChanged.connect(self._on_builder_changed)
         fl_eval.addRow("Evaluator", self.combo_eval)
-        h_viz = QHBoxLayout(); h_viz.addWidget(self.chk_viz); h_viz.addWidget(QLabel("samples")); h_viz.addWidget(self.spn_viz_samples); h_viz.addStretch(1)
-        box_viz = QWidget(); box_viz.setLayout(h_viz); fl_eval.addRow("Visualization", box_viz)
         left_layout.addWidget(gb_eval)
 
         # Classification (optional)
@@ -452,13 +552,6 @@ class SimpleRunnerUI(QMainWindow):
         label_row_layout.addWidget(self.edit_class_label, 1)
         label_row_layout.addWidget(btn_class_label)
         form_class_basic.addRow("Label 檔案", label_row_widget)
-
-        # Target level combo
-        self.combo_class_level = NoWheelComboBox()
-        self.combo_class_level.addItem("影片 (video)", "video")
-        self.combo_class_level.addItem("主體 (subject)", "subject")
-        self.combo_class_level.currentIndexChanged.connect(self._on_builder_changed)
-        form_class_basic.addRow("Target Level", self.combo_class_level)
 
         # Feature extractor selection
         self.combo_class_feature = NoWheelComboBox()
@@ -571,28 +664,44 @@ class SimpleRunnerUI(QMainWindow):
         except Exception:
             return os.path.join(os.getcwd(), "models")
 
-    def _get_model_weights(self) -> List[str]:
+    def _collect_weight_files(self, subdir: Optional[str] = None, fallback_to_root: bool = True) -> List[str]:
         root = self._models_root_dir()
         if not os.path.isdir(root):
             return []
+        search_dirs: List[str] = []
+        if subdir:
+            sub_path = os.path.join(root, subdir)
+            if os.path.isdir(sub_path):
+                search_dirs.append(sub_path)
+            elif fallback_to_root:
+                search_dirs.append(root)
+        else:
+            search_dirs.append(root)
         patterns = (".pt", ".pth", ".onnx", ".engine")
-        entries: List[str] = []
-        for cur_root, _, files in os.walk(root):
-            for fname in files:
-                if not fname.lower().endswith(patterns):
-                    continue
-                path = os.path.join(cur_root, fname)
-                rel = os.path.relpath(path, root).replace("\\", "/")
-                normalized = f"models/{rel}" if rel else "models"
-                entries.append(normalized)
-        # stable order
-        seen = set()
-        ordered: List[str] = []
-        for entry in sorted(entries, key=lambda x: x.lower()):
-            if entry not in seen:
-                ordered.append(entry)
-                seen.add(entry)
-        return ordered
+        collected: Dict[str, None] = {}
+        for base in search_dirs:
+            if not os.path.isdir(base):
+                continue
+            for cur_root, _, files in os.walk(base):
+                for fname in files:
+                    if not fname.lower().endswith(patterns):
+                        continue
+                    abs_path = os.path.join(cur_root, fname)
+                    rel = os.path.relpath(abs_path, root).replace("\\", "/")
+                    if rel.startswith(".."):
+                        continue
+                    normalized = f"models/{rel}" if rel else "models"
+                    collected.setdefault(normalized, None)
+        return sorted(collected.keys(), key=lambda x: x.lower())
+
+    def _get_model_weights(self) -> List[str]:
+        return self._collect_weight_files()
+
+    def _get_detection_weights(self) -> List[str]:
+        return self._collect_weight_files("detection")
+
+    def _get_segmentation_weights(self) -> List[str]:
+        return self._collect_weight_files("seg")
 
     def _set_experiment_name(self, name: str):
         if not hasattr(self, 'edit_exp_name'):
@@ -728,14 +837,18 @@ class SimpleRunnerUI(QMainWindow):
             ],
             'evaluation': {'evaluator': evaluator},
         }
-        if self.chk_viz.isChecked():
-            viz_cfg = cfg.setdefault('evaluation', {}).setdefault('visualize', {})
-            viz_cfg['enabled'] = True
-            viz_cfg['samples'] = int(self.spn_viz_samples.value())
+        viz_cfg = cfg.setdefault('evaluation', {}).setdefault('visualize', {})
+        viz_cfg.update({
+            'enabled': True,
+            'samples': 10,
+            'strategy': 'even_spread',
+            'include_detection': True,
+            'include_segmentation': True,
+            'ensure_first_last': True,
+        })
 
         # Classification configuration (always emitted for discoverability)
         class_enabled = bool(self.chk_class_enabled.isChecked())
-        target_level = str(self.combo_class_level.currentData() or self.combo_class_level.currentText() or 'video').lower()
         feature_name = self.combo_class_feature.currentText() if self.combo_class_feature.count() else ''
         classifier_name = self.combo_class_classifier.currentText() if self.combo_class_classifier.count() else ''
         feature_params = dict(self.class_feature_params.get(feature_name, {})) if feature_name else {}
@@ -744,7 +857,6 @@ class SimpleRunnerUI(QMainWindow):
         fallback_classifier = classifier_name or (self.combo_class_classifier.itemText(0) if self.combo_class_classifier.count() else 'random_forest')
         class_cfg: Dict[str, Any] = {
             'enabled': class_enabled,
-            'target_level': target_level,
             'feature_extractor': {
                 'name': fallback_feature,
                 'params': feature_params,
@@ -757,7 +869,65 @@ class SimpleRunnerUI(QMainWindow):
         label_path = self.edit_class_label.text().strip()
         if label_path:
             class_cfg['label_file'] = label_path
+
         cfg['classification'] = class_cfg
+
+        def _parse_float(value: str, default: float) -> float:
+            try:
+                return float(value.strip())
+            except Exception:
+                return default
+
+        seg_method_key_raw = self.combo_seg_model.currentData()
+        if seg_method_key_raw is None:
+            seg_method_key_raw = self.combo_seg_model.currentText() or 'unetpp'
+        seg_method_key = str(seg_method_key_raw).strip() or 'unetpp'
+        seg_method_key_lower = seg_method_key.lower()
+        seg_method_params: Dict[str, Any] = {}
+        if seg_method_key_lower != 'auto_mask':
+            seg_method_params = {
+                'encoder_name': self.edit_seg_encoder.text().strip() or 'resnet34',
+                'encoder_weights': self.edit_seg_weights.text().strip() or 'imagenet',
+            }
+        method_cfg = {
+            'name': seg_method_key,
+            'params': seg_method_params,
+        }
+        seg_cfg = {
+            'method': method_cfg,
+            'padding_min': float(self.seg_padding_min.value()),
+            'padding_max': float(self.seg_padding_max.value()),
+            'padding_inference': float(self.seg_padding_inf.value()),
+            'jitter': float(self.seg_jitter.value()),
+            'epochs': int(self.seg_epochs.value()),
+            'batch_size': int(self.seg_batch.value()),
+            'num_workers': int(self.seg_num_workers.value()),
+            'lr': _parse_float(self.seg_lr.text(), 1e-3),
+            'weight_decay': _parse_float(self.seg_weight_decay.text(), 1e-5),
+            'threshold': float(self.seg_threshold.value()),
+            'val_ratio': float(self.seg_val_ratio.value()),
+            'seed': int(self.seg_seed.value()),
+            'redundancy': int(self.seg_redundancy.value()),
+            'dice_weight': float(self.seg_dice_weight.value()),
+            'bce_weight': float(self.seg_bce_weight.value()),
+            'device': self.edit_seg_device.text().strip() or 'auto',
+        }
+        seg_cfg['model'] = {
+            'name': method_cfg['name'],
+            'params': dict(method_cfg['params']),
+        }
+        seg_cfg['train'] = bool(self.chk_seg_train.isChecked())
+        inference_value = ""
+        if hasattr(self, 'combo_seg_checkpoint') and hasattr(self.combo_seg_checkpoint, 'current_value'):
+            try:
+                inference_value = self.combo_seg_checkpoint.current_value().strip()
+            except Exception:
+                inference_value = ""
+        if inference_value:
+            seg_cfg['inference_checkpoint'] = inference_value
+        if not seg_cfg['train'] and not inference_value:
+            seg_cfg['auto_pretrained'] = True
+        cfg['segmentation'] = seg_cfg
 
         return cfg
 
@@ -848,10 +1018,27 @@ class SimpleRunnerUI(QMainWindow):
 
     # ---------------- Apply parsed cfg -> Builder -----------------
     def _apply_cfg_to_builder(self, cfg: Dict[str, Any]):
+        prev_applying = self._applying_cfg
+        self._applying_cfg = True
+        try:
+            self._apply_cfg_to_builder_inner(cfg)
+        finally:
+            self._applying_cfg = prev_applying
+
+    def _apply_cfg_to_builder_inner(self, cfg: Dict[str, Any]):
         ds = cfg.get('dataset', {}) or {}
         root = ds.get('root');
         if isinstance(root, str): self.edit_root.setText(root)
         split = ds.get('split', {}) or {}
+        method_text = str(split.get('method', self.split_method.currentText() or 'video_level')).strip() or 'video_level'
+        current_methods = [self.split_method.itemText(i) for i in range(self.split_method.count())]
+        if method_text not in current_methods:
+            self.split_method.addItem(method_text)
+        idx_method = self.split_method.findText(method_text)
+        if idx_method >= 0:
+            self.split_method.blockSignals(True)
+            self.split_method.setCurrentIndex(idx_method)
+            self.split_method.blockSignals(False)
         ratios = split.get('ratios', [self.split_r_train.value(), self.split_r_test.value()])
         if isinstance(ratios, (list, tuple)) and len(ratios) >= 2:
             try:
@@ -907,10 +1094,6 @@ class SimpleRunnerUI(QMainWindow):
         if isinstance(ev, str):
             idx = self.combo_eval.findText(ev)
             if idx >= 0: self.combo_eval.setCurrentIndex(idx)
-        viz = (cfg.get('evaluation') or {}).get('visualize') or {}
-        self.chk_viz.setChecked(bool(viz.get('enabled', self.chk_viz.isChecked())))
-        try: self.spn_viz_samples.setValue(int(viz.get('samples', self.spn_viz_samples.value())))
-        except Exception: pass
         # Classification
         class_cfg = cfg.get('classification') or {}
         if not isinstance(class_cfg, dict):
@@ -927,14 +1110,6 @@ class SimpleRunnerUI(QMainWindow):
         else:
             self.edit_class_label.clear()
         self.edit_class_label.blockSignals(False)
-
-        target_level = str(class_cfg.get('target_level', self.combo_class_level.currentData() or 'video')).lower()
-        idx_level = self.combo_class_level.findData(target_level)
-        if idx_level < 0:
-            idx_level = 0
-        self.combo_class_level.blockSignals(True)
-        self.combo_class_level.setCurrentIndex(idx_level)
-        self.combo_class_level.blockSignals(False)
 
         feature_cfg = class_cfg.get('feature_extractor') or {}
         feat_name = feature_cfg.get('name')
@@ -981,8 +1156,98 @@ class SimpleRunnerUI(QMainWindow):
                 self._on_class_classifier_changed(clf_name, from_builder=True)
             else:
                 self._on_class_classifier_changed(active_clf, from_builder=True)
+        seg_cfg = cfg.get('segmentation') or {}
+        method_cfg = seg_cfg.get('method') or seg_cfg.get('model') or {}
+        method_params = method_cfg.get('params') or {}
+        auto_pretrained = bool(seg_cfg.get('auto_pretrained'))
+
+        train_flag = seg_cfg.get('train', seg_cfg.get('enabled', True))
+        if hasattr(self, 'chk_seg_train'):
+            self.chk_seg_train.blockSignals(True)
+            self.chk_seg_train.setChecked(bool(train_flag))
+            self.chk_seg_train.blockSignals(False)
+            self._update_segmentation_train_state()
+        if auto_pretrained and not train_flag:
+            self.log('[Segmentation] 未選擇模型權重且停用訓練，執行時會自動載入官方預訓練權重。')
+
+        inference_path = seg_cfg.get('inference_checkpoint') or seg_cfg.get('checkpoint') or ""
+        if hasattr(self, 'combo_seg_checkpoint'):
+            self.combo_seg_checkpoint.blockSignals(True)
+            self.combo_seg_checkpoint.set_current_value(inference_path)
+            self.combo_seg_checkpoint.blockSignals(False)
+
+        if self.combo_seg_model.count():
+            key = method_cfg.get('name')
+            idx_model = -1
+            if key is not None:
+                idx_model = self.combo_seg_model.findData(key)
+                if idx_model < 0:
+                    idx_model = self.combo_seg_model.findText(str(key))
+            if idx_model < 0:
+                idx_model = 0
+            self.combo_seg_model.blockSignals(True)
+            if 0 <= idx_model < self.combo_seg_model.count():
+                self.combo_seg_model.setCurrentIndex(idx_model)
+            self.combo_seg_model.blockSignals(False)
+            self._on_seg_method_changed(idx_model)
+
+        def _set_line(widget: QLineEdit, value: Any, fallback: str):
+            widget.blockSignals(True)
+            text = str(value).strip() if isinstance(value, str) and value.strip() else (str(value) if value not in (None, "") else fallback)
+            widget.setText(text)
+            widget.blockSignals(False)
+
+        _set_line(self.edit_seg_encoder, method_params.get('encoder_name'), self.edit_seg_encoder.text())
+        _set_line(self.edit_seg_weights, method_params.get('encoder_weights'), self.edit_seg_weights.text())
+
+        def _set_dspin(widget: NoWheelDoubleSpinBox, key: str, source: Dict[str, Any] = seg_cfg):
+            widget.blockSignals(True)
+            current = widget.value()
+            try:
+                new_val = float(source.get(key, current))
+                widget.setValue(new_val)
+            except Exception:
+                widget.setValue(current)
+            widget.blockSignals(False)
+
+        def _set_spin(widget: NoWheelSpinBox, key: str, source: Dict[str, Any] = seg_cfg):
+            widget.blockSignals(True)
+            current = widget.value()
+            try:
+                new_val = int(source.get(key, current))
+                widget.setValue(new_val)
+            except Exception:
+                widget.setValue(current)
+            widget.blockSignals(False)
+
+        _set_dspin(self.seg_padding_min, 'padding_min')
+        _set_dspin(self.seg_padding_max, 'padding_max')
+        _set_dspin(self.seg_padding_inf, 'padding_inference')
+        _set_dspin(self.seg_jitter, 'jitter')
+        _set_spin(self.seg_epochs, 'epochs')
+        _set_spin(self.seg_batch, 'batch_size')
+        _set_spin(self.seg_num_workers, 'num_workers')
+        _set_dspin(self.seg_threshold, 'threshold')
+        _set_dspin(self.seg_val_ratio, 'val_ratio')
+        _set_spin(self.seg_seed, 'seed')
+        _set_spin(self.seg_redundancy, 'redundancy')
+        _set_dspin(self.seg_dice_weight, 'dice_weight')
+        _set_dspin(self.seg_bce_weight, 'bce_weight')
+
+        def _set_line_float(widget: QLineEdit, key: str, default: str):
+            widget.blockSignals(True)
+            value = seg_cfg.get(key)
+            if value is None:
+                value = default
+            widget.setText(str(value))
+            widget.blockSignals(False)
+
+        _set_line_float(self.seg_lr, 'lr', self.seg_lr.text())
+        _set_line_float(self.seg_weight_decay, 'weight_decay', self.seg_weight_decay.text())
+        _set_line(self.edit_seg_device, seg_cfg.get('device'), self.edit_seg_device.text())
 
         self._update_classification_enabled_state()
+        self._update_segmentation_train_state()
         # Refresh forms (preproc current selection)
         self._on_pre_selected_changed(self.list_pre_sel.currentRow())
 
@@ -1089,7 +1354,7 @@ class SimpleRunnerUI(QMainWindow):
             defaults = {}
             if isinstance(self._active_model_defaults, dict):
                 defaults = dict(self._active_model_defaults.get('low_confidence_reinit', {}))
-            widget = LowConfidenceReinitEditor(defaults, weights_provider=self._get_model_weights, parent=self)
+            widget = LowConfidenceReinitEditor(defaults, weights_provider=self._get_detection_weights, parent=self)
 
             def _get():
                 return widget.get_value()
@@ -1100,7 +1365,7 @@ class SimpleRunnerUI(QMainWindow):
             register(widget, 'valueChanged')
             return widget, _get, _set
         if scope == 'model' and key in ('weights', 'init_detector_weights'):
-            combo_weights = ModelWeightsComboBox(self._get_model_weights, parent=self)
+            combo_weights = ModelWeightsComboBox(self._get_detection_weights, parent=self)
             combo_weights.refresh_items()
             combo_weights.currentIndexChanged.connect(lambda *_: self._on_param_widget_changed(scope))
             combo_weights.editTextChanged.connect(lambda *_: self._on_param_widget_changed(scope))
@@ -1178,6 +1443,10 @@ class SimpleRunnerUI(QMainWindow):
 
     def _on_classification_toggled(self):
         self._update_classification_enabled_state()
+        self._on_builder_changed()
+
+    def _on_segmentation_toggled(self):
+        self._update_segmentation_enabled_state()
         self._on_builder_changed()
 
     def _browse_class_label_file(self):
@@ -1288,15 +1557,84 @@ class SimpleRunnerUI(QMainWindow):
         widgets = [
             getattr(self, 'edit_class_label', None),
             getattr(self, 'btn_class_label', None),
-            getattr(self, 'combo_class_level', None),
             getattr(self, 'combo_class_feature', None),
             getattr(self, 'combo_class_classifier', None),
             getattr(self, 'gb_class_feat', None),
             getattr(self, 'gb_class_clf', None),
+            getattr(self, 'chk_seg_enabled', None),
         ]
         for widget in widgets:
             if widget is not None:
                 widget.setEnabled(enabled)
+        self._update_segmentation_enabled_state()
+        self._update_segmentation_train_state()
+
+    def _get_current_seg_method_key(self) -> str:
+        if not hasattr(self, 'combo_seg_model') or self.combo_seg_model is None:
+            return ""
+        idx = self.combo_seg_model.currentIndex()
+        if idx < 0:
+            return ""
+        data = self.combo_seg_model.itemData(idx)
+        if isinstance(data, str) and data.strip():
+            return data.strip().lower()
+        text = self.combo_seg_model.itemText(idx)
+        return text.strip().lower()
+
+    def _on_seg_method_changed(self, idx: int):
+        _ = idx  # unused
+        auto_selected = self._get_current_seg_method_key() == "auto_mask"
+        if hasattr(self, 'chk_seg_train') and self.chk_seg_train is not None:
+            self.chk_seg_train.blockSignals(True)
+            if auto_selected:
+                self.chk_seg_train.setChecked(False)
+            self.chk_seg_train.setEnabled(not auto_selected)
+            self.chk_seg_train.blockSignals(False)
+        self._update_segmentation_train_state()
+        if not getattr(self, '_syncing', False) and not getattr(self, '_applying_cfg', False):
+            self._on_builder_changed()
+
+    def _update_segmentation_enabled_state(self):
+        enabled = bool(self.chk_class_enabled.isChecked())
+        if not enabled:
+            if hasattr(self, 'chk_seg_enabled'):
+                self.chk_seg_enabled.setEnabled(False)
+        else:
+            if hasattr(self, 'chk_seg_enabled'):
+                self.chk_seg_enabled.setEnabled(True)
+        seg_controls = getattr(self, 'gb_class_seg', None)
+        seg_active = enabled and getattr(self, 'chk_seg_enabled', None) is not None and self.chk_seg_enabled.isChecked()
+        if seg_controls is not None:
+            seg_controls.setEnabled(seg_active)
+
+    def _update_segmentation_train_state(self):
+        auto_selected = self._get_current_seg_method_key() == "auto_mask"
+        train_enabled = True
+        if hasattr(self, 'chk_seg_train'):
+            train_enabled = bool(self.chk_seg_train.isChecked())
+            if auto_selected:
+                if self.chk_seg_train.isChecked():
+                    self.chk_seg_train.blockSignals(True)
+                    self.chk_seg_train.setChecked(False)
+                    self.chk_seg_train.blockSignals(False)
+                self.chk_seg_train.setEnabled(False)
+            else:
+                self.chk_seg_train.setEnabled(True)
+        if auto_selected:
+            train_enabled = False
+        if hasattr(self, 'edit_seg_encoder'):
+            self.edit_seg_encoder.setEnabled(not auto_selected)
+        if hasattr(self, 'edit_seg_weights'):
+            self.edit_seg_weights.setEnabled(not auto_selected)
+        for widget in getattr(self, '_seg_train_widgets', []):
+            if widget is not None:
+                widget.setEnabled(train_enabled)
+        if hasattr(self, 'combo_seg_checkpoint'):
+            self.combo_seg_checkpoint.setEnabled(not train_enabled)
+
+    def _on_seg_train_toggled(self, *_args):
+        self._update_segmentation_train_state()
+        self._on_builder_changed()
 
     def _on_param_widget_changed(self, scope: str):
         if scope == 'preproc':

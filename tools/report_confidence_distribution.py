@@ -95,7 +95,7 @@ def analyse_schedule(schedule_dir: Path) -> Dict[str, Dict[str, Dict[str, float]
     for experiment_dir in sorted(schedule_dir.iterdir()):
         if not experiment_dir.is_dir():
             continue
-        prediction_dir = experiment_dir / "test" / "predictions"
+        prediction_dir = experiment_dir / "test" / "detection" / "predictions"
         if not prediction_dir.is_dir():
             continue
         for json_file in sorted(prediction_dir.glob("*.json")):

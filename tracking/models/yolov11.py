@@ -35,6 +35,7 @@ class YOLOv11Model(TrackingModel):
         "classes": None,        # e.g., [0] for person; None for all
         "max_det": 100,
         "fallback_last_prediction": True,
+        "train_enabled": True,
         # Training
         "epochs": 5,
         "batch": 8,
@@ -68,6 +69,7 @@ class YOLOv11Model(TrackingModel):
         self.lr0 = float(config.get("lr0", self.DEFAULT_CONFIG["lr0"]))
         self.patience = int(config.get("patience", self.DEFAULT_CONFIG["patience"]))
         self.workers = int(config.get("workers", self.DEFAULT_CONFIG["workers"]))
+        self.train_enabled = bool(config.get("train_enabled", self.DEFAULT_CONFIG["train_enabled"]))
 
         # --- Runtime-injected preproc chain ---
         self.preprocs: List[PreprocessingModule] = []
@@ -125,6 +127,8 @@ class YOLOv11Model(TrackingModel):
         - Applies preproc chain to saved training images (to match inference distribution).
         - If val_dataset is None, uses train split for validation as a fallback.
         """
+        if not getattr(self, "train_enabled", True):
+            return {"status": "skipped", "reason": "train_disabled"}
         if YOLO is None:
             detail = f" underlying import error: {_ULTRA_IMPORT_ERROR!r}" if _ULTRA_IMPORT_ERROR else ""
             raise RuntimeError(f"Ultralytics not available.{detail}")
@@ -345,6 +349,9 @@ class YOLOv11Model(TrackingModel):
             "val_images": n_val,
             "best_ckpt": best_ckpt,
         }
+
+    def should_train(self, *_args, **_kwargs) -> bool:
+        return bool(getattr(self, "train_enabled", True))
 
     def load_checkpoint(self, ckpt_path: str):
         if YOLO is None:

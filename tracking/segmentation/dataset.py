@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+import json
+import os
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import cv2
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+from ..core.interfaces import FramePrediction, MaskStats, SegmentationData
+from ..utils.annotations import load_coco_vid
+from .utils import BoundingBox, compute_mask_stats, crop_with_bbox, expand_bbox
+
+
+@dataclass
+class SegmentationSampleDescriptor:
+    video_path: str
+    frame_index: int
+    roi_bbox: BoundingBox
+    mask_path: Optional[str]
+    original_bbox: Tuple[float, float, float, float]
+
+
+class SegmentationCropDataset(Dataset):
+    """Generate ROI crops for segmentation training using ground-truth masks."""
+
+    def __init__(
+        self,
+        video_paths: Sequence[str],
+        dataset_root: str,
+        padding_range: Tuple[float, float] = (0.10, 0.15),
+        redundancy: int = 1,
+        seed: int = 0,
+        cache_annotations: Optional[Dict[str, Dict]] = None,
+        jitter: float = 0.0,
+        target_size: Optional[Tuple[int, int]] = None,
+    ) -> None:
+        super().__init__()
+        self.dataset_root = dataset_root
+        self.padding_min = float(min(padding_range))
+        self.padding_max = float(max(padding_range))
+        self.rng = random.Random(seed)
+        self._jitter_rng = random.Random(seed + 1337)
+        self.jitter = max(0.0, float(jitter))
+        if target_size is not None:
+            self.target_size = self._normalize_target_size(target_size)
+        else:
+            self.target_size = None
+        self.entries: List[SegmentationSampleDescriptor] = []
+        self._annotations_cache: Dict[str, Dict] = dict(cache_annotations or {})
+        self.missing_annotations: List[str] = []
+
+        for video_path in video_paths:
+            ann = self._get_annotation(video_path)
+            if not ann:
+                self.missing_annotations.append(video_path)
+                continue
+            frame_ann = ann.get("frame_annotations", {})
+            width = ann.get("raw", {}).get("videos", [{}])[0].get("width")
+            height = ann.get("raw", {}).get("videos", [{}])[0].get("height")
+            if not width or not height:
+                width = ann.get("raw", {}).get("images", [{}])[0].get("width", 0)
+                height = ann.get("raw", {}).get("images", [{}])[0].get("height", 0)
+            image_shape = (int(height), int(width)) if width and height else None
+            for frame_idx, items in frame_ann.items():
+                if not items:
+                    continue
+                item = items[0]
+                bbox = tuple(item.get("bbox", (0.0, 0.0, 0.0, 0.0)))
+                mask_path = item.get("mask_path")
+                for _ in range(max(1, redundancy)):
+                    pad = self._sample_padding()
+                    roi_bbox = self._compute_roi(bbox, pad, video_path, frame_idx, image_shape)
+                    self.entries.append(
+                        SegmentationSampleDescriptor(
+                            video_path=video_path,
+                            frame_index=int(frame_idx),
+                            roi_bbox=roi_bbox,
+                            mask_path=mask_path,
+                            original_bbox=bbox,
+                        )
+                    )
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __getitem__(self, idx: int):
+        entry = self.entries[idx]
+        frame = self._load_frame(entry.video_path, entry.frame_index)
+        if frame is None:
+            raise RuntimeError(f"Failed to read frame {entry.frame_index} from {entry.video_path}")
+        mask_full = self._load_mask(entry.video_path, entry.mask_path)
+        if mask_full is None:
+            raise RuntimeError(f"Mask not found for frame {entry.frame_index} in {entry.video_path}")
+        roi_bbox = entry.roi_bbox
+        if self.jitter > 0.0:
+            roi_bbox = self._jitter_bbox(roi_bbox, frame.shape[:2])
+        roi_image = crop_with_bbox(frame, roi_bbox)
+        roi_mask = crop_with_bbox(mask_full, roi_bbox)
+        orig_size = roi_image.shape[:2]
+        if self.target_size is not None:
+            roi_image = self._resize_image(roi_image, self.target_size)
+            roi_mask = self._resize_mask(roi_mask, self.target_size)
+        if roi_image.ndim == 2:
+            roi_image = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+        roi_image = roi_image.astype(np.float32) / 255.0
+        roi_mask = (roi_mask > 0).astype(np.float32)
+        image_tensor = torch.from_numpy(roi_image.transpose(2, 0, 1))
+        mask_tensor = torch.from_numpy(roi_mask).unsqueeze(0)
+        return {
+            "image": image_tensor,
+            "mask": mask_tensor,
+            "frame_index": entry.frame_index,
+            "video_path": entry.video_path,
+            "roi_bbox": roi_bbox.as_tuple(),
+            "original_roi_size": orig_size,
+            "original_bbox": entry.original_bbox,
+        }
+
+    # ---------------- internal helpers ----------------
+    def _sample_padding(self) -> float:
+        return self.rng.uniform(self.padding_min, self.padding_max)
+
+    def _compute_roi(
+        self,
+        bbox: Tuple[float, float, float, float],
+        pad: float,
+        video_path: str,
+        frame_idx: int,
+        image_shape: Optional[Tuple[int, int]] = None,
+    ) -> BoundingBox:
+        if image_shape is None:
+            frame = self._load_frame(video_path, frame_idx)
+            if frame is None:
+                raise RuntimeError(f"Unable to load frame for ROI computation: {video_path}#{frame_idx}")
+            image_shape = frame.shape[:2]
+        return expand_bbox(bbox, pad, image_shape)
+
+    def _jitter_bbox(self, bbox: BoundingBox, image_shape: Tuple[int, int]) -> BoundingBox:
+        img_h, img_w = image_shape
+        if bbox.w <= 0 or bbox.h <= 0:
+            return bbox
+        max_dx = bbox.w * self.jitter
+        max_dy = bbox.h * self.jitter
+        dx = self._jitter_rng.uniform(-max_dx, max_dx)
+        dy = self._jitter_rng.uniform(-max_dy, max_dy)
+        new_x = bbox.x + dx
+        new_y = bbox.y + dy
+        max_x = max(0.0, img_w - bbox.w)
+        max_y = max(0.0, img_h - bbox.h)
+        new_x = float(min(max(0.0, new_x), max_x))
+        new_y = float(min(max(0.0, new_y), max_y))
+        return BoundingBox(new_x, new_y, bbox.w, bbox.h)
+
+    def _get_annotation(self, video_path: str) -> Dict:
+        if video_path in self._annotations_cache:
+            return self._annotations_cache[video_path]
+
+        candidates: List[Path] = []
+        vp = Path(video_path)
+        if vp.suffix:
+            candidates.append(vp.with_suffix(".json"))
+        candidates.append(Path(f"{video_path}.json"))
+
+        if self.dataset_root:
+            try:
+                rel = Path(video_path)
+                if rel.is_absolute():
+                    rel = rel.relative_to(Path(self.dataset_root))
+                rel_base = rel.with_suffix(".json")
+                candidates.append(Path(self.dataset_root) / rel_base)
+            except Exception:
+                pass
+
+        seen: List[str] = []
+        for cand in candidates:
+            cand_str = str(cand)
+            if cand_str in seen:
+                continue
+            seen.append(cand_str)
+            if cand.exists():
+                data = load_coco_vid(cand_str)
+                self._annotations_cache[video_path] = data
+                return data
+        return {}
+
+    def _load_frame(self, video_path: str, frame_index: int) -> Optional[np.ndarray]:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+        ok, frame = cap.read()
+        cap.release()
+        if not ok:
+            return None
+        return frame
+
+    def _load_mask(self, video_path: str, mask_path: Optional[str]) -> Optional[np.ndarray]:
+        if not mask_path:
+            return None
+        mask_file = mask_path.replace("/", os.sep)
+        if os.path.isabs(mask_file):
+            abs_path = mask_file
+        else:
+            abs_path = os.path.join(self.dataset_root, mask_file)
+        mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        return mask
+
+    # ---------------- resize helpers -----------------
+    @staticmethod
+    def _normalize_target_size(target: Tuple[int, int]) -> Tuple[int, int]:
+        if isinstance(target, (list, tuple)):
+            vals = [int(v) for v in target if int(v) > 0]
+            if len(vals) == 1:
+                s = max(1, vals[0])
+                return (s, s)
+            if len(vals) >= 2:
+                h, w = vals[0], vals[1]
+                return (max(1, h), max(1, w))
+        if isinstance(target, (int, float)):
+            s = int(target)
+            if s > 0:
+                return (s, s)
+        raise ValueError(f"Invalid target size: {target}")
+
+    @staticmethod
+    def _resize_image(image: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+        target_h, target_w = target_hw
+        resized = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        return resized
+
+    @staticmethod
+    def _resize_mask(mask: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+        target_h, target_w = target_hw
+        resized = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        return resized
+
+
+def attach_ground_truth_segmentation(annotation: Dict, dataset_root: str) -> List[FramePrediction]:
+    frames = []
+    raw_frames = annotation.get("frames", {})
+    frame_ann = annotation.get("frame_annotations", {})
+    for frame_idx, bbox_list in raw_frames.items():
+        idx = int(frame_idx)
+        ann_items = frame_ann.get(frame_idx) or frame_ann.get(str(frame_idx)) or []
+        bbox = bbox_list[0] if bbox_list else (0.0, 0.0, 0.0, 0.0)
+        mask_path = None
+        stats: Optional[MaskStats] = None
+        if ann_items:
+            ann_entry = ann_items[0]
+            mask_path = ann_entry.get("mask_path")
+            metadata = ann_entry.get("metadata") or {}
+            centroid = metadata.get("centroid", [0.0, 0.0])
+            stats = MaskStats(
+                area_px=float(metadata.get("area", metadata.get("area_px", 0.0) or ann_entry.get("area", 0.0))),
+                bbox=tuple(bbox),
+                centroid=(float(centroid[0]), float(centroid[1])),
+                perimeter_px=float(metadata.get("perimeter_px", 0.0)),
+                equivalent_diameter_px=float(metadata.get("equivalent_diameter_px", 0.0)),
+            )
+        pred = FramePrediction(
+            frame_index=idx,
+            bbox=tuple(map(float, bbox)),
+            score=None,
+            segmentation=SegmentationData(
+                mask_path=mask_path,
+                stats=stats or MaskStats(0.0, (0.0, 0.0, 0.0, 0.0), (0.0, 0.0), 0.0, 0.0),
+            ),
+        )
+        frames.append(pred)
+    frames.sort(key=lambda s: s.frame_index)
+    return frames

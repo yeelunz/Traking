@@ -93,10 +93,11 @@ def _attach_metrics(records: Dict[int, FrameRecord], metrics_file: Path) -> List
     return [record for record in records.values() if not math.isnan(record.iou) and not math.isnan(record.center_error)]
 
 
-def _collect_experiment_records(experiment_dir: Path) -> List[FrameRecord]:
-    predictions_root = experiment_dir / "test" / "predictions_by_video"
-    metrics_root = experiment_dir / "test" / "metrics"
-    aggregated_file = experiment_dir / "test" / "predictions" / "MixFormerV2.json"
+def _collect_experiment_records(experiment_dir: Path, model_name: str) -> List[FrameRecord]:
+    detection_root = experiment_dir / "test" / "detection"
+    predictions_root = detection_root / "predictions_by_video"
+    metrics_root = detection_root / "metrics"
+    aggregated_file = detection_root / "predictions" / f"{model_name}.json"
     if not predictions_root.is_dir() or not metrics_root.is_dir():
         return []
 
@@ -110,7 +111,7 @@ def _collect_experiment_records(experiment_dir: Path) -> List[FrameRecord]:
     for video_dir in sorted(predictions_root.iterdir()):
         if not video_dir.is_dir():
             continue
-        pred_file = video_dir / "MixFormerV2.json"
+        pred_file = video_dir / f"{model_name}.json"
         if not pred_file.is_file():
             continue
 
@@ -157,7 +158,7 @@ def _collect_experiment_records(experiment_dir: Path) -> List[FrameRecord]:
                 components=comp_dict,
             )
 
-        metrics_file = metrics_root / video_dir.name / "MixFormerV2_per_frame.csv"
+        metrics_file = metrics_root / video_dir.name / f"{model_name}_per_frame.csv"
         if not metrics_file.is_file():
             continue
         collected.extend(_attach_metrics(records, metrics_file))
@@ -280,7 +281,7 @@ def summarise_records(name: str, records: List[FrameRecord], thresholds: List[fl
         print(f"  {key:12s}: Corr(v, IoU)={corr_iou:.4f}  Corr(v, -CLE)={corr_cle:.4f}")
 
 
-def analyse_schedule(schedule_dir: Path, *, thresholds: List[float]) -> None:
+def analyse_schedule(schedule_dir: Path, *, thresholds: List[float], model_name: str) -> None:
     schedule_dir = schedule_dir.resolve()
     if not schedule_dir.is_dir():
         raise FileNotFoundError(f"Schedule directory not found: {schedule_dir}")
@@ -289,7 +290,7 @@ def analyse_schedule(schedule_dir: Path, *, thresholds: List[float]) -> None:
     for experiment_dir in sorted(schedule_dir.iterdir()):
         if not experiment_dir.is_dir():
             continue
-        experiment_records = _collect_experiment_records(experiment_dir)
+        experiment_records = _collect_experiment_records(experiment_dir, model_name)
         summarise_records(experiment_dir.name, experiment_records, thresholds)
         overall_records.extend(experiment_records)
 
@@ -306,9 +307,15 @@ def main() -> None:
         default=[0.60, 0.65, 0.70],
         help="Confidence thresholds for low-confidence analysis",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="MixFormerV2",
+        help="Model name whose predictions should be analysed",
+    )
     args = parser.parse_args()
 
-    analyse_schedule(args.schedule, thresholds=args.thresholds)
+    analyse_schedule(args.schedule, thresholds=args.thresholds, model_name=args.model)
 
 
 if __name__ == "__main__":

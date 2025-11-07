@@ -9,6 +9,7 @@ scikit-image
 torch
 torchvision
 timm>=0.9.12
+segmentation-models-pytorch>=0.3.3
 
 # YOLOv11 (Ultralytics)
 ultralytics>=8.3.0

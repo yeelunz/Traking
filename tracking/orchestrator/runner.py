@@ -2,7 +2,8 @@ from __future__ import annotations
 import os
 import json
 import time
-from typing import Dict, Any, List, Callable, Optional
+from typing import Dict, Any, List, Callable, Optional, Sequence
+import random
 try:
     from tqdm import tqdm  # type: ignore
 except Exception:  # pragma: no cover
@@ -14,6 +15,7 @@ from ..core.interfaces import FramePrediction
 from ..data.dataset_manager import COCOJsonDatasetManager, SimpleDataset
 # classification modules
 from ..classification.engine import run_subject_classification
+from ..segmentation import SegmentationWorkflow
 # import built-in plugins to populate registries
 from ..preproc import clahe  # noqa: F401
 from ..models import template_matching  # noqa: F401
@@ -31,6 +33,19 @@ from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
 import traceback as _tb
+
+
+def _load_annotations_for_videos(video_paths: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    annotations: Dict[str, Dict[str, Any]] = {}
+    for video_path in video_paths:
+        json_path = os.path.splitext(video_path)[0] + ".json"
+        if not os.path.exists(json_path):
+            continue
+        try:
+            annotations[video_path] = load_coco_vid(json_path)
+        except Exception:
+            continue
+    return annotations
 
 
 class PipelineRunner:
@@ -83,6 +98,26 @@ class PipelineRunner:
         # Only need reproducible dataset splits, not full deterministic ops (which can break CuBLAS).
         set_seed(self.seed, deterministic=False)
         dm = COCOJsonDatasetManager(self.dataset_root)
+        total_videos = len(dm.videos)
+        annotated_videos = len(dm.ann_by_video)
+        missing_ann = list(getattr(dm, "missing_annotations", []) or [])
+        self._log(
+            f"[Dataset] Videos discovered: {total_videos} | annotated: {annotated_videos} | missing_annotations: {len(missing_ann)}"
+        )
+        if missing_ann:
+            preview_items = []
+            base_root = self.dataset_root if isinstance(self.dataset_root, str) and self.dataset_root else None
+            for path in missing_ann[:5]:
+                try:
+                    rel = os.path.relpath(path, base_root) if base_root else path
+                except Exception:
+                    rel = path
+                preview_items.append(rel)
+            preview = ", ".join(preview_items)
+            more = " …" if len(missing_ann) > 5 else ""
+            self._log(f"[Dataset] Missing annotation JSON for: {preview}{more}")
+        if annotated_videos == 0:
+            self._log("[Dataset] Warning: no annotated videos found; detector training will be skipped.")
         ds_cfg = self.cfg.get("dataset", {})
         split_cfg = (ds_cfg or {}).get("split", {})
         method = split_cfg.get("method", "video_level")
@@ -100,7 +135,13 @@ class PipelineRunner:
         split_tt = dm.split(method=method, seed=self.seed, ratios=(train_r, 0.0, test_r))
         train_ds = split_tt["train"]
         test_ds = split_tt["test"]
-        self._log("Dataset split created (train/test).")
+        train_count = len(train_ds)
+        test_count = len(test_ds)
+        self._log(
+            f"Dataset split created (train/test). Train videos: {train_count} | Test videos: {test_count}"
+        )
+        if train_count == 0:
+            self._log("[Train] No annotated training videos detected. Training steps will be skipped.")
 
         # orchestrate experiments
         for exp in self.cfg.get("experiments", []):
@@ -118,6 +159,16 @@ class PipelineRunner:
             self._log_file = os.path.join(logs_dir, "run.log")
             self._log(f"Started experiment: {exp_name}")
             self._log(f"Experiment folder: {out_dir}")
+
+            test_root = os.path.join(out_dir, "test")
+            detection_root = os.path.join(test_root, "detection")
+            segmentation_root = os.path.join(test_root, "segmentation")
+            train_root = os.path.join(out_dir, "train_full")
+            os.makedirs(detection_root, exist_ok=True)
+            os.makedirs(segmentation_root, exist_ok=True)
+            os.makedirs(train_root, exist_ok=True)
+            os.makedirs(os.path.join(train_root, "detection"), exist_ok=True)
+            os.makedirs(os.path.join(train_root, "segmentation"), exist_ok=True)
 
             # build preproc chain
             preprocs = []
@@ -205,8 +256,34 @@ class PipelineRunner:
                 eval_cfg = self.cfg.get("evaluation", {}) or {}
                 restrict_to_gt_frames = bool(eval_cfg.get("restrict_to_gt_frames", True))
                 viz_cfg = eval_cfg.get("visualize", {}) or {}
-                viz_enabled = bool(viz_cfg.get("enabled", False))
-                viz_samples = int(viz_cfg.get("samples", 10) or 10)
+                viz_enabled = bool(viz_cfg.get("enabled", True))
+                viz_samples = max(1, int(viz_cfg.get("samples", 10) or 10))
+                viz_include_detection = bool(viz_cfg.get("include_detection", True))
+
+                def _select_evenly_spaced(indices: List[int], limit: int) -> List[int]:
+                    if not indices or limit <= 0:
+                        return []
+                    if len(indices) <= limit:
+                        result = list(indices)
+                    elif limit == 1:
+                        result = [indices[0]]
+                    else:
+                        step = (len(indices) - 1) / float(limit - 1)
+                        result = []
+                        for i in range(limit):
+                            pos = int(round(i * step))
+                            if pos >= len(indices):
+                                pos = len(indices) - 1
+                            result.append(indices[pos])
+                        result[0] = indices[0]
+                        result[-1] = indices[-1]
+                    dedup: List[int] = []
+                    seen = set()
+                    for value in result:
+                        if value not in seen:
+                            dedup.append(int(value))
+                            seen.add(int(value))
+                    return dedup
                 # Determine models used and initialize prediction collectors
                 use_models = models_list or models
                 for model_name, _m in use_models:
@@ -381,14 +458,17 @@ class PipelineRunner:
                         self._log(f"Evaluated metrics written to: {vid_met_dir}", to_console=(tqdm is None))
 
                         # Optional visualization: draw up to N GT frames per video with GT/pred boxes
-                        if viz_enabled:
+                        if viz_enabled and viz_include_detection:
                             try:
                                 import cv2  # type: ignore
                                 vis_dir = os.path.join(out_dir_base, "visualizations", vid_stem)
                                 os.makedirs(vis_dir, exist_ok=True)
                                 gt_frames_sorted = sorted([int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes])
-                                if viz_samples > 0:
-                                    gt_frames_sorted = gt_frames_sorted[:min(viz_samples, len(gt_frames_sorted))]
+                                cap = cv2.VideoCapture(vp)
+                                if not gt_frames_sorted:
+                                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                    gt_frames_sorted = list(range(total_frames))
+                                selected_frames = _select_evenly_spaced(gt_frames_sorted, viz_samples)
                                 # preload predictions by frame for each model
                                 eval_pred_maps = {}
                                 for mn, pl in (eval_pv_predictions.items() if restrict_to_gt_frames else pv_predictions.items()):
@@ -396,8 +476,7 @@ class PipelineRunner:
                                     for p in pl:
                                         m[int(p.frame_index)] = p.bbox
                                     eval_pred_maps[mn] = m
-                                cap = cv2.VideoCapture(vp)
-                                for fi in gt_frames_sorted:
+                                for fi in selected_frames:
                                     cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
                                     ok, frame = cap.read()
                                     if not ok:
@@ -482,7 +561,7 @@ class PipelineRunner:
                 return per_model_video_predictions
 
             # k-fold within training for validation
-            if k_fold > 1:
+            if k_fold > 1 and len(train_ds) > 0:
                 self._log(f"Running {k_fold}-Fold validation on training set…")
                 # build folds from train_ds items
                 train_vids = [train_ds[i]["video_path"] for i in range(len(train_ds))]
@@ -502,13 +581,18 @@ class PipelineRunner:
                     trn_vids = [v for v in vids if v not in val_vids]
                     val_ds = SimpleDataset(val_vids, dm.ann_by_video)
                     trn_ds = SimpleDataset(trn_vids, dm.ann_by_video)
-                    fold_dir = os.path.join(out_dir, f"fold_{fi+1}")
+                    fold_dir = os.path.join(train_root, "detection", f"fold_{fi+1}")
                     os.makedirs(fold_dir, exist_ok=True)
                     # fresh models per fold
                     fold_models = build_models()
                     # optional training step
                     for model_name, model in fold_models:
                         if not hasattr(model, "train"):
+                            continue
+                        if len(trn_ds) == 0:
+                            self._log(
+                                f"[Train] Skipped (no annotated data) | model={model_name} | fold={fi+1}/{k_fold}"
+                            )
                             continue
                         allow_train = getattr(model, "train_enabled", True)
                         should_train_cb = getattr(model, "should_train", None)
@@ -616,11 +700,21 @@ class PipelineRunner:
                 self._log("K-Fold validation finished. Aggregates saved.", to_console=(tqdm is None))
 
             # final training on full train and evaluate on test
+            else:
+                if k_fold > 1:
+                    self._log("[Train] Skipping k-fold validation (no annotated videos).")
+
             final_models = build_models()
-            final_train_dir = os.path.join(out_dir, "train_full")
+            final_train_dir = os.path.join(train_root, "detection")
             os.makedirs(final_train_dir, exist_ok=True)
             for model_name, model in final_models:
                 if not hasattr(model, "train"):
+                    continue
+                if len(train_ds) == 0:
+                    self._log(
+                        f"[Train] Skipped (no annotated data) | model={model_name}",
+                        to_console=(tqdm is None),
+                    )
                     continue
                 allow_train = getattr(model, "train_enabled", True)
                 should_train_cb = getattr(model, "should_train", None)
@@ -649,7 +743,91 @@ class PipelineRunner:
                     self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
             test_dir = os.path.join(out_dir, "test")
             os.makedirs(test_dir, exist_ok=True)
-            test_predictions = run_on_dataset(test_ds, test_dir, models_list=final_models)
+            detection_test_dir = os.path.join(test_dir, "detection")
+            os.makedirs(detection_test_dir, exist_ok=True)
+            test_predictions = run_on_dataset(test_ds, detection_test_dir, models_list=final_models)
+
+            # segmentation stage (mandatory)
+            seg_cfg = self.cfg.get("segmentation", {}) or {}
+            seg_results_root = os.path.join(test_dir, "segmentation")
+            os.makedirs(seg_results_root, exist_ok=True)
+            seg_train_root = os.path.join(train_root, "segmentation")
+            seg_workflow = SegmentationWorkflow(seg_cfg, self.dataset_root, seg_train_root, self._log)
+            train_video_paths = [train_ds[i]["video_path"] for i in range(len(train_ds))]
+            train_annotations = _load_annotations_for_videos(train_video_paths)
+            annotated_train_paths = list(train_annotations.keys())
+            seg_metrics_by_model: Dict[str, Dict[str, Dict[str, float]]] = {}
+            seg_seed = seg_cfg.get("seed", seg_workflow.cfg.seed or self.seed)
+            val_ratio = seg_cfg.get("val_ratio", seg_workflow.cfg.val_ratio)
+            train_enabled = bool(seg_workflow.cfg.train)
+            inference_ckpt = getattr(seg_workflow, "inference_checkpoint", None)
+            if train_enabled:
+                if annotated_train_paths:
+                    train_targets = annotated_train_paths[:]
+                    val_videos: Optional[Sequence[str]] = None
+                    if isinstance(val_ratio, (int, float)) and float(val_ratio) > 0.0 and len(train_targets) > 1:
+                        vr = max(0.0, min(float(val_ratio), 0.9))
+                        val_count = max(1, int(len(train_targets) * vr))
+                        rng = random.Random(int(seg_seed))
+                        shuffled = train_targets[:]
+                        rng.shuffle(shuffled)
+                        val_videos = shuffled[:val_count]
+                        train_targets = shuffled[val_count:] or shuffled
+                    self._log(
+                        f"[Segmentation] Training model={seg_workflow.model_name} | train_videos={len(train_targets)}"
+                        + (f" val_videos={len(val_videos)}" if val_videos else "")
+                    )
+                    train_summary = seg_workflow.train(train_targets, val_videos, seed=int(seg_seed))
+                    if train_summary:
+                        self._log(
+                            "[Segmentation] Training summary: "
+                            + ", ".join(f"{k}={v:.4f}" for k, v in train_summary.items()),
+                            to_console=(tqdm is None),
+                        )
+                    seg_workflow.load_checkpoint()
+                else:
+                    self._log("[Segmentation] Warning: no annotated training videos found; skipping training phase.")
+                    seg_workflow.load_checkpoint(inference_ckpt)
+            else:
+                self._log("[Segmentation] Training disabled via config; skipping training phase.")
+                seg_workflow.load_checkpoint(inference_ckpt)
+            # Run inference only if we have predictions and a model object
+            test_video_paths = sorted({vp for model_map in test_predictions.values() for vp in model_map.keys()})
+            test_annotations = _load_annotations_for_videos(test_video_paths)
+            seg_viz_cfg = (self.cfg.get("evaluation", {}) or {}).get("visualize", {}) or {}
+            seg_model_name = getattr(seg_workflow, "model_name", "segmentation_model")
+            predictions_root = os.path.join(seg_results_root, "predictions", seg_model_name)
+            os.makedirs(predictions_root, exist_ok=True)
+            for model_name, preds_by_video in test_predictions.items():
+                out_dir_model = os.path.join(predictions_root, model_name)
+                os.makedirs(out_dir_model, exist_ok=True)
+                metrics_payload = seg_workflow.predict_dataset(
+                    preds_by_video,
+                    out_dir_model,
+                    gt_annotations=test_annotations,
+                    viz_settings=seg_viz_cfg,
+                )
+                summary_metrics = metrics_payload.get("summary", {})
+                per_video_metrics = metrics_payload.get("videos", {})
+                if per_video_metrics:
+                    try:
+                        with open(os.path.join(out_dir_model, "metrics_per_video.json"), "w", encoding="utf-8") as f:
+                            json.dump(per_video_metrics, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                seg_metrics_by_model.setdefault(seg_model_name, {})[model_name] = summary_metrics
+                if summary_metrics:
+                    summary_text = ", ".join(f"{k}={v:.4f}" for k, v in summary_metrics.items())
+                else:
+                    summary_text = "no metrics"
+                self._log(
+                    f"[Segmentation] Summary metrics | seg_model={seg_model_name} det_model={model_name}: {summary_text}",
+                    to_console=(tqdm is None),
+                )
+            if seg_metrics_by_model:
+                summary_path = os.path.join(seg_results_root, "metrics_summary.json")
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(seg_metrics_by_model, f, ensure_ascii=False, indent=2)
 
             # optional classification stage
             clf_cfg = self.cfg.get("classification", {}) or {}
@@ -661,6 +839,7 @@ class PipelineRunner:
                     test_predictions,
                     out_dir,
                     self._log,
+                    split_method=method,
                 )
             except Exception as _e_cls:
                 self._log(f"[Classification] Error: {_e_cls}")

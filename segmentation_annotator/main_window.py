@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QItemSelectionModel
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 
 from .auto_mask import AutoMaskGenerator, AutoMaskResult
 from .canvas import MaskCanvas
@@ -98,11 +99,13 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.btn_next.clicked.connect(self.next_frame)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.valueChanged.connect(self.on_slider)
+        self.slider.sliderReleased.connect(self.focus_canvas)
         self.frame_label = QLabel("Frame: -/-")
         self.frame_input = QSpinBox()
         self.frame_input.setRange(1, 1)
         self.frame_input.setValue(1)
         self.frame_input.setEnabled(False)
+        self.frame_input.setKeyboardTracking(False)
         self.frame_input.valueChanged.connect(self.on_frame_input_changed)
         controls_row.addWidget(self.btn_prev)
         controls_row.addWidget(self.btn_next)
@@ -127,6 +130,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         side.addWidget(QLabel("影片"))
         self.list_videos = QListWidget()
         self.list_videos.currentRowChanged.connect(self.on_select_video_row)
+        self.list_videos.itemClicked.connect(self.on_video_item_clicked)
         side.addWidget(self.list_videos, 2)
 
         side.addWidget(QLabel("類別"))
@@ -143,6 +147,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.brush_slider.setRange(1, 200)
         self.brush_slider.setValue(18)
         self.brush_slider.valueChanged.connect(self.on_brush_slider_changed)
+        self.brush_slider.sliderReleased.connect(self.focus_canvas)
         brush_row.addWidget(self.brush_slider, 1)
         self.brush_spin = QSpinBox()
         self.brush_spin.setRange(1, 200)
@@ -165,6 +170,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.slider_opacity.setRange(0, 100)
         self.slider_opacity.setValue(45)
         self.slider_opacity.valueChanged.connect(self.on_overlay_opacity_changed)
+        self.slider_opacity.sliderReleased.connect(self.focus_canvas)
         overlay_row.addWidget(self.slider_opacity, 1)
         self.opacity_label = QLabel("45%")
         overlay_row.addWidget(self.opacity_label)
@@ -184,6 +190,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.slider_background.setRange(-100, 100)
         self.slider_background.setValue(self.default_background_offset)
         self.slider_background.valueChanged.connect(self.on_background_brightness_changed)
+        self.slider_background.sliderReleased.connect(self.focus_canvas)
         brightness_row.addWidget(self.slider_background, 1)
         self.background_label = QLabel("0")
         brightness_row.addWidget(self.background_label)
@@ -192,6 +199,21 @@ class SegmentAnnotatorWindow(QMainWindow):
         brightness_row.addWidget(self.btn_background_reset)
         side.addLayout(brightness_row)
         self.on_background_brightness_changed(self.default_background_offset)
+
+        side.addWidget(QLabel("檢視"))
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("縮放"))
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(25, 400)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_slider_changed)
+        view_row.addWidget(self.zoom_slider, 1)
+        self.zoom_label = QLabel("100%")
+        view_row.addWidget(self.zoom_label)
+        self.btn_zoom_reset = QPushButton("重設檢視")
+        self.btn_zoom_reset.clicked.connect(self.on_zoom_reset)
+        view_row.addWidget(self.btn_zoom_reset)
+        side.addLayout(view_row)
 
         side.addWidget(QLabel("已標註幀"))
         self.list_frames = QListWidget()
@@ -204,6 +226,11 @@ class SegmentAnnotatorWindow(QMainWindow):
         root.addLayout(side, 1)
 
     # ------------------------------------------------------------------
+    def focus_canvas(self) -> None:
+        if self.canvas:
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    # ------------------------------------------------------------------
     def ensure_canvas(self):
         if self.canvas is not None:
             return
@@ -214,7 +241,10 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.canvas.brushSizeChanged.connect(self.on_canvas_brush_size_changed)
         self.canvas.annotationCreated.connect(self.on_canvas_annotation_created)
         self.canvas.annotationsCleared.connect(self.on_canvas_annotations_cleared)
+        self.canvas.zoomChanged.connect(self.on_canvas_zoom_changed)
         self.canvas.set_category_resolver(self.current_category_id)
+        if getattr(self, "zoom_slider", None) is not None:
+            self.zoom_slider.setRange(int(self.canvas.min_zoom * 100), int(self.canvas.max_zoom * 100))
         if self.canvas_placeholder is not None:
             self.canvas_placeholder.hide()
             self.canvas_layout.removeWidget(self.canvas_placeholder)
@@ -224,6 +254,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.on_canvas_brush_size_changed(self.canvas.brush_radius)
         self.apply_overlay_settings()
         self.canvas.set_background_offset(self.slider_background.value())
+        self.on_canvas_zoom_changed(self.canvas.zoom)
 
     # ------------------------------------------------------------------
     def open_folder(self):
@@ -272,6 +303,8 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.video_annotation_counts[video_path] = int(count)
 
     def populate_video_list(self):
+        scroll_bar = self.list_videos.verticalScrollBar()
+        previous_scroll = scroll_bar.value()
         self.list_videos.blockSignals(True)
         self.list_videos.clear()
         for idx, path in enumerate(self.video_paths):
@@ -281,9 +314,12 @@ class SegmentAnnotatorWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, idx)
             self.list_videos.addItem(item)
         target_index = self.current_video_index if 0 <= self.current_video_index < len(self.video_paths) else (0 if self.video_paths else -1)
-        if target_index >= 0:
-            self.list_videos.setCurrentRow(target_index)
+        target_item: Optional[QListWidgetItem] = None
+        if target_index >= 0 and target_index < self.list_videos.count():
+            target_item = self.list_videos.item(target_index)
+            self.list_videos.setCurrentItem(target_item, QItemSelectionModel.SelectionFlag.ClearAndSelect)
         self.list_videos.blockSignals(False)
+        scroll_bar.setValue(min(previous_scroll, scroll_bar.maximum()))
 
     def load_video_at(self, index: int):
         if index < 0 or index >= len(self.video_paths):
@@ -328,6 +364,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.ensure_canvas()
         if self.canvas:
             self.canvas.load_frame(0)
+            self.canvas.reset_view()
         self.update_lists()
         self.set_active_category(0)
         self.dirty = False
@@ -339,6 +376,17 @@ class SegmentAnnotatorWindow(QMainWindow):
         if row == self.current_video_index:
             return
         self.load_video_at(row)
+
+    def on_video_item_clicked(self, item: QListWidgetItem):
+        if item is None:
+            return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(idx, int):
+            idx = self.list_videos.row(item)
+        if idx < 0:
+            return
+        if idx != self.current_video_index or self.project is None:
+            self.load_video_at(idx)
 
     def populate_categories(self, categories: List[str]):
         self.list_categories.clear()
@@ -366,6 +414,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.frame_input.blockSignals(False)
         self.frame_label.setText(f"Frame: {index + 1}/{self.project.total_frames}")
         self.update_lists()
+        self.focus_canvas()
 
     def prev_frame(self):
         if self.canvas is None:
@@ -379,6 +428,7 @@ class SegmentAnnotatorWindow(QMainWindow):
 
     def on_slider(self, value: int):
         self.load_frame(value)
+        self.focus_canvas()
 
     # ------------------------------------------------------------------
     def on_frame_input_changed(self, value: int):
@@ -389,6 +439,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         if target == self.canvas.frame_index:
             return
         self.load_frame(target)
+        self.focus_canvas()
 
     # ------------------------------------------------------------------
     def current_category_id(self) -> int:
@@ -419,6 +470,7 @@ class SegmentAnnotatorWindow(QMainWindow):
             self.canvas.set_brush_radius(value)
         else:
             self.brush_label.setText(f"筆刷: {value}")
+        self.focus_canvas()
 
     def on_brush_spin_changed(self, value: int):
         self.brush_slider.blockSignals(True)
@@ -428,6 +480,7 @@ class SegmentAnnotatorWindow(QMainWindow):
             self.canvas.set_brush_radius(value)
         else:
             self.brush_label.setText(f"筆刷: {value}")
+        self.focus_canvas()
 
     def undo(self):
         if self.canvas:
@@ -453,17 +506,20 @@ class SegmentAnnotatorWindow(QMainWindow):
         if value < 0:
             return
         self.apply_overlay_settings()
+        self.focus_canvas()
 
     def on_overlay_color_changed(self, index: int):
         if index < 0:
             return
         self.apply_overlay_settings()
+        self.focus_canvas()
 
     def on_background_brightness_changed(self, value: int):
         if getattr(self, "background_label", None) is not None:
             self.background_label.setText(f"{value:+d}")
         if self.canvas:
             self.canvas.set_background_offset(value)
+        self.focus_canvas()
 
     def reset_background_brightness(self):
         if getattr(self, "slider_background", None) is None:
@@ -471,6 +527,41 @@ class SegmentAnnotatorWindow(QMainWindow):
         if self.slider_background.value() == self.default_background_offset:
             return
         self.slider_background.setValue(self.default_background_offset)
+        self.focus_canvas()
+
+    def on_zoom_slider_changed(self, value: int):
+        if getattr(self, "zoom_label", None) is not None:
+            self.zoom_label.setText(f"{value}%")
+        if self.canvas:
+            self.canvas.set_zoom(value / 100.0)
+        self.focus_canvas()
+
+    def on_zoom_reset(self):
+        if self.canvas:
+            self.canvas.reset_view()
+        else:
+            if getattr(self, "zoom_slider", None) is not None:
+                self.zoom_slider.blockSignals(True)
+                self.zoom_slider.setValue(100)
+                self.zoom_slider.blockSignals(False)
+            if getattr(self, "zoom_label", None) is not None:
+                self.zoom_label.setText("100%")
+        self.focus_canvas()
+
+    def on_canvas_zoom_changed(self, zoom: float):
+        percent = int(round(zoom * 100))
+        if getattr(self, "zoom_slider", None) is not None:
+            slider_min = self.zoom_slider.minimum()
+            slider_max = self.zoom_slider.maximum()
+            if percent < slider_min:
+                self.zoom_slider.setMinimum(percent)
+            if percent > slider_max:
+                self.zoom_slider.setMaximum(percent)
+            self.zoom_slider.blockSignals(True)
+            self.zoom_slider.setValue(percent)
+            self.zoom_slider.blockSignals(False)
+        if getattr(self, "zoom_label", None) is not None:
+            self.zoom_label.setText(f"{percent}%")
 
     # ------------------------------------------------------------------
     def mark_dirty(self) -> None:
@@ -520,6 +611,7 @@ class SegmentAnnotatorWindow(QMainWindow):
         fi = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(fi, int):
             self.load_frame(fi)
+            self.focus_canvas()
 
     # ------------------------------------------------------------------
     def ensure_auto_generator(self) -> Optional[AutoMaskGenerator]:
@@ -557,20 +649,24 @@ class SegmentAnnotatorWindow(QMainWindow):
 
     def auto_mask(self):
         if self.project is None or self.canvas is None:
+            self.focus_canvas()
             return
-        generator = self.ensure_auto_generator()
-        if generator is None:
-            return
-        frame = self.project.load_frame(self.canvas.frame_index)
-        if frame is None:
-            QMessageBox.warning(self, "失敗", "無法載入當前影格")
-            return
-        results = generator(frame)
-        if not results:
-            QMessageBox.information(self, "提示", "沒有偵測結果")
-            return
-        best = results[0]
-        self.apply_auto_result(best)
+        try:
+            generator = self.ensure_auto_generator()
+            if generator is None:
+                return
+            frame = self.project.load_frame(self.canvas.frame_index)
+            if frame is None:
+                QMessageBox.warning(self, "失敗", "無法載入當前影格")
+                return
+            results = generator(frame)
+            if not results:
+                QMessageBox.information(self, "提示", "沒有偵測結果")
+                return
+            best = results[0]
+            self.apply_auto_result(best)
+        finally:
+            self.focus_canvas()
 
     def apply_auto_result(self, result: AutoMaskResult):
         if self.project is None or self.canvas is None:
@@ -614,6 +710,9 @@ class SegmentAnnotatorWindow(QMainWindow):
             "滑鼠左鍵：筆刷填色\n"
             "滑鼠右鍵：橡皮擦清除\n"
             "滑鼠滾輪：調整筆刷大小\n"
+            "Ctrl+滑鼠滾輪：縮放畫布\n"
+            "滑鼠中鍵拖曳：平移畫面\n"
+            "縮圖導覽（放大時）：拖曳黃色框快速定位\n"
             "空白鍵：暫時顯示遮罩預覽\n"
             "Ctrl+Z：復原上一筆\n"
             "上下鍵或按鈕：切換影格"

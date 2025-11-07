@@ -11,7 +11,7 @@ from torchvision import models, transforms
 from sklearn.random_projection import GaussianRandomProjection
 import warnings
 
-from ..core.interfaces import FramePrediction
+from ..core.interfaces import FramePrediction, SegmentationData
 from ..core.registry import register_feature_extractor
 from .interfaces import TrajectoryFeatureExtractor
 
@@ -717,3 +717,152 @@ class BackboneTextureFeatureExtractor(TrajectoryFeatureExtractor):
             tensor = (tensor - tensor.mean()) / (tensor.std() + 1e-6)
         tensor = self._normalise(tensor)
         return tensor.unsqueeze(0).to(self._device)
+
+
+@register_feature_extractor("segmentation_motion")
+class SegmentationMotionFeatureExtractor(TrajectoryFeatureExtractor):
+    """Generate motion and morphology descriptors from segmentation outputs."""
+
+    name = "SegmentationMotionFeatures"
+
+    def __init__(self, params: Dict[str, Any] | None = None):
+        cfg = params or {}
+        self._subject_stats = [str(s) for s in cfg.get("aggregate_stats", ["mean", "std", "min", "max"])]
+        self._video_keys = [
+            "num_masks",
+            "duration_frames",
+            "centroid_path_length",
+            "centroid_mean_speed",
+            "centroid_max_speed",
+            "centroid_std_speed",
+            "centroid_mean_acc",
+            "centroid_std_acc",
+            "area_mean",
+            "area_std",
+            "area_min",
+            "area_max",
+            "area_change_mean",
+            "area_change_std",
+            "perimeter_mean",
+            "perimeter_std",
+            "equivalent_diameter_mean",
+            "equivalent_diameter_std",
+            "centroid_error_mean",
+            "centroid_error_std",
+            "start_centroid_x",
+            "start_centroid_y",
+            "end_centroid_x",
+            "end_centroid_y",
+        ]
+        ordered_subject_keys = ["video_count"]
+        for stat in self._subject_stats:
+            for key in self._video_keys:
+                ordered_subject_keys.append(f"{stat}__{key}")
+        self._subject_keys = ordered_subject_keys
+
+    def feature_order(self, level: str = "video") -> Sequence[str]:
+        if str(level).lower() == "subject":
+            return self._subject_keys
+        return self._video_keys
+
+    def extract_video(
+        self,
+        samples: Sequence[FramePrediction],
+        video_path: Optional[str] = None,
+    ) -> Dict[str, float]:
+        usable: List[SegmentationData] = []
+        frames: List[float] = []
+        for sample in samples:
+            seg = sample.segmentation
+            if seg is None:
+                continue
+            usable.append(seg)
+            frames.append(float(sample.frame_index))
+        if not usable:
+            return {key: 0.0 for key in self._video_keys}
+        centroids = np.asarray([seg.stats.centroid for seg in usable], dtype=np.float32)
+        areas = np.asarray([seg.stats.area_px for seg in usable], dtype=np.float32)
+        perimeters = np.asarray([seg.stats.perimeter_px for seg in usable], dtype=np.float32)
+        diameters = np.asarray([seg.stats.equivalent_diameter_px for seg in usable], dtype=np.float32)
+        errors = np.asarray([seg.centroid_error_px if seg.centroid_error_px is not None else 0.0 for seg in usable], dtype=np.float32)
+        frames_arr = np.asarray(frames, dtype=np.float32)
+        feature_map: Dict[str, float] = OrderedDict()
+        feature_map["num_masks"] = float(len(usable))
+        if frames_arr.size > 1:
+            feature_map["duration_frames"] = float(frames_arr[-1] - frames_arr[0])
+        else:
+            feature_map["duration_frames"] = 0.0
+        if centroids.shape[0] > 1:
+            diffs = np.diff(centroids, axis=0)
+            frame_deltas = np.diff(frames_arr)
+            frame_deltas[frame_deltas == 0] = 1.0
+            step_dist = np.linalg.norm(diffs, axis=1)
+            speeds = step_dist / np.maximum(frame_deltas, 1e-6)
+            feature_map["centroid_path_length"] = float(step_dist.sum())
+            feature_map["centroid_mean_speed"] = float(np.mean(speeds))
+            feature_map["centroid_max_speed"] = float(np.max(speeds))
+            feature_map["centroid_std_speed"] = _safe_std(speeds)
+            if speeds.size > 1:
+                acc = np.diff(speeds)
+                feature_map["centroid_mean_acc"] = float(np.mean(acc))
+                feature_map["centroid_std_acc"] = _safe_std(acc)
+            else:
+                feature_map["centroid_mean_acc"] = 0.0
+                feature_map["centroid_std_acc"] = 0.0
+        else:
+            feature_map["centroid_path_length"] = 0.0
+            feature_map["centroid_mean_speed"] = 0.0
+            feature_map["centroid_max_speed"] = 0.0
+            feature_map["centroid_std_speed"] = 0.0
+            feature_map["centroid_mean_acc"] = 0.0
+            feature_map["centroid_std_acc"] = 0.0
+        feature_map["area_mean"] = float(np.mean(areas)) if areas.size else 0.0
+        feature_map["area_std"] = _safe_std(areas)
+        feature_map["area_min"] = float(np.min(areas)) if areas.size else 0.0
+        feature_map["area_max"] = float(np.max(areas)) if areas.size else 0.0
+        if areas.size > 1:
+            deltas = np.diff(areas)
+            feature_map["area_change_mean"] = float(np.mean(deltas))
+            feature_map["area_change_std"] = _safe_std(deltas)
+        else:
+            feature_map["area_change_mean"] = 0.0
+            feature_map["area_change_std"] = 0.0
+        feature_map["perimeter_mean"] = float(np.mean(perimeters)) if perimeters.size else 0.0
+        feature_map["perimeter_std"] = _safe_std(perimeters)
+        feature_map["equivalent_diameter_mean"] = float(np.mean(diameters)) if diameters.size else 0.0
+        feature_map["equivalent_diameter_std"] = _safe_std(diameters)
+        feature_map["centroid_error_mean"] = float(np.mean(errors)) if errors.size else 0.0
+        feature_map["centroid_error_std"] = _safe_std(errors)
+        feature_map["start_centroid_x"] = float(centroids[0, 0])
+        feature_map["start_centroid_y"] = float(centroids[0, 1])
+        feature_map["end_centroid_x"] = float(centroids[-1, 0])
+        feature_map["end_centroid_y"] = float(centroids[-1, 1])
+        return feature_map
+
+    def aggregate_subject(self, video_features: Sequence[Dict[str, float]]) -> Dict[str, float]:
+        if not video_features:
+            return {key: 0.0 for key in self._subject_keys}
+        agg: Dict[str, float] = OrderedDict()
+        agg["video_count"] = float(len(video_features))
+        feature_matrix = {
+            key: np.asarray([vf.get(key, 0.0) for vf in video_features], dtype=np.float32)
+            for key in self._video_keys
+        }
+        for stat in self._subject_stats:
+            for key, values in feature_matrix.items():
+                full_key = f"{stat}__{key}"
+                if stat == "mean":
+                    agg[full_key] = float(np.mean(values)) if values.size else 0.0
+                elif stat == "std":
+                    agg[full_key] = _safe_std(values)
+                elif stat == "min":
+                    agg[full_key] = float(np.min(values)) if values.size else 0.0
+                elif stat == "max":
+                    agg[full_key] = float(np.max(values)) if values.size else 0.0
+                elif stat == "median":
+                    agg[full_key] = float(np.median(values)) if values.size else 0.0
+                else:
+                    agg[full_key] = float(np.mean(values)) if values.size else 0.0
+        for key in self._subject_keys:
+            agg.setdefault(key, 0.0)
+        return agg

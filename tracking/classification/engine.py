@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from collections import defaultdict
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -16,6 +17,9 @@ from .feature_vector import FeatureVectoriser
 from .metrics import summarise_classification
 from . import feature_extractors as _load_feature_extractors  # noqa: F401
 from . import classifiers as _load_classifiers  # noqa: F401
+from ..segmentation import SegmentationWorkflow
+from ..segmentation.dataset import attach_ground_truth_segmentation
+from ..utils.annotations import load_coco_vid
 
 
 def _subject_from_video_path(path: str) -> str:
@@ -76,6 +80,19 @@ def _load_subject_labels(label_path: str) -> Dict[str, int]:
             except Exception:
                 continue
     return mapping
+
+
+def _load_annotations_for_videos(video_paths: Sequence[str]) -> Dict[str, Dict[str, any]]:  # noqa: ANN401
+    annotations: Dict[str, Dict[str, any]] = {}
+    for video_path in video_paths:
+        json_path = os.path.splitext(video_path)[0] + ".json"
+        if not os.path.exists(json_path):
+            continue
+        try:
+            annotations[video_path] = load_coco_vid(json_path)
+        except Exception:
+            continue
+    return annotations
 
 
 def _prepare_entity_features(
@@ -148,6 +165,8 @@ def run_subject_classification(
     test_predictions: Dict[str, Dict[str, List[FramePrediction]]],
     results_dir: str,
     logger: Callable[[str], None],
+    *,
+    split_method: str = "video_level",
 ) -> None:
     if not config.get("enabled", False):
         logger("[Classification] Stage disabled via config.")
@@ -167,26 +186,97 @@ def run_subject_classification(
         raise KeyError(f"Unknown classifier: {classifier_name}")
     classifier = classifier_cls(classifier_cfg.get("params"))
 
-    level = str(config.get("target_level", "video")).lower()
-    if level not in {"video", "subject"}:
-        raise ValueError("classification.target_level must be 'video' or 'subject'")
+    legacy_level = config.pop("target_level", None)
+    if legacy_level is not None:
+        logger("[Classification] 'target_level' is deprecated; using dataset split method instead.")
+    level = "subject" if str(split_method).lower() == "subject_level" else "video"
     logger(f"[Classification] Target level: {level}")
+
+    seg_cfg = config.get("segmentation", {}) or {}
+    seg_enabled = bool(seg_cfg.get("enabled", True))
+    if "segmentation" in getattr(feature_extractor, "name", "").lower() and not seg_enabled:
+        raise RuntimeError(
+            "Segmentation-aware feature extractor selected but classification.segmentation.enabled is False."
+        )
 
     label_path = config.get("label_file") or os.path.join(dataset_root, "ann.txt")
     labels = _load_subject_labels(label_path)
     logger(f"[Classification] Loaded {len(labels)} subject labels from {label_path}")
 
-    # Prepare training data (GT annotations from train dataset)
-    train_videos: Dict[str, List[FramePrediction]] = {}
+    # Collect training annotations and segmentation sequences
+    train_video_paths: List[str] = []
     for idx in range(len(train_dataset)):
         item = train_dataset[idx]
         video_path = item.get("video_path")
-        annotation = item.get("annotation")
-        if not video_path or annotation is None:
-            continue
-        samples = _annotation_to_predictions(annotation)
-        train_videos[video_path] = samples
-    logger(f"[Classification] Prepared GT trajectories for {len(train_videos)} train videos")
+        if video_path:
+            train_video_paths.append(video_path)
+    train_annotations = _load_annotations_for_videos(train_video_paths)
+    annotated_train_paths = list(train_annotations.keys())
+
+    seg_results_root = os.path.join(results_dir, "test", "segmentation")
+    seg_train_root = os.path.join(results_dir, "train_full", "segmentation", "classification")
+    seg_workflow: Optional[SegmentationWorkflow] = None
+    seg_metrics_by_model: Dict[str, Dict[str, Dict[str, float]]] = {}
+    if seg_enabled:
+        os.makedirs(seg_results_root, exist_ok=True)
+        os.makedirs(seg_train_root, exist_ok=True)
+        seg_params = seg_cfg.get("params")
+        seg_workflow = SegmentationWorkflow(seg_params, dataset_root, seg_train_root, logger)
+        seg_seed = int(seg_cfg.get("seed", 0))
+        val_ratio = float(seg_cfg.get("val_ratio", 0.0))
+        train_targets = annotated_train_paths[:]
+        val_videos: Optional[Sequence[str]] = None
+        if val_ratio > 0.0 and len(train_targets) > 1:
+            val_count = max(1, int(len(train_targets) * val_ratio))
+            rng = random.Random(seg_seed)
+            shuffled = train_targets[:]
+            rng.shuffle(shuffled)
+            val_videos = shuffled[:val_count]
+            train_targets = shuffled[val_count:] or shuffled
+        if train_targets:
+            seg_train_info = seg_workflow.train(train_targets, val_videos, seed=seg_seed)
+            if seg_train_info:
+                logger("[Segmentation] Training summary: " + ", ".join(f"{k}={v:.4f}" for k, v in seg_train_info.items()))
+            seg_workflow.load_checkpoint()
+        else:
+            logger("[Segmentation] No annotated training videos found; skipping segmentation training.")
+            seg_workflow = None
+    else:
+        logger("[Classification] Segmentation stage disabled via config; using existing trajectories only.")
+
+    train_videos: Dict[str, List[FramePrediction]] = {}
+    for video_path, annotation in train_annotations.items():
+        samples = attach_ground_truth_segmentation(annotation, dataset_root)
+        if samples:
+            train_videos[video_path] = samples
+    logger(f"[Classification] Prepared GT segmentation trajectories for {len(train_videos)} train videos")
+
+    test_video_paths: List[str] = sorted({vp for model_map in test_predictions.values() for vp in model_map.keys()})
+    test_annotations = _load_annotations_for_videos(test_video_paths)
+    if seg_workflow is not None:
+        seg_model_name = getattr(seg_workflow, "model_name", "segmentation_model")
+        predictions_root = os.path.join(seg_results_root, "predictions", seg_model_name)
+        os.makedirs(predictions_root, exist_ok=True)
+        for model_name, preds_by_video in test_predictions.items():
+            out_dir = os.path.join(predictions_root, model_name)
+            os.makedirs(out_dir, exist_ok=True)
+            metrics_payload = seg_workflow.predict_dataset(preds_by_video, out_dir, gt_annotations=test_annotations)
+            summary_metrics = metrics_payload.get("summary", {})
+            per_video_metrics = metrics_payload.get("videos", {})
+            if per_video_metrics:
+                try:
+                    with open(os.path.join(out_dir, "metrics_per_video.json"), "w", encoding="utf-8") as f:
+                        json.dump(per_video_metrics, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            seg_metrics_by_model.setdefault(seg_model_name, {})[model_name] = summary_metrics
+            if summary_metrics:
+                summary_text = ", ".join(f"{k}={v:.4f}" for k, v in summary_metrics.items())
+            else:
+                summary_text = "no metrics"
+            logger(
+                f"[Segmentation] Summary metrics | seg_model={seg_model_name} det_model={model_name}: {summary_text}"
+            )
 
     train_features, train_owner, train_sources = _prepare_entity_features(
         feature_extractor,
@@ -222,6 +312,15 @@ def run_subject_classification(
         logger(f"[Classification] source_model not specified, defaulting to {source_model}")
     if not source_model or source_model not in test_predictions:
         raise RuntimeError("Classification source_model not found in tracking predictions")
+
+    if seg_workflow is not None:
+        missing_masks = sum(
+            1 for _video, preds in test_predictions[source_model].items() for pred in preds if pred.segmentation is None
+        )
+        if missing_masks:
+            raise RuntimeError(
+                "Segmentation predictions missing for {} frame(s). Check segmentation stage outputs.".format(missing_masks)
+            )
 
     test_features, test_owner, test_sources = _prepare_entity_features(
         feature_extractor,
@@ -293,3 +392,8 @@ def run_subject_classification(
         )
     with open(os.path.join(model_dir, "predictions.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
+
+    if seg_metrics_by_model:
+        seg_metrics_path = os.path.join(seg_results_root, "metrics_summary.json")
+        with open(seg_metrics_path, "w", encoding="utf-8") as f:
+            json.dump(seg_metrics_by_model, f, ensure_ascii=False, indent=2)

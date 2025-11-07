@@ -5,12 +5,31 @@ import numpy as np
 
 
 @dataclass
+class MaskStats:
+    area_px: float
+    bbox: Tuple[float, float, float, float]
+    centroid: Tuple[float, float]
+    perimeter_px: float
+    equivalent_diameter_px: float
+
+
+@dataclass
+class SegmentationData:
+    mask_path: Optional[str]
+    stats: MaskStats
+    score: Optional[float] = None
+    roi_bbox: Optional[Tuple[float, float, float, float]] = None
+    centroid_error_px: Optional[float] = None
+
+
+@dataclass
 class FramePrediction:
     frame_index: int
     bbox: Tuple[float, float, float, float]  # x,y,w,h
     score: Optional[float] = None
     confidence: Optional[float] = None
     confidence_components: Optional[Dict[str, float]] = None
+    segmentation: Optional[SegmentationData] = None
 
     @property
     def center(self) -> Tuple[float, float]:

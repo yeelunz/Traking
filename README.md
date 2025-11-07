@@ -37,6 +37,30 @@ Notes on trackers:
 - MixFormerV2 integration example: copy `pipeline.mixformerv2.yaml`, set `dataset.root`, and download one of the official checkpoints (e.g. `mixformerv2_base.pth.tar`). Place it under `libs/MixFormerV2/models/` so the wrapper can resolve it. MixFormerV2 currently requires a CUDA-capable GPU because the upstream implementation runs preprocessing and inference on CUDA tensors. Each video still needs a `<video>.json` with the first-frame bounding box for initialisation。請另外安裝 `tensorboard`, `tensorboardX`, `easydict`, `lmdb`, `einops`（已列在 `requirements.txt`）以滿足官方專案在匯入環境設定時的依賴。由於官方 checkpoint 會序列化自訂類別，框架會在載入時強制 `torch.load(..., weights_only=False)`；請僅使用可信來源的權重檔。
 -  建議將 `online_size` 保持在 `1`（範例管線已設定），避免原始 MixFormer 維護多個線上模板時在自訂資料集上產生維度不合的錯誤。
 
+### Segmentation workflow
+
+`tracking.segmentation` 提供 ROI 為核心的遮罩推論、可視化與指標彙整，所有結果皆寫入 `results/segmentation/<video>/`。在 pipeline 的 `segmentation` 區塊可以切換不同模型：
+
+- `model.name: "unet"`／`"unetpp"`：使用 `segmentation_models_pytorch`，支援 `encoder_name`、`encoder_weights` 等參數，可進行訓練。
+- `model.name: "torchvision_fcn_resnet50"`：採用 torchvision 官方 FCN，屬推論專用 baseline。
+- `model.name: "auto_mask"`（**新增**）：整合 `segmentation_annotator.auto_mask` 的弱監督遮罩流程（GrabCut + MGAC + 導向濾波），直接在 tracker bbox 周圍生成遮罩。此模式僅支援推論，框架會自動關閉訓練並沿用「最大連通元件 + 補洞」後處理，最終遮罩仍限制在 ROI 內。可透過 `model.params` 調整 `margin`、`num_iter`、`canny_low`／`canny_high`、`guided_radius`、`guided_eps` 等參數；若環境缺少 scikit-image，會自動退回無 MGAC 的變體。
+
+典型設定：
+
+```yaml
+segmentation:
+	enabled: true
+	model:
+		name: auto_mask
+		params:
+			margin: 0.15
+			num_iter: 120
+			canny_low: 25
+			canny_high: 70
+```
+
+執行完會在 `metrics.json` 多一個 `fps` 欄位（每秒推論幀數），可用來比較不同遮罩流程的效能。
+
 Install:
 ```bat
 pip install -r requirements.txt

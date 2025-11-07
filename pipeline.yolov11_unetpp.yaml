@@ -1,0 +1,71 @@
+seed: 42
+dataset:
+  root: C:\Users\User\Desktop\超音波檔案0912_遮罩測試
+  split:
+    method: video_level
+    ratios:
+    - 0.8
+    - 0.2
+    k_fold: 1
+experiments:
+- name: yolov11_unetpp
+  pipeline:
+  - type: model
+    name: YOLOv11
+    params:
+      weights: models/detection/best(large).pt
+      conf: 0.25
+      iou: 0.5
+      imgsz: 640
+      device: cuda
+      classes: null
+      max_det: 100
+      fallback_last_prediction: true
+      train_enabled: false
+      epochs: 5
+      batch: 8
+      lr0: 0.01
+      patience: 50
+      workers: 0
+      include_empty_frames: false
+evaluation:
+  evaluator: BasicEvaluator
+  visualize:
+    enabled: true
+    samples: 10
+    strategy: even_spread
+    include_detection: true
+    include_segmentation: true
+    ensure_first_last: true
+classification:
+  enabled: false
+  feature_extractor:
+    name: basic
+    params: {}
+  classifier:
+    name: random_forest
+    params: {}
+segmentation:
+  model:
+    name: unetpp
+    params:
+      encoder_name: resnet34
+      encoder_weights: imagenet
+  padding_min: 0.1
+  padding_max: 0.15
+  padding_inference: 0.15
+  jitter: 0.05
+  epochs: 5
+  batch_size: 8
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 1.0e-05
+  threshold: 0.5
+  val_ratio: 0.0
+  seed: 0
+  redundancy: 1
+  dice_weight: 1.0
+  bce_weight: 1.0
+  device: auto
+  train: false
+  inference_checkpoint: models/seg/segmentation_last.pt
