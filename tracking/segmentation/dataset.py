@@ -14,7 +14,14 @@ from torch.utils.data import Dataset
 
 from ..core.interfaces import FramePrediction, MaskStats, SegmentationData
 from ..utils.annotations import load_coco_vid
-from .utils import BoundingBox, compute_mask_stats, crop_with_bbox, expand_bbox
+from .utils import (
+    BoundingBox,
+    compute_mask_stats,
+    crop_with_bbox,
+    expand_bbox,
+    fill_holes,
+    keep_largest_component,
+)
 
 
 @dataclass
@@ -209,7 +216,13 @@ class SegmentationCropDataset(Dataset):
         else:
             abs_path = os.path.join(self.dataset_root, mask_file)
         mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
-        return mask
+        if mask is None:
+            return None
+        # ensure binary mask and fill interior holes to avoid ring-shaped annotations
+        mask_bin = (mask > 0).astype(np.uint8) * 255
+        mask_filled = fill_holes(mask_bin)
+        mask_clean = keep_largest_component(mask_filled)
+        return mask_clean
 
     # ---------------- resize helpers -----------------
     @staticmethod

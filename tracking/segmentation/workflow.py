@@ -282,10 +282,11 @@ class SegmentationWorkflow:
         model_params = dict(self.cfg.model_params)
         self.model_name = model_key or "unetpp"
         self.using_auto_mask = self.model_name == "auto_mask"
+        self.using_medsam = self.model_name == "medsam"
         self.model: Optional[torch.nn.Module] = None
         self.train_enabled = bool(self.cfg.train)
         self.auto_pretrained = bool(getattr(self.cfg, "auto_pretrained", False))
-        self.input_size: Tuple[int, int] = tuple(int(v) for v in self.cfg.target_size)
+        self.input_size: Optional[Tuple[int, int]] = tuple(int(v) for v in self.cfg.target_size)
         self.pretrained_external = self._resolve_checkpoint_path(self.cfg.pretrained_external)
         self.inference_checkpoint = self._resolve_checkpoint_path(self.cfg.inference_checkpoint)
         self.best_checkpoint: Optional[str] = None
@@ -308,7 +309,22 @@ class SegmentationWorkflow:
                 raise KeyError(f"Unknown segmentation model: {self.model_name}")
             model_params.setdefault("in_channels", 3)
             model_params.setdefault("classes", 1)
+            if self.using_medsam and "checkpoint" not in model_params:
+                fallback_ckpt = self.inference_checkpoint or self.pretrained_external
+                if fallback_ckpt:
+                    model_params["checkpoint"] = fallback_ckpt
+            # For MedSAM, pass train_enabled to enable fine-tuning mode
+            if self.using_medsam:
+                model_params["train_enabled"] = self.train_enabled
             self.model = model_cls(model_params).to(self.device)
+            if self.using_medsam:
+                if not self.train_enabled:
+                    self.auto_pretrained = False
+                    self.input_size = None
+                    self.logger("[Segmentation] MedSAM mode enabled (inference-only).")
+                else:
+                    self.input_size = tuple(int(v) for v in self.cfg.target_size)
+                    self.logger("[Segmentation] MedSAM mode enabled (fine-tuning mask decoder).")
             if self.auto_pretrained or (
                 not self.train_enabled
                 and not self.pretrained_external
@@ -403,6 +419,9 @@ class SegmentationWorkflow:
         if self.using_auto_mask:
             self.logger("[Segmentation] Auto-mask mode is inference-only; skipping training stage.")
             return {"status": "auto_mask_inference_only"}
+        if self.using_medsam and not self.train_enabled:
+            self.logger("[Segmentation] MedSAM mode is inference-only; skipping training stage.")
+            return {"status": "medsam_inference_only"}
         if not self.train_enabled:
             self.logger("[Segmentation] Training disabled via config; skipping training stage.")
             return {}
@@ -463,8 +482,18 @@ class SegmentationWorkflow:
                 num_workers=max(0, self.cfg.num_workers),
                 pin_memory=self.device.type == "cuda",
             )
+        # Select parameters to optimize based on model type
+        if self.using_medsam and hasattr(self.model, "get_trainable_parameters"):
+            params_to_optimize = list(self.model.get_trainable_parameters())
+            if not params_to_optimize:
+                self.logger("[Segmentation] MedSAM has no trainable parameters; skipping training.")
+                return {"status": "no_trainable_params"}
+            self.logger(f"[Segmentation] Training MedSAM mask decoder with {len(params_to_optimize)} parameter groups.")
+        else:
+            params_to_optimize = self.model.parameters()
+
         optimiser = torch.optim.AdamW(
-            self.model.parameters(),
+            params_to_optimize,
             lr=self.cfg.lr,
             weight_decay=self.cfg.weight_decay,
         )
@@ -493,13 +522,20 @@ class SegmentationWorkflow:
                 if val_loss < best_val:
                     best_val = val_loss
                     self.best_checkpoint = os.path.join(self.results_dir, "segmentation_best.pt")
-                    torch.save(self.model.state_dict(), self.best_checkpoint)
+                    self._save_checkpoint(self.best_checkpoint)
                     self.logger(f"[Segmentation] Saved best checkpoint @ {self.best_checkpoint}")
             else:
                 # save latest when no validation
                 self.best_checkpoint = os.path.join(self.results_dir, "segmentation_last.pt")
-                torch.save(self.model.state_dict(), self.best_checkpoint)
+                self._save_checkpoint(self.best_checkpoint)
         return {k: v[-1] for k, v in history.items() if v}
+
+    def _save_checkpoint(self, path: str) -> None:
+        """Save model checkpoint, handling MedSAM's special save method."""
+        if self.using_medsam and hasattr(self.model, "save_finetuned"):
+            self.model.save_finetuned(path)
+        else:
+            torch.save(self.model.state_dict(), path)
 
     # ------------------------------------------------------------------
     def _evaluate(self, loader: DataLoader) -> float:
@@ -525,6 +561,9 @@ class SegmentationWorkflow:
         if self.using_auto_mask:
             self.logger("[Segmentation] Auto-mask mode does not use checkpoints; skipping load request.")
             return
+        if self.using_medsam and not self.train_enabled:
+            self.logger("[Segmentation] MedSAM weights are provided via model.params.checkpoint; skipping load request.")
+            return
         ckpt_hint = path if path not in (None, "") else None
         if ckpt_hint is None:
             if self.best_checkpoint:
@@ -543,6 +582,16 @@ class SegmentationWorkflow:
             return
         ckpt_path = self._resolve_checkpoint_path(ckpt_hint)
         if ckpt_path and os.path.exists(ckpt_path):
+            if self.using_medsam and hasattr(self.model, "load_finetuned"):
+                # Try to load as MedSAM fine-tuned checkpoint
+                try:
+                    self.model.load_finetuned(ckpt_path)
+                    self.best_checkpoint = ckpt_path
+                    self.logger(f"[Segmentation] Loaded MedSAM fine-tuned checkpoint: {ckpt_path}")
+                    return
+                except Exception:
+                    # Fall through to standard loading
+                    pass
             state = torch.load(ckpt_path, map_location=self.device)
             self.model.load_state_dict(state)
             self.best_checkpoint = ckpt_path
@@ -563,7 +612,7 @@ class SegmentationWorkflow:
     ) -> Dict[str, Any]:
         ensure_dir(output_root)
         metrics_by_video: Dict[str, Dict[str, float]] = {}
-        dataset_accum: Dict[str, List[float]] = {"dice": [], "iou": [], "centroid": []}
+        dataset_accum: Dict[str, List[float]] = {"dice": [], "iou": [], "centroid": [], "fps": []}
         for video_path, predictions in video_predictions.items():
             gt = None
             if gt_annotations and video_path in gt_annotations:
@@ -576,6 +625,11 @@ class SegmentationWorkflow:
                 if not values:
                     continue
                 dataset_accum.setdefault(key, []).extend(values)
+            if "fps" in metrics:
+                try:
+                    dataset_accum.setdefault("fps", []).append(float(metrics["fps"]))
+                except Exception:
+                    pass
         summary = summarise_metrics(dataset_accum)
         return {"summary": summary, "videos": metrics_by_video}
 
@@ -592,6 +646,12 @@ class SegmentationWorkflow:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video for segmentation inference: {video_path}")
+        model_to_restore = getattr(self, "model", None)
+        restore_training_state: Optional[bool] = None
+        if not self.using_auto_mask and model_to_restore is not None:
+            if hasattr(model_to_restore, "eval") and hasattr(model_to_restore, "train"):
+                restore_training_state = bool(getattr(model_to_restore, "training", False))
+                model_to_restore.eval()
         gt_by_frame: Dict[int, FramePrediction] = {}
         if gt_annotation is not None:
             gt_samples = attach_ground_truth_segmentation(gt_annotation, self.dataset_root)
@@ -600,99 +660,129 @@ class SegmentationWorkflow:
         mask_files: Dict[int, str] = {}
         total_infer_time = 0.0
         frame_counter = 0
-        for pred in predictions:
-            frame_idx = int(pred.frame_index)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            bbox = expand_bbox(pred.bbox, self.cfg.padding_inference, frame.shape[:2])
-            roi = crop_with_bbox(frame, bbox)
-            if roi.size == 0:
-                continue
+        try:
+            for pred in predictions:
+                frame_idx = int(pred.frame_index)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                bbox = expand_bbox(pred.bbox, self.cfg.padding_inference, frame.shape[:2])
+                roi = crop_with_bbox(frame, bbox)
+                if roi.size == 0:
+                    continue
+                if self.using_medsam and self.model is not None and hasattr(self.model, "set_prompts"):
+                    prompt_box = self._project_bbox_to_roi(pred.bbox, bbox, roi.shape[:2])
+                    if prompt_box is not None:
+                        box_flat = prompt_box.reshape(-1, 4)[0]
+                        cx = float((box_flat[0] + box_flat[2]) * 0.5)
+                        cy = float((box_flat[1] + box_flat[3]) * 0.5)
+                        self.model.set_prompts([
+                            {
+                                "box": prompt_box,
+                                "point_coords": [[cx, cy]],
+                                "point_labels": [1],
+                            }
+                        ])
+                    else:
+                        roi_h, roi_w = roi.shape[:2]
+                        if roi_h > 0 and roi_w > 0:
+                            cx = float(max(0.0, min(roi_w - 1.0, roi_w / 2.0)))
+                            cy = float(max(0.0, min(roi_h - 1.0, roi_h / 2.0)))
+                            self.model.set_prompts([
+                                {
+                                    "point_coords": [[cx, cy]],
+                                    "point_labels": [1],
+                                }
+                            ])
+                        else:
+                            self.model.set_prompts(None)
 
-            if self.using_auto_mask:
-                start_time = time.perf_counter()
-                auto_full = self._auto_mask_generate_full(frame, bbox)
-                infer_elapsed = time.perf_counter() - start_time
-                total_infer_time += infer_elapsed
-                frame_counter += 1
-                if auto_full is None:
-                    if not getattr(self, "_auto_mask_warning_emitted", False):
-                        self.logger("[Segmentation] Auto-mask generation failed for a frame; falling back to empty mask.")
-                        self._auto_mask_warning_emitted = True
-                    auto_full = np.zeros(frame.shape[:2], dtype=np.uint8)
-                mask_roi = crop_with_bbox(auto_full, bbox)
-                if mask_roi.size == 0:
-                    mask_roi = np.zeros(
-                        (
-                            int(max(1, round(bbox.h))),
-                            int(max(1, round(bbox.w))),
-                        ),
-                        dtype=np.uint8,
-                    )
+                if self.using_auto_mask:
+                    start_time = time.perf_counter()
+                    auto_full = self._auto_mask_generate_full(frame, bbox)
+                    infer_elapsed = time.perf_counter() - start_time
+                    total_infer_time += infer_elapsed
+                    frame_counter += 1
+                    if auto_full is None:
+                        if not getattr(self, "_auto_mask_warning_emitted", False):
+                            self.logger("[Segmentation] Auto-mask generation failed for a frame; falling back to empty mask.")
+                            self._auto_mask_warning_emitted = True
+                        auto_full = np.zeros(frame.shape[:2], dtype=np.uint8)
+                    mask_roi = crop_with_bbox(auto_full, bbox)
+                    if mask_roi.size == 0:
+                        mask_roi = np.zeros(
+                            (
+                                int(max(1, round(bbox.h))),
+                                int(max(1, round(bbox.w))),
+                            ),
+                            dtype=np.uint8,
+                        )
+                    else:
+                        if mask_roi.dtype != np.uint8:
+                            mask_roi = (mask_roi > 0).astype(np.uint8) * 255
+                    mask_roi = keep_largest_component(mask_roi)
+                    mask_roi = fill_holes(mask_roi)
+                    full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
                 else:
-                    if mask_roi.dtype != np.uint8:
-                        mask_roi = (mask_roi > 0).astype(np.uint8) * 255
-                mask_roi = keep_largest_component(mask_roi)
-                mask_roi = fill_holes(mask_roi)
-                full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
-            else:
-                if roi.ndim == 2:
-                    roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
-                orig_h, orig_w = roi.shape[:2]
-                if self.input_size:
-                    roi_resized = cv2.resize(
-                        roi,
-                        (self.input_size[1], self.input_size[0]),
-                        interpolation=cv2.INTER_LINEAR,
+                    if roi.ndim == 2:
+                        roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+                    orig_h, orig_w = roi.shape[:2]
+                    if self.input_size:
+                        roi_resized = cv2.resize(
+                            roi,
+                            (self.input_size[1], self.input_size[0]),
+                            interpolation=cv2.INTER_LINEAR,
+                        )
+                    else:
+                        roi_resized = roi
+                    roi_tensor = (
+                        torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
+                        .permute(2, 0, 1)
+                        .unsqueeze(0)
+                        .to(self.device)
                     )
-                else:
-                    roi_resized = roi
-                roi_tensor = (
-                    torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                    .to(self.device)
+                    start_time = time.perf_counter()
+                    with torch.no_grad():
+                        logits = self.model(roi_tensor)
+                        probs = torch.sigmoid(logits)
+                    infer_elapsed = time.perf_counter() - start_time
+                    total_infer_time += infer_elapsed
+                    frame_counter += 1
+                    mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
+                    mask_roi = keep_largest_component(mask_roi)
+                    mask_roi = fill_holes(mask_roi)
+                    if self.input_size and (orig_h, orig_w) != self.input_size:
+                        mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                    mask_roi = keep_largest_component(mask_roi)
+                    mask_roi = fill_holes(mask_roi)
+                    full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
+                stats = compute_mask_stats(full_mask)
+                centroid_err = None
+                if frame_idx in gt_by_frame:
+                    gt_entry = gt_by_frame[frame_idx]
+                    gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
+                    if gt_mask is not None:
+                        dice = dice_coefficient(full_mask, gt_mask)
+                        iou = intersection_over_union(full_mask, gt_mask)
+                        accum["dice"].append(dice)
+                        accum["iou"].append(iou)
+                        centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
+                        if centroid_err is not None:
+                            accum["centroid"].append(centroid_err)
+                mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
+                cv2.imwrite(mask_filename, full_mask)
+                mask_files[frame_idx] = mask_filename
+                pred.segmentation = SegmentationData(
+                    mask_path=mask_filename,
+                    stats=stats,
+                    roi_bbox=bbox.as_tuple(),
+                    centroid_error_px=centroid_err,
                 )
-                start_time = time.perf_counter()
-                with torch.no_grad():
-                    logits = self.model(roi_tensor)
-                    probs = torch.sigmoid(logits)
-                infer_elapsed = time.perf_counter() - start_time
-                total_infer_time += infer_elapsed
-                frame_counter += 1
-                mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
-                mask_roi = keep_largest_component(mask_roi)
-                mask_roi = fill_holes(mask_roi)
-                if self.input_size and (orig_h, orig_w) != self.input_size:
-                    mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-                mask_roi = keep_largest_component(mask_roi)
-                mask_roi = fill_holes(mask_roi)
-                full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
-            stats = compute_mask_stats(full_mask)
-            centroid_err = None
-            if frame_idx in gt_by_frame:
-                gt_entry = gt_by_frame[frame_idx]
-                gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
-                if gt_mask is not None:
-                    dice = dice_coefficient(full_mask, gt_mask)
-                    iou = intersection_over_union(full_mask, gt_mask)
-                    accum["dice"].append(dice)
-                    accum["iou"].append(iou)
-                    centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
-                    if centroid_err is not None:
-                        accum["centroid"].append(centroid_err)
-            mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
-            cv2.imwrite(mask_filename, full_mask)
-            mask_files[frame_idx] = mask_filename
-            pred.segmentation = SegmentationData(
-                mask_path=mask_filename,
-                stats=stats,
-                roi_bbox=bbox.as_tuple(),
-                centroid_error_px=centroid_err,
-            )
-        cap.release()
+        finally:
+            cap.release()
+            if restore_training_state is not None and model_to_restore is not None:
+                model_to_restore.train(restore_training_state)
         if mask_files:
             self._render_segmentation_visualizations(
                 video_path,
@@ -847,6 +937,27 @@ class SegmentationWorkflow:
         if roi.w <= 1 or roi.h <= 1:
             return BoundingBox(0.0, 0.0, float(img_w), float(img_h))
         return roi
+
+    @staticmethod
+    def _project_bbox_to_roi(
+        original_bbox: Tuple[float, float, float, float],
+        roi_bbox: BoundingBox,
+        roi_shape: Tuple[int, int],
+    ) -> Optional[np.ndarray]:
+        roi_h, roi_w = roi_shape
+        if roi_h <= 1 or roi_w <= 1:
+            return None
+        x0 = float(original_bbox[0] - roi_bbox.x)
+        y0 = float(original_bbox[1] - roi_bbox.y)
+        x1 = x0 + float(original_bbox[2])
+        y1 = y0 + float(original_bbox[3])
+        x0 = max(0.0, min(x0, roi_w - 1.0))
+        y0 = max(0.0, min(y0, roi_h - 1.0))
+        x1 = max(0.0, min(x1, roi_w - 1.0))
+        y1 = max(0.0, min(y1, roi_h - 1.0))
+        if x1 - x0 < 1.0 or y1 - y0 < 1.0:
+            return None
+        return np.array([[x0, y0, x1, y1]], dtype=np.float32)
 
     @staticmethod
     def _to_binary_mask(mask: Optional[np.ndarray]) -> np.ndarray:
@@ -1079,7 +1190,10 @@ class SegmentationWorkflow:
             return None
         if os.path.isabs(candidate):
             return candidate
-        normalized = candidate.replace("\\", "/").lstrip("./")
+        normalized = candidate.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = os.path.normpath(normalized)
         search_paths: List[str] = []
 
         def _add_candidate(base: Optional[str], rel: str) -> None:

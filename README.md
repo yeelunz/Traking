@@ -44,6 +44,37 @@ Notes on trackers:
 - `model.name: "unet"`／`"unetpp"`：使用 `segmentation_models_pytorch`，支援 `encoder_name`、`encoder_weights` 等參數，可進行訓練。
 - `model.name: "torchvision_fcn_resnet50"`：採用 torchvision 官方 FCN，屬推論專用 baseline。
 - `model.name: "auto_mask"`（**新增**）：整合 `segmentation_annotator.auto_mask` 的弱監督遮罩流程（GrabCut + MGAC + 導向濾波），直接在 tracker bbox 周圍生成遮罩。此模式僅支援推論，框架會自動關閉訓練並沿用「最大連通元件 + 補洞」後處理，最終遮罩仍限制在 ROI 內。可透過 `model.params` 調整 `margin`、`num_iter`、`canny_low`／`canny_high`、`guided_radius`、`guided_eps` 等參數；若環境缺少 scikit-image，會自動退回無 MGAC 的變體。
+- `model.name: "medsam"`：整合 [MedSAM](https://github.com/bowang-lab/MedSAM) / SAM 的推論與微調流程。此模式使用 segment-anything 套件，需要先安裝（已列入 `requirements.txt`）。請到官方 Google Drive 下載 `medsam_vit_b.pth`（[下載連結](https://drive.google.com/drive/folders/1ETWmi4AiniJeWOt6HAsYgTjYv_fkgzoN)）後放置到 `models/seg/medsam/medsam_vit_b.pth`（可自訂路徑）。
+
+  **基本推論模式**（預設，`train: false`）：
+  ```yaml
+  segmentation:
+    model:
+      name: medsam
+      params:
+        checkpoint: models/seg/medsam/medsam_vit_b.pth
+        model_type: vit_b           # 與官方 checkpoint 對應
+        use_box_prompt: true        # 使用追蹤 bbox 作為 SAM box prompt
+        multimask_output: false     # 輸出單一遮罩
+    train: false
+  ```
+
+  **微調模式**（`train: true`）：啟用後會凍結 image encoder 與 prompt encoder，只對 **mask decoder** 進行訓練：
+  ```yaml
+  segmentation:
+    model:
+      name: medsam
+      params:
+        checkpoint: models/seg/medsam/medsam_vit_b.pth
+        model_type: vit_b
+    train: true                     # 啟用微調
+    epochs: 10                       # 訓練輪數
+    lr: 0.0001                       # 學習率（建議較小）
+    batch_size: 4                    # 依 GPU 記憶體調整
+    target_size: [256, 256]          # ROI 裁切大小
+  ```
+
+  微調完成後權重會儲存至 `results/segmentation/segmentation_best.pt`（或 `_last.pt`），包含 mask decoder 的 state_dict，後續推論可透過 `inference_checkpoint` 指向此檔案加載。
 
 典型設定：
 

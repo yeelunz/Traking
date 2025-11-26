@@ -2,6 +2,8 @@ from __future__ import annotations
 import os
 import json
 import time
+from datetime import datetime
+from contextlib import contextmanager
 from typing import Dict, Any, List, Callable, Optional, Sequence
 import random
 try:
@@ -143,22 +145,150 @@ class PipelineRunner:
         if train_count == 0:
             self._log("[Train] No annotated training videos detected. Training steps will be skipped.")
 
+        def _rel_path(path: str) -> str:
+            try:
+                base_root = self.dataset_root if isinstance(self.dataset_root, str) and self.dataset_root else None
+                return os.path.relpath(path, base_root) if base_root else path
+            except Exception:
+                return path
+
+        def _dataset_preview(dataset, limit: int = 5) -> List[str]:  # type: ignore[override]
+            names: List[str] = []
+            try:
+                total = len(dataset)  # type: ignore[arg-type]
+            except Exception:
+                total = 0
+            for idx in range(min(total, int(limit))):
+                try:
+                    item = dataset[idx]
+                    if isinstance(item, dict):
+                        vp = item.get("video_path")
+                    else:
+                        vp = getattr(item, "video_path", None)
+                    if vp:
+                        names.append(_rel_path(vp))
+                except Exception:
+                    continue
+            return names
+
+        dataset_info = {
+            "root": self.dataset_root,
+            "total_videos": total_videos,
+            "annotated_videos": annotated_videos,
+            "missing_annotations": len(missing_ann),
+            "missing_preview": [_rel_path(p) for p in missing_ann[:5]],
+            "split": {
+                "method": method,
+                "ratios": ratios,
+                "k_fold": k_fold,
+            },
+            "train_videos": train_count,
+            "test_videos": test_count,
+            "train_preview": _dataset_preview(train_ds),
+            "test_preview": _dataset_preview(test_ds),
+        }
+
         # orchestrate experiments
         for exp in self.cfg.get("experiments", []):
             exp_name = exp.get("name", "exp")
             out_dir = self._timestamp_dir(exp_name)
-            # 允許在 config.output.skip_pip_freeze = true 時跳過 pip freeze 以避免卡住
+            experiment_start = time.perf_counter()
             out_cfg = self.cfg.get("output", {}) or {}
             skip_freeze = bool(out_cfg.get("skip_pip_freeze", False))
-            meta = {"config": exp, "seed": self.seed, "env": capture_env(skip_freeze=skip_freeze)}
-            with open(os.path.join(out_dir, "metadata.json"), "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            pipeline_summary: List[Dict[str, Any]] = []
+            for step in exp.get("pipeline", []):
+                if not isinstance(step, dict):
+                    continue
+                pipeline_summary.append(
+                    {
+                        "type": step.get("type"),
+                        "name": step.get("name"),
+                        "params": step.get("params", {}),
+                    }
+                )
+            stage_metrics_collector: Dict[str, Any] = {}
+            stage_records: List[Dict[str, Any]] = []
+            try:
+                rel_out = os.path.relpath(out_dir, self.results_root)
+            except Exception:
+                rel_out = None
+            meta_path = os.path.join(out_dir, "metadata.json")
+            meta: Dict[str, Any] = {
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "seed": self.seed,
+                "dataset": dataset_info,
+                "config": exp,
+                "env": capture_env(skip_freeze=skip_freeze),
+                "experiment": {
+                    "name": exp_name,
+                    "output_dir": out_dir,
+                    "results_root": self.results_root,
+                    "relative_output": rel_out,
+                    "pipeline": pipeline_summary,
+                    "k_fold": k_fold,
+                    "split_method": method,
+                    "ratios": ratios,
+                },
+                "metrics": {},
+                "artifacts": {},
+                "stages": stage_records,
+                "runtime": {
+                    "started_at": datetime.utcnow().isoformat() + "Z",
+                },
+            }
+
+            def _dump_meta() -> None:
+                meta["runtime"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+
+            def _record_stage_skip(name: str, kind: str, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
+                entry: Dict[str, Any] = {
+                    "name": name,
+                    "kind": kind,
+                    "status": "skipped",
+                    "reason": reason,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                if extra:
+                    entry.update(extra)
+                stage_records.append(entry)
+                _dump_meta()
+
+            @contextmanager
+            def stage_scope(name: str, kind: str, info: Optional[Dict[str, Any]] = None):
+                entry: Dict[str, Any] = {
+                    "name": name,
+                    "kind": kind,
+                    "started_at": datetime.utcnow().isoformat() + "Z",
+                }
+                if info:
+                    entry.update(info)
+                stage_records.append(entry)
+                _dump_meta()
+                stage_start = time.perf_counter()
+                try:
+                    yield entry
+                    entry.setdefault("status", "completed")
+                except Exception as exc:
+                    entry["status"] = "failed"
+                    entry["error"] = {"type": type(exc).__name__, "message": str(exc)}
+                    _dump_meta()
+                    raise
+                finally:
+                    entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
+                    entry["duration_sec"] = max(0.0, time.perf_counter() - stage_start)
+                    _dump_meta()
+
+            _dump_meta()
             # init log file for this experiment
             logs_dir = os.path.join(out_dir, "logs")
             os.makedirs(logs_dir, exist_ok=True)
             self._log_file = os.path.join(logs_dir, "run.log")
             self._log(f"Started experiment: {exp_name}")
             self._log(f"Experiment folder: {out_dir}")
+            meta.setdefault("artifacts", {})["run_log"] = self._log_file
+            _dump_meta()
 
             test_root = os.path.join(out_dir, "test")
             detection_root = os.path.join(test_root, "detection")
@@ -246,6 +376,7 @@ class PipelineRunner:
             evaluator = eval_cls() if eval_cls else None
 
             def run_on_dataset(dataset, out_dir_base: str, models_list=None, phase: str = 'eval'):
+                nonlocal stage_metrics_collector
                 # initialize containers and ensure per-model predictions files are always created
                 predictions_all = {}
                 # aggregate across entire dataset (all videos) per model
@@ -540,6 +671,11 @@ class PipelineRunner:
                     with open(summary_path, "w", encoding="utf-8") as f:
                         json.dump(summary_out, f, ensure_ascii=False, indent=2)
                     self._log(f"Dataset metrics summary saved: {summary_path}", to_console=(tqdm is None))
+                    stage_metrics_collector[phase] = {
+                        "summary": summary_out,
+                        "summary_path": summary_path,
+                        "metrics_dir": met_dir,
+                    }
                 pred_dir = os.path.join(out_dir_base, "predictions")
                 os.makedirs(pred_dir, exist_ok=True)
                 for display_name, preds in predictions_all.items():
@@ -558,146 +694,185 @@ class PipelineRunner:
                         json.dump(rows, f, ensure_ascii=False, indent=2)
                     self._log(f"Predictions saved: {outp}", to_console=(tqdm is None))
 
+                if phase in stage_metrics_collector:
+                    stage_metrics_collector[phase]["predictions_dir"] = pred_dir
+                else:
+                    stage_metrics_collector[phase] = {"predictions_dir": pred_dir}
+
                 return per_model_video_predictions
 
             # k-fold within training for validation
             if k_fold > 1 and len(train_ds) > 0:
-                self._log(f"Running {k_fold}-Fold validation on training set…")
-                # build folds from train_ds items
-                train_vids = [train_ds[i]["video_path"] for i in range(len(train_ds))]
-                # reproducible shuffle
-                import random
-                rng = random.Random(self.seed)
-                vids = train_vids[:]
-                rng.shuffle(vids)
-                fold_size = max(1, len(vids) // k_fold)
-                fold_summaries = []
-                fold_iter = range(k_fold)
-                if tqdm is not None:
-                    fold_iter = tqdm(range(k_fold), total=k_fold, desc="K-Fold", unit="fold")
-                for fi in fold_iter:
-                    self._progress('kfold_fold', fi+1, k_fold, {'exp': exp_name})
-                    val_vids = vids[fi * fold_size:(fi + 1) * fold_size]
-                    trn_vids = [v for v in vids if v not in val_vids]
-                    val_ds = SimpleDataset(val_vids, dm.ann_by_video)
-                    trn_ds = SimpleDataset(trn_vids, dm.ann_by_video)
-                    fold_dir = os.path.join(train_root, "detection", f"fold_{fi+1}")
-                    os.makedirs(fold_dir, exist_ok=True)
-                    # fresh models per fold
-                    fold_models = build_models()
-                    # optional training step
-                    for model_name, model in fold_models:
-                        if not hasattr(model, "train"):
-                            continue
-                        if len(trn_ds) == 0:
+                with stage_scope(
+                    "detector_kfold",
+                    "detection",
+                    {"folds": k_fold, "train_videos": len(train_ds)},
+                ) as stage_entry:
+                    self._log(f"Running {k_fold}-Fold validation on training set…")
+                    train_vids = [train_ds[i]["video_path"] for i in range(len(train_ds))]
+                    rng = random.Random(self.seed)
+                    vids = train_vids[:]
+                    rng.shuffle(vids)
+                    fold_size = max(1, len(vids) // k_fold)
+                    fold_summaries = []
+                    fold_iter = range(k_fold)
+                    if tqdm is not None:
+                        fold_iter = tqdm(range(k_fold), total=k_fold, desc="K-Fold", unit="fold")
+                    for fi in fold_iter:
+                        phase_key = f"kfold-{fi+1}"
+                        self._progress('kfold_fold', fi + 1, k_fold, {'exp': exp_name})
+                        val_vids = vids[fi * fold_size:(fi + 1) * fold_size]
+                        trn_vids = [v for v in vids if v not in val_vids]
+                        val_ds = SimpleDataset(val_vids, dm.ann_by_video)
+                        trn_ds = SimpleDataset(trn_vids, dm.ann_by_video)
+                        fold_dir = os.path.join(train_root, "detection", f"fold_{fi+1}")
+                        os.makedirs(fold_dir, exist_ok=True)
+                        fold_models = build_models()
+                        for model_name, model in fold_models:
+                            if not hasattr(model, "train"):
+                                continue
+                            if len(trn_ds) == 0:
+                                self._log(
+                                    f"[Train] Skipped (no annotated data) | model={model_name} | fold={fi+1}/{k_fold}"
+                                )
+                                continue
+                            allow_train = getattr(model, "train_enabled", True)
+                            should_train_cb = getattr(model, "should_train", None)
+                            if callable(should_train_cb):
+                                try:
+                                    allow_train = bool(should_train_cb(trn_ds, val_ds))
+                                except Exception:
+                                    pass
+                            if not allow_train:
+                                self._log(
+                                    f"[Train] Skipped (disabled) | model={model_name} | fold={fi+1}/{k_fold}",
+                                    to_console=(tqdm is None),
+                                )
+                                continue
                             self._log(
-                                f"[Train] Skipped (no annotated data) | model={model_name} | fold={fi+1}/{k_fold}"
+                                f"[Train] Fold {fi+1}/{k_fold} | model={model_name} | train_videos={len(trn_ds)} val_videos={len(val_ds)}"
                             )
-                            continue
-                        allow_train = getattr(model, "train_enabled", True)
-                        should_train_cb = getattr(model, "should_train", None)
-                        if callable(should_train_cb):
                             try:
-                                allow_train = bool(should_train_cb(trn_ds, val_ds))
-                            except Exception:
-                                pass
-                        if not allow_train:
-                            self._log(
-                                f"[Train] Skipped (disabled) | model={model_name} | fold={fi+1}/{k_fold}",
-                                to_console=(tqdm is None),
-                            )
-                            continue
-                        self._log(
-                            f"[Train] Fold {fi+1}/{k_fold} | model={model_name} | train_videos={len(trn_ds)} val_videos={len(val_ds)}"
-                        )
+                                ret = model.train(
+                                    trn_ds,
+                                    val_ds,
+                                    seed=self.seed,
+                                    output_dir=os.path.join(fold_dir, "train"),
+                                )
+                                if isinstance(ret, dict):
+                                    self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
+                            except Exception as e:
+                                self._log(
+                                    f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}"
+                                )
+                        _ = run_on_dataset(val_ds, fold_dir, models_list=fold_models, phase=phase_key)
                         try:
-                            ret = model.train(
-                                trn_ds,
-                                val_ds,
-                                seed=self.seed,
-                                output_dir=os.path.join(fold_dir, "train"),
+                            with open(os.path.join(fold_dir, "metrics", "summary.json"), "r", encoding="utf-8") as f:
+                                fold_summaries.append(json.load(f))
+                        except Exception:
+                            pass
+                    agg = {}
+                    for sm in fold_summaries:
+                        for model_name, m in sm.items():
+                            agg.setdefault(
+                                model_name,
+                                {"iou_mean": [], "ce_mean": [], "success_rate_50": [], "success_rate_75": [], "success_auc": [], "fps": [], "drift_rate": []},
                             )
-                            if isinstance(ret, dict):
-                                self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
-                        except Exception as e:
-                            self._log(
-                                f"[ERROR] Training failed | model={model_name} fold={fi+1} error={e}\n{_tb.format_exc()}"
-                            )
-                    _ = run_on_dataset(val_ds, fold_dir, models_list=fold_models)
+                            agg[model_name]["iou_mean"].append(m.get("iou_mean", 0.0))
+                            agg[model_name]["ce_mean"].append(m.get("ce_mean", 0.0))
+                            if "success_rate_50" in m:
+                                agg[model_name]["success_rate_50"].append(m.get("success_rate_50", 0.0))
+                            elif "mAP_50" in m:
+                                agg[model_name]["success_rate_50"].append(m.get("mAP_50", 0.0))
+                            if "success_rate_75" in m:
+                                agg[model_name]["success_rate_75"].append(m.get("success_rate_75", 0.0))
+                            elif "mAP_75" in m:
+                                agg[model_name]["success_rate_75"].append(m.get("mAP_75", 0.0))
+                            if "success_auc" in m:
+                                agg[model_name]["success_auc"].append(m.get("success_auc", 0.0))
+                            if "fps" in m:
+                                agg[model_name]["fps"].append(m.get("fps", 0.0))
+                            if "drift_rate" in m:
+                                agg[model_name]["drift_rate"].append(m.get("drift_rate", 0.0))
+                    comp_dir = os.path.join(out_dir, "comparison")
+                    os.makedirs(comp_dir, exist_ok=True)
+                    agg_out = {}
+                    for model_name, vals in agg.items():
+                        def mean_std(arr):
+                            if not arr:
+                                return (0.0, 0.0)
+                            mu = sum(arr) / len(arr)
+                            sd = (sum((x - mu) ** 2 for x in arr) / len(arr)) ** 0.5
+                            return (mu, sd)
+
+                        i_mu, i_sd = mean_std(vals["iou_mean"])
+                        c_mu, c_sd = mean_std(vals["ce_mean"])
+                        agg_out[model_name] = {
+                            "iou_mean_mean": i_mu,
+                            "iou_mean_std": i_sd,
+                            "ce_mean_mean": c_mu,
+                            "ce_mean_std": c_sd,
+                            "success_rate_50_mean": mean_std(vals.get("success_rate_50", []))[0],
+                            "success_rate_50_std": mean_std(vals.get("success_rate_50", []))[1],
+                            "success_rate_75_mean": mean_std(vals.get("success_rate_75", []))[0],
+                            "success_rate_75_std": mean_std(vals.get("success_rate_75", []))[1],
+                            "success_auc_mean": mean_std(vals.get("success_auc", []))[0],
+                            "success_auc_std": mean_std(vals.get("success_auc", []))[1],
+                            "fps_mean": mean_std(vals.get("fps", []))[0],
+                            "fps_std": mean_std(vals.get("fps", []))[1],
+                            "drift_rate_mean": mean_std(vals.get("drift_rate", []))[0],
+                            "drift_rate_std": mean_std(vals.get("drift_rate", []))[1],
+                        }
+                    summary_file = os.path.join(comp_dir, "kfold_summary.json")
+                    with open(summary_file, "w", encoding="utf-8") as f:
+                        json.dump(agg_out, f, ensure_ascii=False, indent=2)
+                    stage_entry["aggregated_metrics"] = agg_out
+                    per_fold_details = {}
+                    for fi in range(k_fold):
+                        key = f"kfold-{fi+1}"
+                        info = stage_metrics_collector.get(key)
+                        if info:
+                            per_fold_details[key] = info
+                    if per_fold_details:
+                        stage_entry["per_fold_results"] = per_fold_details
+                    stage_entry.setdefault("artifacts", {})["summary"] = summary_file
+                    meta.setdefault("artifacts", {})["kfold_summary"] = summary_file
                     try:
-                        with open(os.path.join(fold_dir, "metrics", "summary.json"), "r", encoding="utf-8") as f:
-                            fold_summaries.append(json.load(f))
+                        import matplotlib.pyplot as plt  # type: ignore
+
+                        labels = list(agg_out.keys())
+                        i_means = [agg_out[k]["iou_mean_mean"] for k in labels]
+                        i_stds = [agg_out[k]["iou_mean_std"] for k in labels]
+                        plt.figure()
+                        plt.bar(labels, i_means, yerr=i_stds, capsize=5)
+                        plt.ylabel("IoU mean (±std)")
+                        plt.title("K-Fold Aggregate IoU")
+                        plt.xticks(rotation=30, ha='right')
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(comp_dir, "kfold_iou_bar.png"))
+                        plt.close()
+                        c_means = [agg_out[k]["ce_mean_mean"] for k in labels]
+                        c_stds = [agg_out[k]["ce_mean_std"] for k in labels]
+                        plt.figure()
+                        plt.bar(labels, c_means, yerr=c_stds, capsize=5)
+                        plt.ylabel("Center Error (px) mean (±std)")
+                        plt.title("K-Fold Aggregate Center Error")
+                        plt.xticks(rotation=30, ha='right')
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(comp_dir, "kfold_ce_bar.png"))
+                        plt.close()
                     except Exception:
                         pass
-                # aggregate stats across folds
-                agg = {}
-                for sm in fold_summaries:
-                    for model_name, m in sm.items():
-                        agg.setdefault(model_name, {"iou_mean": [], "ce_mean": [], "success_rate_50": [], "success_rate_75": [], "success_auc": [], "fps": [], "drift_rate": []})
-                        agg[model_name]["iou_mean"].append(m.get("iou_mean", 0.0))
-                        agg[model_name]["ce_mean"].append(m.get("ce_mean", 0.0))
-                        if "success_rate_50" in m:
-                            agg[model_name]["success_rate_50"].append(m.get("success_rate_50", 0.0))
-                        elif "mAP_50" in m:
-                            agg[model_name]["success_rate_50"].append(m.get("mAP_50", 0.0))
-                        if "success_rate_75" in m:
-                            agg[model_name]["success_rate_75"].append(m.get("success_rate_75", 0.0))
-                        elif "mAP_75" in m:
-                            agg[model_name]["success_rate_75"].append(m.get("mAP_75", 0.0))
-                        if "success_auc" in m:
-                            agg[model_name]["success_auc"].append(m.get("success_auc", 0.0))
-                        if "fps" in m:
-                            agg[model_name]["fps"].append(m.get("fps", 0.0))
-                        if "drift_rate" in m:
-                            agg[model_name]["drift_rate"].append(m.get("drift_rate", 0.0))
-                comp_dir = os.path.join(out_dir, "comparison")
-                os.makedirs(comp_dir, exist_ok=True)
-                agg_out = {}
-                for model_name, vals in agg.items():
-                    def mean_std(arr):
-                        if not arr:
-                            return (0.0, 0.0)
-                        mu = sum(arr) / len(arr)
-                        sd = (sum((x - mu) ** 2 for x in arr) / len(arr)) ** 0.5
-                        return (mu, sd)
-                    i_mu, i_sd = mean_std(vals["iou_mean"])
-                    c_mu, c_sd = mean_std(vals["ce_mean"])
-                    agg_out[model_name] = {
-                        "iou_mean_mean": i_mu, "iou_mean_std": i_sd,
-                        "ce_mean_mean": c_mu, "ce_mean_std": c_sd,
-                        "success_rate_50_mean": mean_std(vals.get("success_rate_50", []))[0],
-                        "success_rate_50_std": mean_std(vals.get("success_rate_50", []))[1],
-                        "success_rate_75_mean": mean_std(vals.get("success_rate_75", []))[0],
-                        "success_rate_75_std": mean_std(vals.get("success_rate_75", []))[1],
-                        "success_auc_mean": mean_std(vals.get("success_auc", []))[0],
-                        "success_auc_std": mean_std(vals.get("success_auc", []))[1],
-                        "fps_mean": mean_std(vals.get("fps", []))[0],
-                        "fps_std": mean_std(vals.get("fps", []))[1],
-                        "drift_rate_mean": mean_std(vals.get("drift_rate", []))[0],
-                        "drift_rate_std": mean_std(vals.get("drift_rate", []))[1],
-                    }
-                with open(os.path.join(comp_dir, "kfold_summary.json"), "w", encoding="utf-8") as f:
-                    json.dump(agg_out, f, ensure_ascii=False, indent=2)
-                try:
-                    import matplotlib.pyplot as plt  # type: ignore
-                    labels = list(agg_out.keys())
-                    # IoU bar
-                    i_means = [agg_out[k]["iou_mean_mean"] for k in labels]
-                    i_stds = [agg_out[k]["iou_mean_std"] for k in labels]
-                    plt.figure(); plt.bar(labels, i_means, yerr=i_stds, capsize=5)
-                    plt.ylabel("IoU mean (±std)"); plt.title("K-Fold Aggregate IoU")
-                    plt.xticks(rotation=30, ha='right'); plt.tight_layout()
-                    plt.savefig(os.path.join(comp_dir, "kfold_iou_bar.png")); plt.close()
-                    # CE bar
-                    c_means = [agg_out[k]["ce_mean_mean"] for k in labels]
-                    c_stds = [agg_out[k]["ce_mean_std"] for k in labels]
-                    plt.figure(); plt.bar(labels, c_means, yerr=c_stds, capsize=5)
-                    plt.ylabel("Center Error (px) mean (±std)"); plt.title("K-Fold Aggregate Center Error")
-                    plt.xticks(rotation=30, ha='right'); plt.tight_layout()
-                    plt.savefig(os.path.join(comp_dir, "kfold_ce_bar.png")); plt.close()
-                except Exception:
-                    pass
-                self._log("K-Fold validation finished. Aggregates saved.", to_console=(tqdm is None))
+                    meta.setdefault("artifacts", {})["kfold_dir"] = comp_dir
+                    _dump_meta()
+                    self._log("K-Fold validation finished. Aggregates saved.", to_console=(tqdm is None))
+            elif k_fold > 1:
+                _record_stage_skip(
+                    "detector_kfold",
+                    "detection",
+                    "no annotated training videos available",
+                    {"folds": k_fold, "train_videos": len(train_ds)},
+                )
 
             # final training on full train and evaluate on test
             else:
@@ -707,45 +882,75 @@ class PipelineRunner:
             final_models = build_models()
             final_train_dir = os.path.join(train_root, "detection")
             os.makedirs(final_train_dir, exist_ok=True)
-            for model_name, model in final_models:
-                if not hasattr(model, "train"):
-                    continue
-                if len(train_ds) == 0:
-                    self._log(
-                        f"[Train] Skipped (no annotated data) | model={model_name}",
-                        to_console=(tqdm is None),
-                    )
-                    continue
-                allow_train = getattr(model, "train_enabled", True)
-                should_train_cb = getattr(model, "should_train", None)
-                if callable(should_train_cb):
+
+            with stage_scope(
+                "detector_train_full",
+                "detection",
+                {"train_videos": len(train_ds), "output_dir": final_train_dir},
+            ) as stage_entry:
+                model_reports: List[Dict[str, Any]] = []
+                stage_entry["models"] = model_reports
+                for model_name, model in final_models:
+                    report: Dict[str, Any] = {"model": model_name, "train_videos": len(train_ds)}
+                    model_reports.append(report)
+                    if not hasattr(model, "train"):
+                        report["status"] = "unsupported"
+                        continue
+                    if len(train_ds) == 0:
+                        report["status"] = "skipped_no_data"
+                        self._log(
+                            f"[Train] Skipped (no annotated data) | model={model_name}",
+                            to_console=(tqdm is None),
+                        )
+                        continue
+                    allow_train = getattr(model, "train_enabled", True)
+                    should_train_cb = getattr(model, "should_train", None)
+                    if callable(should_train_cb):
+                        try:
+                            allow_train = bool(should_train_cb(train_ds, None))
+                        except Exception:
+                            pass
+                    if not allow_train:
+                        report["status"] = "skipped_disabled"
+                        self._log(
+                            f"[Train] Skipped (disabled) | model={model_name}",
+                            to_console=(tqdm is None),
+                        )
+                        continue
+                    self._log(f"[Train] Full train | model={model_name} | train_videos={len(train_ds)}")
                     try:
-                        allow_train = bool(should_train_cb(train_ds, None))
-                    except Exception:
-                        pass
-                if not allow_train:
-                    self._log(
-                        f"[Train] Skipped (disabled) | model={model_name}",
-                        to_console=(tqdm is None),
-                    )
-                    continue
-                self._log(f"[Train] Full train | model={model_name} | train_videos={len(train_ds)}")
-                try:
-                    ret = model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
-                    if isinstance(ret, dict):
-                        self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
-                        if ret.get("status") == "no_data":
-                            self._log(
-                                "[Warn] No training samples found (check that each video has a matching .json annotation next to it).",
-                                to_console=(tqdm is None),
-                            )
-                except Exception as e:
-                    self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
+                        ret = model.train(train_ds, None, seed=self.seed, output_dir=final_train_dir)
+                        report["status"] = "trained"
+                        if isinstance(ret, dict):
+                            report["result"] = ret
+                            self._log(f"[Train] Result: {ret}", to_console=(tqdm is None))
+                            if ret.get("status") == "no_data":
+                                self._log(
+                                    "[Warn] No training samples found (check that each video has a matching .json annotation next to it).",
+                                    to_console=(tqdm is None),
+                                )
+                    except Exception as e:
+                        report["status"] = "train_failed"
+                        report["error"] = {"type": type(e).__name__, "message": str(e)}
+                        self._log(f"[ERROR] Training failed | model={model_name} error={e}\n{_tb.format_exc()}")
+                _dump_meta()
             test_dir = os.path.join(out_dir, "test")
             os.makedirs(test_dir, exist_ok=True)
             detection_test_dir = os.path.join(test_dir, "detection")
             os.makedirs(detection_test_dir, exist_ok=True)
-            test_predictions = run_on_dataset(test_ds, detection_test_dir, models_list=final_models)
+            with stage_scope(
+                "detector_eval",
+                "detection",
+                {"dataset": "test", "output_dir": detection_test_dir},
+            ) as stage_entry:
+                test_predictions = run_on_dataset(test_ds, detection_test_dir, models_list=final_models, phase="test")
+                detection_metrics = stage_metrics_collector.get("test", {})
+                if detection_metrics:
+                    stage_entry["metrics"] = detection_metrics.get("summary")
+                    stage_entry.setdefault("artifacts", {})["summary_path"] = detection_metrics.get("summary_path")
+                    stage_entry.setdefault("artifacts", {})["metrics_dir"] = detection_metrics.get("metrics_dir")
+                    stage_entry.setdefault("artifacts", {})["predictions_dir"] = detection_metrics.get("predictions_dir")
+                _dump_meta()
 
             # segmentation stage (mandatory)
             seg_cfg = self.cfg.get("segmentation", {}) or {}
@@ -761,35 +966,65 @@ class PipelineRunner:
             val_ratio = seg_cfg.get("val_ratio", seg_workflow.cfg.val_ratio)
             train_enabled = bool(seg_workflow.cfg.train)
             inference_ckpt = getattr(seg_workflow, "inference_checkpoint", None)
+            seg_summary_path: Optional[str] = None
+
             if train_enabled:
                 if annotated_train_paths:
-                    train_targets = annotated_train_paths[:]
-                    val_videos: Optional[Sequence[str]] = None
-                    if isinstance(val_ratio, (int, float)) and float(val_ratio) > 0.0 and len(train_targets) > 1:
-                        vr = max(0.0, min(float(val_ratio), 0.9))
-                        val_count = max(1, int(len(train_targets) * vr))
-                        rng = random.Random(int(seg_seed))
-                        shuffled = train_targets[:]
-                        rng.shuffle(shuffled)
-                        val_videos = shuffled[:val_count]
-                        train_targets = shuffled[val_count:] or shuffled
-                    self._log(
-                        f"[Segmentation] Training model={seg_workflow.model_name} | train_videos={len(train_targets)}"
-                        + (f" val_videos={len(val_videos)}" if val_videos else "")
-                    )
-                    train_summary = seg_workflow.train(train_targets, val_videos, seed=int(seg_seed))
-                    if train_summary:
+                    with stage_scope(
+                        "segmentation_train",
+                        "segmentation",
+                        {
+                            "model": seg_workflow.model_name,
+                            "train_videos": len(annotated_train_paths),
+                            "seed": int(seg_seed),
+                        },
+                    ) as stage_entry:
+                        train_targets = annotated_train_paths[:]
+                        val_videos: Optional[Sequence[str]] = None
+                        if isinstance(val_ratio, (int, float)) and float(val_ratio) > 0.0 and len(train_targets) > 1:
+                            vr = max(0.0, min(float(val_ratio), 0.9))
+                            val_count = max(1, int(len(train_targets) * vr))
+                            rng = random.Random(int(seg_seed))
+                            shuffled = train_targets[:]
+                            rng.shuffle(shuffled)
+                            val_videos = shuffled[:val_count]
+                            train_targets = shuffled[val_count:] or shuffled
+                        stage_entry["train_targets"] = len(train_targets)
+                        stage_entry["val_videos"] = len(val_videos) if val_videos else 0
                         self._log(
-                            "[Segmentation] Training summary: "
-                            + ", ".join(f"{k}={v:.4f}" for k, v in train_summary.items()),
-                            to_console=(tqdm is None),
+                            f"[Segmentation] Training model={seg_workflow.model_name} | train_videos={len(train_targets)}"
+                            + (f" val_videos={len(val_videos)}" if val_videos else "")
                         )
-                    seg_workflow.load_checkpoint()
+                        train_summary = seg_workflow.train(train_targets, val_videos, seed=int(seg_seed))
+                        if train_summary:
+                            stage_entry["metrics"] = train_summary
+                            self._log(
+                                "[Segmentation] Training summary: "
+                                + ", ".join(f"{k}={v:.4f}" for k, v in train_summary.items()),
+                                to_console=(tqdm is None),
+                            )
+                        seg_workflow.load_checkpoint()
+                        best_ckpt = getattr(seg_workflow, "best_checkpoint", None)
+                        if best_ckpt:
+                            stage_entry.setdefault("artifacts", {})["best_checkpoint"] = best_ckpt
+                        _dump_meta()
                 else:
                     self._log("[Segmentation] Warning: no annotated training videos found; skipping training phase.")
+                    _record_stage_skip(
+                        "segmentation_train",
+                        "segmentation",
+                        "no annotated training videos",
+                        {"model": seg_workflow.model_name},
+                    )
                     seg_workflow.load_checkpoint(inference_ckpt)
             else:
                 self._log("[Segmentation] Training disabled via config; skipping training phase.")
+                _record_stage_skip(
+                    "segmentation_train",
+                    "segmentation",
+                    "disabled via config",
+                    {"model": seg_workflow.model_name},
+                )
                 seg_workflow.load_checkpoint(inference_ckpt)
             # Run inference only if we have predictions and a model object
             test_video_paths = sorted({vp for model_map in test_predictions.values() for vp in model_map.keys()})
@@ -798,48 +1033,98 @@ class PipelineRunner:
             seg_model_name = getattr(seg_workflow, "model_name", "segmentation_model")
             predictions_root = os.path.join(seg_results_root, "predictions", seg_model_name)
             os.makedirs(predictions_root, exist_ok=True)
-            for model_name, preds_by_video in test_predictions.items():
-                out_dir_model = os.path.join(predictions_root, model_name)
-                os.makedirs(out_dir_model, exist_ok=True)
-                metrics_payload = seg_workflow.predict_dataset(
-                    preds_by_video,
-                    out_dir_model,
-                    gt_annotations=test_annotations,
-                    viz_settings=seg_viz_cfg,
-                )
-                summary_metrics = metrics_payload.get("summary", {})
-                per_video_metrics = metrics_payload.get("videos", {})
-                if per_video_metrics:
-                    try:
-                        with open(os.path.join(out_dir_model, "metrics_per_video.json"), "w", encoding="utf-8") as f:
-                            json.dump(per_video_metrics, f, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
-                seg_metrics_by_model.setdefault(seg_model_name, {})[model_name] = summary_metrics
-                if summary_metrics:
-                    summary_text = ", ".join(f"{k}={v:.4f}" for k, v in summary_metrics.items())
-                else:
-                    summary_text = "no metrics"
-                self._log(
-                    f"[Segmentation] Summary metrics | seg_model={seg_model_name} det_model={model_name}: {summary_text}",
-                    to_console=(tqdm is None),
-                )
-            if seg_metrics_by_model:
-                summary_path = os.path.join(seg_results_root, "metrics_summary.json")
-                with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(seg_metrics_by_model, f, ensure_ascii=False, indent=2)
+            with stage_scope(
+                "segmentation_infer",
+                "segmentation",
+                {
+                    "model": seg_model_name,
+                    "detector_models": list(test_predictions.keys()),
+                    "predictions_root": predictions_root,
+                },
+            ) as stage_entry:
+                for model_name, preds_by_video in test_predictions.items():
+                    out_dir_model = os.path.join(predictions_root, model_name)
+                    os.makedirs(out_dir_model, exist_ok=True)
+                    metrics_payload = seg_workflow.predict_dataset(
+                        preds_by_video,
+                        out_dir_model,
+                        gt_annotations=test_annotations,
+                        viz_settings=seg_viz_cfg,
+                    )
+                    summary_metrics = metrics_payload.get("summary", {})
+                    per_video_metrics = metrics_payload.get("videos", {})
+                    if per_video_metrics:
+                        try:
+                            with open(os.path.join(out_dir_model, "metrics_per_video.json"), "w", encoding="utf-8") as f:
+                                json.dump(per_video_metrics, f, ensure_ascii=False, indent=2)
+                        except Exception:
+                            pass
+                    seg_metrics_by_model.setdefault(seg_model_name, {})[model_name] = summary_metrics
+                    if summary_metrics:
+                        summary_text = ", ".join(f"{k}={v:.4f}" for k, v in summary_metrics.items())
+                    else:
+                        summary_text = "no metrics"
+                    self._log(
+                        f"[Segmentation] Summary metrics | seg_model={seg_model_name} det_model={model_name}: {summary_text}",
+                        to_console=(tqdm is None),
+                    )
+                if seg_metrics_by_model:
+                    seg_summary_path = os.path.join(seg_results_root, "metrics_summary.json")
+                    with open(seg_summary_path, "w", encoding="utf-8") as f:
+                        json.dump(seg_metrics_by_model, f, ensure_ascii=False, indent=2)
+                    stage_entry["metrics"] = seg_metrics_by_model
+                    stage_entry.setdefault("artifacts", {})["summary_path"] = seg_summary_path
+                    stage_entry.setdefault("artifacts", {})["predictions_root"] = predictions_root
+                _dump_meta()
 
-            # optional classification stage
             clf_cfg = self.cfg.get("classification", {}) or {}
-            try:
-                run_subject_classification(
-                    clf_cfg,
-                    self.dataset_root,
-                    train_ds,
-                    test_predictions,
-                    out_dir,
-                    self._log,
-                    split_method=method,
-                )
-            except Exception as _e_cls:
-                self._log(f"[Classification] Error: {_e_cls}")
+            clf_enabled = bool(clf_cfg.get("enabled", True))
+            if clf_enabled:
+                with stage_scope(
+                    "classification",
+                    "classification",
+                    {"config": clf_cfg},
+                ) as stage_entry:
+                    try:
+                        run_subject_classification(
+                            clf_cfg,
+                            self.dataset_root,
+                            train_ds,
+                            test_predictions,
+                            out_dir,
+                            self._log,
+                            split_method=method,
+                        )
+                    except Exception as _e_cls:
+                        stage_entry["status"] = "failed"
+                        stage_entry["error"] = {"type": type(_e_cls).__name__, "message": str(_e_cls)}
+                        self._log(f"[Classification] Error: {_e_cls}")
+                    finally:
+                        _dump_meta()
+            else:
+                _record_stage_skip("classification", "classification", "disabled via config", {"config": clf_cfg})
+
+            metrics_section = meta.setdefault("metrics", {})
+            if stage_metrics_collector:
+                metrics_section["detection_phases"] = stage_metrics_collector
+                test_summary = stage_metrics_collector.get("test", {}).get("summary")
+                if test_summary:
+                    metrics_section["detection"] = test_summary
+                detection_artifacts = meta.setdefault("artifacts", {}).setdefault("detection", {})
+                test_info = stage_metrics_collector.get("test", {})
+                for key in ("summary_path", "metrics_dir", "predictions_dir"):
+                    value = test_info.get(key)
+                    if value:
+                        detection_artifacts[key] = value
+
+            if seg_metrics_by_model:
+                metrics_section["segmentation"] = seg_metrics_by_model
+                seg_artifacts = meta.setdefault("artifacts", {}).setdefault("segmentation", {})
+                if seg_summary_path:
+                    seg_artifacts["summary_path"] = seg_summary_path
+                seg_artifacts["predictions_root"] = predictions_root
+
+            meta["runtime"]["finished_at"] = datetime.utcnow().isoformat() + "Z"
+            meta["runtime"]["duration_sec"] = max(0.0, time.perf_counter() - experiment_start)
+            meta["runtime"]["stages"] = len(stage_records)
+            _dump_meta()

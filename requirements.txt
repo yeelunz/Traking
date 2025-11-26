@@ -10,6 +10,7 @@ torch
 torchvision
 timm>=0.9.12
 segmentation-models-pytorch>=0.3.3
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
 
 # YOLOv11 (Ultralytics)
 ultralytics>=8.3.0
