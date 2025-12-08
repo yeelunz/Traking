@@ -1,9 +1,6 @@
-from __future__ import annotations
-
-from .models.common import load_json_file as _load_json_file
-from .models.common import resolve_path as _resolve_path
-from .models.medsam import MedSAMSegmenter
-from .models.nnunet import (
+from .common import load_json_file, resolve_path
+from .medsam import MedSAMSegmenter
+from .nnunet import (
     NnUNetSegmenter,
     _NNUNET_IMPORT_ERROR,
     _NnUNetPlansManager,
@@ -13,15 +10,12 @@ from .models.nnunet import (
     _normalize_architecture_dict,
     _select_nnunet_architecture,
 )
-from .models.smp import (
-    DeepLabV3PlusSegmenter,
-    Unet,
-    UnetPlusPlus,
-    _build_smp_model,
-)
-from .models.torchvision_fcn import TorchvisionFCNSegmenter
+from .smp import DeepLabV3PlusSegmenter, Unet, UnetPlusPlus, _build_smp_model
+from .torchvision_fcn import TorchvisionFCNSegmenter
 
 __all__ = [
+    "resolve_path",
+    "load_json_file",
     "Unet",
     "UnetPlusPlus",
     "DeepLabV3PlusSegmenter",
@@ -29,8 +23,6 @@ __all__ = [
     "NnUNetSegmenter",
     "MedSAMSegmenter",
     "_build_smp_model",
-    "_resolve_path",
-    "_load_json_file",
     "_normalize_architecture_dict",
     "_architecture_from_plans",
     "_default_nnunet_architecture",

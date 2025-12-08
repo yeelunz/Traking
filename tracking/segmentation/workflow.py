@@ -12,6 +12,11 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+try:  # pragma: no cover - optional CUDA specific exception
+    from torch.cuda import CudaError as _TorchCudaError  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - CPU-only envs
+    _TorchCudaError = RuntimeError
 from torch.utils.data import DataLoader
 
 try:  # pragma: no cover - optional dependency
@@ -292,6 +297,7 @@ class SegmentationWorkflow:
         self.best_checkpoint: Optional[str] = None
         self.using_default_pretrained = False
         self.auto_mask_options: Dict[str, Any] = {}
+        self._cuda_fallback_triggered = False
 
         if self.using_auto_mask:
             if not _AUTO_MASK_SUPPORT:
@@ -740,12 +746,11 @@ class SegmentationWorkflow:
                         torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
                         .permute(2, 0, 1)
                         .unsqueeze(0)
-                        .to(self.device)
                     )
+                    roi_tensor = roi_tensor.to(self.device)
                     start_time = time.perf_counter()
-                    with torch.no_grad():
-                        logits = self.model(roi_tensor)
-                        probs = torch.sigmoid(logits)
+                    logits = self._run_model_with_fallback(roi_tensor)
+                    probs = torch.sigmoid(logits)
                     infer_elapsed = time.perf_counter() - start_time
                     total_infer_time += infer_elapsed
                     frame_counter += 1
@@ -1180,7 +1185,12 @@ class SegmentationWorkflow:
         if not os.path.exists(abs_path):
             return None
         mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
-        return mask
+        if mask is None:
+            return None
+        mask_bin = (mask > 0).astype(np.uint8) * 255
+        mask_filled = fill_holes(mask_bin)
+        mask_clean = keep_largest_component(mask_filled)
+        return mask_clean
 
     def _resolve_checkpoint_path(self, path: Optional[str]) -> Optional[str]:
         if path in (None, ""):
@@ -1235,6 +1245,55 @@ class SegmentationWorkflow:
         self.train_enabled = False
         self.using_default_pretrained = True
         self.logger("[Segmentation] Using torchvision FCN ResNet50 pretrained weights for inference.")
+        return True
+
+    # ------------------------------------------------------------------
+    def _run_model_with_fallback(self, roi_tensor: torch.Tensor) -> torch.Tensor:
+        """Execute model inference, falling back to CPU if CUDA errors occur."""
+        if self.model is None:
+            raise RuntimeError("Segmentation model is not initialised")
+        try:
+            with torch.no_grad():
+                return self.model(roi_tensor)
+        except (_TorchCudaError, RuntimeError) as exc:
+            if self._maybe_fallback_to_cpu(exc):
+                roi_tensor_cpu = roi_tensor.to(self.device)
+                with torch.no_grad():
+                    return self.model(roi_tensor_cpu)
+            raise
+
+    def _maybe_fallback_to_cpu(self, exc: Exception) -> bool:
+        """Switch to CPU execution when GPU becomes unstable."""
+        if self.device.type != "cuda":
+            return False
+        message = str(exc).lower()
+        keywords = (
+            "cuda error",
+            "cublas",
+            "cudnn",
+            "device-side assert",
+            "illegal memory access",
+        )
+        if not any(keyword in message for keyword in keywords):
+            return False
+        if not self._cuda_fallback_triggered:
+            self.logger(
+                "[Segmentation] CUDA inference failure detected ({}). Falling back to CPU for this run.".format(
+                    message
+                )
+            )
+            self._cuda_fallback_triggered = True
+        try:  # pragma: no cover - only executes when CUDA is available
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:  # pragma: no cover - only executes when CUDA is available
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        self.device = torch.device("cpu")
+        if self.model is not None:
+            self.model.to(self.device)
         return True
 
 

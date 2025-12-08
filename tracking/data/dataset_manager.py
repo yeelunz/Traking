@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 from pathlib import Path
 from typing import Dict, Any, Iterable, List, Tuple, Optional
 
@@ -27,6 +28,9 @@ class SimpleDataset:
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         video_path, ann = self.items[idx]
         return {"video_path": video_path, "annotation": ann}
+
+
+_SUBJECT_PREFIX_RE = re.compile(r"^(\d+)")
 
 
 class COCOJsonDatasetManager(DatasetManager):
@@ -81,7 +85,25 @@ class COCOJsonDatasetManager(DatasetManager):
             subject = parts[0]
         else:
             subject = Path(parts[0]).stem
-        return subject or Path(video_path).stem
+        primary = self._normalise_subject_token(subject)
+        if primary:
+            return primary
+        fallback_stem = Path(video_path).stem
+        fallback = self._normalise_subject_token(fallback_stem)
+        if fallback:
+            return fallback
+        return subject or fallback_stem
+
+    def _normalise_subject_token(self, token: Optional[str]) -> Optional[str]:
+        if token is None:
+            return None
+        cleaned = str(token).strip()
+        if not cleaned:
+            return None
+        match = _SUBJECT_PREFIX_RE.match(cleaned)
+        if match:
+            return match.group(1)
+        return cleaned if cleaned else None
 
     def _group_by_subject(self) -> Dict[str, List[str]]:
         groups: Dict[str, List[str]] = {}

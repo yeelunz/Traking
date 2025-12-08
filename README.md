@@ -41,10 +41,17 @@ Notes on trackers:
 
 `tracking.segmentation` 提供 ROI 為核心的遮罩推論、可視化與指標彙整，所有結果皆寫入 `results/segmentation/<video>/`。在 pipeline 的 `segmentation` 區塊可以切換不同模型：
 
-- `model.name: "unet"`／`"unetpp"`：使用 `segmentation_models_pytorch`，支援 `encoder_name`、`encoder_weights` 等參數，可進行訓練。
+> Subject-level split 提醒：若 `dataset.root` 沒有以受試者資料夾分層，系統會嘗試從影片檔名開頭的連續數字推斷受試者 ID（例如 `001Rest.avi`、`001Rest post.avi` 會被視為 subject `001`）。建議資料夾仍以 `root/<subject>/<video>` 結構為主，或以數字前綴命名影片，才能確保 subject-level 分割正確運作。
+
+- `model.name: "unet"`／`"unetpp"`／`"deeplabv3+"`：使用 `segmentation_models_pytorch`，支援 `encoder_name`、`encoder_weights` 等參數，可進行訓練；`deeplabv3+` 會建立 DeepLabV3+ decoder 以獲得較大的感受野。
 - `model.name: "torchvision_fcn_resnet50"`：採用 torchvision 官方 FCN，屬推論專用 baseline。
 - `model.name: "auto_mask"`（**新增**）：整合 `segmentation_annotator.auto_mask` 的弱監督遮罩流程（GrabCut + MGAC + 導向濾波），直接在 tracker bbox 周圍生成遮罩。此模式僅支援推論，框架會自動關閉訓練並沿用「最大連通元件 + 補洞」後處理，最終遮罩仍限制在 ROI 內。可透過 `model.params` 調整 `margin`、`num_iter`、`canny_low`／`canny_high`、`guided_radius`、`guided_eps` 等參數；若環境缺少 scikit-image，會自動退回無 MGAC 的變體。
-- `model.name: "medsam"`：整合 [MedSAM](https://github.com/bowang-lab/MedSAM) / SAM 的推論與微調流程。此模式使用 segment-anything 套件，需要先安裝（已列入 `requirements.txt`）。請到官方 Google Drive 下載 `medsam_vit_b.pth`（[下載連結](https://drive.google.com/drive/folders/1ETWmi4AiniJeWOt6HAsYgTjYv_fkgzoN)）後放置到 `models/seg/medsam/medsam_vit_b.pth`（可自訂路徑）。
+- `model.name: "medsam"`：整合 [MedSAM](https://github.com/bowang-lab/MedSAM) / SAM 的推論與微調流程。此模式使用 segment-anything 套件，需要先安裝（已列入 `requirements.txt`）。請到官方 Google Drive 下載 `medsam_vit_b.pth`（[下載連結](https://drive.google.com/drive/folders/1ETWmi4AiniJeWOt6HAsYgTjYv_fkgzoN)）後放置到 `models/seg/medsam_vit_b.pth`（可自訂路徑）。
+- `model.name: "nnunet"`（**新增**）：使用官方 nnU-Net v2 動態架構（透過 `libs/nnUNet/`）建立 ROI 分割模型。請先執行 `pip install -r requirements.txt` 以安裝 `-e ./libs/nnUNet` 及其依賴（包含 `dynamic-network-architectures`）。常用參數：
+	- `plans_path`: 指向 nnUNet 規劃出的 `nnUNetPlans.json`，並透過 `configuration`（預設 `"2d"`）挑選其中一個設定。
+	- `architecture_path`: 若無 plans，可直接提供自訂架構 JSON（格式同 `plans['architecture']`）。未提供時會回退到 2D PlainConvUNet 的預設拓撲。
+	- `return_highres_only`: 預設 `true`，只回傳最高解析度 head 的 logits；若要使用其他深度監督輸出，可改成 `false` 取得最後一個 head（仍以單一張量餵入訓練迴圈）。
+	UI 會在選擇 nnU-Net 後顯示額外欄位，可直接輸入 plans/architecture 路徑與 configuration 名稱；留下空白則使用預設架構。
 
   **基本推論模式**（預設，`train: false`）：
   ```yaml
@@ -52,7 +59,7 @@ Notes on trackers:
     model:
       name: medsam
       params:
-        checkpoint: models/seg/medsam/medsam_vit_b.pth
+		checkpoint: models/seg/medsam_vit_b.pth
         model_type: vit_b           # 與官方 checkpoint 對應
         use_box_prompt: true        # 使用追蹤 bbox 作為 SAM box prompt
         multimask_output: false     # 輸出單一遮罩
@@ -65,7 +72,7 @@ Notes on trackers:
     model:
       name: medsam
       params:
-        checkpoint: models/seg/medsam/medsam_vit_b.pth
+		checkpoint: models/seg/medsam_vit_b.pth
         model_type: vit_b
     train: true                     # 啟用微調
     epochs: 10                       # 訓練輪數

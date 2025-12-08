@@ -430,6 +430,10 @@ class SimpleRunnerUI(QMainWindow):
         vb_seg.addWidget(self.chk_seg_train)
         seg_form = QFormLayout()
         self.combo_seg_model = NoWheelComboBox()
+        _pretty_seg_labels = {
+            "unetpp": "UNet++",
+            "deeplabv3+": "DeepLabV3+",
+        }
         for key in sorted(SEGMENTATION_MODEL_REGISTRY.keys()):
             label = "UNet++" if key.lower() == "unetpp" else key.upper()
             self.combo_seg_model.addItem(label, key)
@@ -502,6 +506,42 @@ class SimpleRunnerUI(QMainWindow):
         seg_form.addRow("Dice weight", self.seg_dice_weight)
         seg_form.addRow("BCE weight", self.seg_bce_weight)
         seg_form.addRow("Device", self.edit_seg_device)
+
+        self.lbl_nnunet_plans = QLabel("nnUNet plans")
+        self.edit_nnunet_plans = QLineEdit()
+        self.edit_nnunet_plans.setPlaceholderText("選填：指向 nnUNetPlans.json")
+        self.edit_nnunet_plans.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow(self.lbl_nnunet_plans, self.edit_nnunet_plans)
+
+        self.lbl_nnunet_config = QLabel("nnUNet config")
+        self.edit_nnunet_config = QLineEdit("2d")
+        self.edit_nnunet_config.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow(self.lbl_nnunet_config, self.edit_nnunet_config)
+
+        self.lbl_nnunet_arch = QLabel("Arch JSON")
+        self.edit_nnunet_architecture = QLineEdit()
+        self.edit_nnunet_architecture.setPlaceholderText("選填：自訂 architecture JSON")
+        self.edit_nnunet_architecture.editingFinished.connect(self._on_builder_changed)
+        seg_form.addRow(self.lbl_nnunet_arch, self.edit_nnunet_architecture)
+
+        self.lbl_nnunet_highres = QLabel("")
+        self.chk_nnunet_highres = QCheckBox("僅輸出最高解析度 head")
+        self.chk_nnunet_highres.setChecked(True)
+        self.chk_nnunet_highres.stateChanged.connect(lambda _v: self._on_builder_changed())
+        seg_form.addRow(self.lbl_nnunet_highres, self.chk_nnunet_highres)
+
+        self._nnunet_widgets = [
+            self.lbl_nnunet_plans,
+            self.edit_nnunet_plans,
+            self.lbl_nnunet_config,
+            self.edit_nnunet_config,
+            self.lbl_nnunet_arch,
+            self.edit_nnunet_architecture,
+            self.lbl_nnunet_highres,
+            self.chk_nnunet_highres,
+        ]
+        for widget in self._nnunet_widgets:
+            widget.setVisible(False)
 
         vb_seg.addLayout(seg_form)
         self._seg_train_widgets = [
@@ -884,7 +924,18 @@ class SimpleRunnerUI(QMainWindow):
         seg_method_key = str(seg_method_key_raw).strip() or 'unetpp'
         seg_method_key_lower = seg_method_key.lower()
         seg_method_params: Dict[str, Any] = {}
-        if seg_method_key_lower != 'auto_mask':
+        if seg_method_key_lower == 'nnunet':
+            plans = self.edit_nnunet_plans.text().strip()
+            config_name = self.edit_nnunet_config.text().strip()
+            arch_path = self.edit_nnunet_architecture.text().strip()
+            if plans:
+                seg_method_params['plans_path'] = plans
+            if config_name:
+                seg_method_params['configuration'] = config_name
+            if arch_path:
+                seg_method_params['architecture_path'] = arch_path
+            seg_method_params['return_highres_only'] = bool(self.chk_nnunet_highres.isChecked())
+        elif seg_method_key_lower != 'auto_mask':
             seg_method_params = {
                 'encoder_name': self.edit_seg_encoder.text().strip() or 'resnet34',
                 'encoder_weights': self.edit_seg_weights.text().strip() or 'imagenet',
@@ -1199,6 +1250,20 @@ class SimpleRunnerUI(QMainWindow):
 
         _set_line(self.edit_seg_encoder, method_params.get('encoder_name'), self.edit_seg_encoder.text())
         _set_line(self.edit_seg_weights, method_params.get('encoder_weights'), self.edit_seg_weights.text())
+        if hasattr(self, 'edit_nnunet_plans'):
+            _set_line(self.edit_nnunet_plans, method_params.get('plans_path') or method_params.get('plans'), self.edit_nnunet_plans.text())
+        if hasattr(self, 'edit_nnunet_config'):
+            _set_line(self.edit_nnunet_config, method_params.get('configuration'), self.edit_nnunet_config.text())
+        if hasattr(self, 'edit_nnunet_architecture'):
+            _set_line(
+                self.edit_nnunet_architecture,
+                method_params.get('architecture_path') or method_params.get('architecture_file'),
+                self.edit_nnunet_architecture.text(),
+            )
+        if hasattr(self, 'chk_nnunet_highres'):
+            self.chk_nnunet_highres.blockSignals(True)
+            self.chk_nnunet_highres.setChecked(bool(method_params.get('return_highres_only', self.chk_nnunet_highres.isChecked())))
+            self.chk_nnunet_highres.blockSignals(False)
 
         def _set_dspin(widget: NoWheelDoubleSpinBox, key: str, source: Dict[str, Any] = seg_cfg):
             widget.blockSignals(True)
@@ -1583,7 +1648,8 @@ class SimpleRunnerUI(QMainWindow):
 
     def _on_seg_method_changed(self, idx: int):
         _ = idx  # unused
-        auto_selected = self._get_current_seg_method_key() == "auto_mask"
+        method_key = self._get_current_seg_method_key()
+        auto_selected = method_key == "auto_mask"
         if hasattr(self, 'chk_seg_train') and self.chk_seg_train is not None:
             self.chk_seg_train.blockSignals(True)
             if auto_selected:
@@ -1591,6 +1657,10 @@ class SimpleRunnerUI(QMainWindow):
             self.chk_seg_train.setEnabled(not auto_selected)
             self.chk_seg_train.blockSignals(False)
         self._update_segmentation_train_state()
+        nnunet_selected = method_key == "nnunet"
+        for widget in getattr(self, '_nnunet_widgets', []):
+            if widget is not None:
+                widget.setVisible(nnunet_selected)
         if not getattr(self, '_syncing', False) and not getattr(self, '_applying_cfg', False):
             self._on_builder_changed()
 
@@ -1854,9 +1924,17 @@ class SimpleRunnerUI(QMainWindow):
             return
         snapshot = copy.deepcopy(cfg)
         text = self._serialize_cfg(snapshot)
+        # Update raw + builder together so the left editor stays in sync with the schedule selection.
         self._set_raw_text_programmatically(text)
+        try:
+            self._syncing = True
+            self._apply_cfg_to_builder(snapshot)
+        finally:
+            self._syncing = False
+        # Normalize raw display after builder sync (avoid debounce waiting).
         self._raw_user_edit = False
         self._highlight_raw_error(False)
+        self._on_builder_changed(force=True)
         label = entry.get('label', '') if isinstance(entry, dict) else ''
         status = f"排程檢視：{label}" if label else "排程檢視"
         self._set_status(status, good=True)

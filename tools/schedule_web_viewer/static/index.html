@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Schedule Results Viewer</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Schedule Results Viewer</h1>
+        <p id="root-path"></p>
+      </div>
+      <div class="actions">
+        <button id="refresh-btn">重新整理索引</button>
+      </div>
+    </header>
+    <div class="layout">
+      <aside>
+        <div class="filter">
+          <input type="text" id="search" placeholder="搜尋實驗或模型…" />
+        </div>
+        <div class="group-panel">
+          <div class="panel-header">
+            <h3>排程／批次</h3>
+            <small id="group-count"></small>
+          </div>
+          <ul id="group-list"></ul>
+        </div>
+        <div class="group-panel">
+          <div class="panel-header">
+            <h3>實驗列表</h3>
+            <small id="experiment-count"></small>
+          </div>
+          <ul id="experiment-list"></ul>
+        </div>
+      </aside>
+      <main>
+        <section id="welcome">
+          <h2>請從左側選擇一個實驗</h2>
+          <p>這個 Web UI 會自動讀取 schedule 中的 metadata、detection 與 segmentation 指標、可視化結果。選擇實驗後即可查看詳細資訊。</p>
+        </section>
+        <section id="group-overview" class="hidden">
+          <div class="section-header">
+            <div>
+              <h2 id="group-title">批次比較</h2>
+              <p id="group-subtitle"></p>
+            </div>
+          </div>
+          <div class="compare-grid" id="compare-grid"></div>
+          <table id="compare-table"></table>
+          <div id="group-chart-controls" class="chart-controls hidden"></div>
+          <div id="group-chart-grid" class="group-chart-grid hidden">
+            <div>
+              <div class="chart-header">
+                <h3>Detection 指標比較</h3>
+                <div class="chart-actions">
+                  <button class="ghost-button" data-chart-key="groupDetectionChart" data-canvas-id="group-detection-chart" data-filename="group_detection">下載 PNG</button>
+                  <button class="ghost-button" data-export-chart="groupDetectionChart" data-export-format="csv">複製 CSV</button>
+                </div>
+              </div>
+              <canvas id="group-detection-chart" height="240"></canvas>
+            </div>
+            <div>
+              <div class="chart-header">
+                <h3>Segmentation 指標比較</h3>
+                <div class="chart-actions">
+                  <button class="ghost-button" data-chart-key="groupSegmentationChart" data-canvas-id="group-segmentation-chart" data-filename="group_segmentation">下載 PNG</button>
+                  <button class="ghost-button" data-export-chart="groupSegmentationChart" data-export-format="csv">複製 CSV</button>
+                </div>
+              </div>
+              <canvas id="group-segmentation-chart" height="240"></canvas>
+            </div>
+          </div>
+        </section>
+        <section id="experiment-details" class="hidden">
+          <div class="section-header">
+            <div>
+              <h2 id="exp-name"></h2>
+              <p id="exp-path"></p>
+            </div>
+          </div>
+          <div class="cards" id="metric-cards"></div>
+          <div class="grid summary-grid">
+            <div>
+              <div class="summary-header">
+                <h3>Detection 彙總</h3>
+              </div>
+              <table id="detection-summary-table" class="summary-table"></table>
+            </div>
+            <div>
+              <div class="summary-header">
+                <h3>Segmentation 彙總</h3>
+              </div>
+              <table id="segmentation-summary-table" class="summary-table"></table>
+            </div>
+          </div>
+          <div class="grid">
+            <div>
+              <div class="chart-header">
+                <h3>Detection 指標</h3>
+                <div class="chart-actions">
+                  <button class="ghost-button" data-chart-key="detectionChart" data-canvas-id="detection-chart" data-filename="detection_metrics">下載 PNG</button>
+                  <button class="ghost-button" data-export-chart="detectionChart" data-export-format="csv">複製 CSV</button>
+                </div>
+              </div>
+              <canvas id="detection-chart"></canvas>
+              <table id="detection-table"></table>
+            </div>
+            <div>
+              <div class="chart-header">
+                <h3>Segmentation 指標</h3>
+                <div class="chart-actions">
+                  <button class="ghost-button" data-chart-key="segmentationChart" data-canvas-id="segmentation-chart" data-filename="segmentation_metrics">下載 PNG</button>
+                  <button class="ghost-button" data-export-chart="segmentationChart" data-export-format="csv">複製 CSV</button>
+                </div>
+              </div>
+              <canvas id="segmentation-chart"></canvas>
+              <table id="segmentation-table"></table>
+            </div>
+          </div>
+          <div class="grid visuals">
+            <div>
+              <div class="visual-header">
+                <h3>Detection 可視化</h3>
+                <div class="tabs">
+                  <button data-category="detection_visualizations" class="tab active">Samples</button>
+                  <button data-category="detection_metrics" class="tab">Metrics</button>
+                </div>
+              </div>
+              <div class="gallery" id="detection-gallery"></div>
+            </div>
+            <div>
+              <div class="visual-header">
+                <h3>Segmentation 可視化</h3>
+                <div class="tabs">
+                  <button data-category="segmentation_overlays" class="tab active">Overlay</button>
+                  <button data-category="segmentation_errors" class="tab">Error Map</button>
+                </div>
+              </div>
+              <div class="gallery" id="segmentation-gallery"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

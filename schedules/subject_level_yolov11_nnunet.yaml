@@ -1,0 +1,159 @@
+queue:
+  - label: "01_none_yolov11_nnunet"
+    config:
+      seed: 42
+      dataset: &dataset_subject
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "none_yolov11_nnunet"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: &detector_no_preproc
+                weights: models/detection/best_large_no_clahe.pt
+                conf: 0.25
+                iou: 0.5
+                imgsz: 640
+                device: cuda
+                classes: null
+                max_det: 100
+                fallback_last_prediction: true
+                train_enabled: false
+                epochs: 0
+                batch: 8
+                lr0: 0.01
+                patience: 50
+                workers: 0
+                include_empty_frames: false
+                force_cpu_if_no_cuda: true
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+      classification:
+        enabled: false
+      segmentation: &segmentation_nnunet
+        model:
+          name: nnunet
+          params:
+            dimension: 2
+            n_stages: 5
+            base_features: 32
+            deep_supervision: false
+            return_highres_only: true
+            init_weights: true
+            # leave architecture/plans null to use default nnU-Net v2 recipe
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.0
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 120
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+      output: &output_defaults
+        results_root: results
+
+  - label: "02_clahe_yolov11_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_yolov11_nnunet"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params:
+                clip: 2.0
+                grid: [8, 8]
+            - type: model
+              name: YOLOv11
+              params: &detector_clahe
+                <<: *detector_no_preproc
+                weights: models/detection/best_large_clahe.pt
+                train_enabled: false
+                epochs: 0
+      evaluation: *evaluation_defaults
+      classification:
+        enabled: false
+      segmentation: *segmentation_nnunet
+      output: *output_defaults
+
+  - label: "03_logdr_yolov11_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "logdr_yolov11_nnunet"
+          pipeline:
+            - type: preproc
+              name: LOG_DR
+              params:
+                method: log
+                clip_percentile: 99.5
+                gamma: 0.5
+                eps: 1.0e-6
+                per_channel: true
+            - type: model
+              name: YOLOv11
+              params: &detector_logdr
+                <<: *detector_no_preproc
+                weights: null
+                train_enabled: true
+                epochs: 40
+      evaluation: *evaluation_defaults
+      classification:
+        enabled: false
+      segmentation: *segmentation_nnunet
+      output: *output_defaults
+
+  - label: "04_clahe_logdr_yolov11_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_logdr_yolov11_nnunet"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params:
+                clip: 2.0
+                grid: [8, 8]
+            - type: preproc
+              name: LOG_DR
+              params:
+                method: log
+                clip_percentile: 99.5
+                gamma: 0.5
+                eps: 1.0e-6
+                per_channel: true
+            - type: model
+              name: YOLOv11
+              params:
+                <<: *detector_logdr
+      evaluation: *evaluation_defaults
+      classification:
+        enabled: false
+      segmentation: *segmentation_nnunet
+      output: *output_defaults

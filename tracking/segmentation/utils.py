@@ -95,7 +95,19 @@ def place_mask_on_canvas(canvas_shape: Tuple[int, int], mask_roi: np.ndarray, bb
     x0 = int(round(bbox.x))
     y0 = int(round(bbox.y))
     h, w = mask_roi.shape[:2]
-    canvas[y0:y0 + h, x0:x0 + w] = mask_roi
+
+    # Clamp target slice so we never assign outside the canvas bounds
+    x0_clamped = max(0, min(x0, canvas.shape[1]))
+    y0_clamped = max(0, min(y0, canvas.shape[0]))
+    if x0_clamped >= canvas.shape[1] or y0_clamped >= canvas.shape[0]:
+        return canvas
+    max_w = canvas.shape[1] - x0_clamped
+    max_h = canvas.shape[0] - y0_clamped
+    copy_w = min(w, max_w)
+    copy_h = min(h, max_h)
+    if copy_w <= 0 or copy_h <= 0:
+        return canvas
+    canvas[y0_clamped:y0_clamped + copy_h, x0_clamped:x0_clamped + copy_w] = mask_roi[:copy_h, :copy_w]
     return canvas
 
 
