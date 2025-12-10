@@ -59,7 +59,7 @@ queue:
         jitter: 0.0
         redundancy: 1
         target_size: [256, 256]
-        epochs: 120
+        epochs: 80
         batch_size: 2
         num_workers: 0
         lr: 0.0005
@@ -119,7 +119,7 @@ queue:
               name: YOLOv11
               params: &detector_logdr
                 <<: *detector_no_preproc
-                weights: null
+                weights: models/detection/yolo11l.pt
                 train_enabled: true
                 epochs: 40
       evaluation: *evaluation_defaults
@@ -148,6 +148,36 @@ queue:
                 gamma: 0.5
                 eps: 1.0e-6
                 per_channel: true
+            - type: model
+              name: YOLOv11
+              params:
+                <<: *detector_logdr
+      evaluation: *evaluation_defaults
+      classification:
+        enabled: false
+      segmentation: *segmentation_nnunet
+      output: *output_defaults
+
+  - label: "05_logdr_clahe_yolov11_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "logdr_clahe_yolov11_nnunet"
+          pipeline:
+            - type: preproc
+              name: LOG_DR
+              params:
+                method: log
+                clip_percentile: 99.5
+                gamma: 0.5
+                eps: 1.0e-6
+                per_channel: true
+            - type: preproc
+              name: CLAHE
+              params:
+                clip: 2.0
+                grid: [8, 8]
             - type: model
               name: YOLOv11
               params:

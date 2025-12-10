@@ -194,10 +194,35 @@ class BasicEvaluator:
                 w.writerow(["metric", "value"])
                 for k, v in summary.items():
                     w.writerow([k, v])
-            # per-frame csv
+            # per-frame metrics (csv + json for downstream viewers)
             with open(os.path.join(out_dir, f"{model_name}_per_frame.csv"), "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerows(per_frame_rows)
+            try:
+                per_frame_payload = {}
+                for row in per_frame_rows:
+                    if not row or row[0] in {None, "", "frame_index"}:
+                        continue
+                    try:
+                        fi = int(row[0])
+                    except Exception:
+                        continue
+                    iou_val = None
+                    ce_val = None
+                    try:
+                        iou_val = float(row[1]) if len(row) > 1 and row[1] not in {None, ""} else None
+                    except Exception:
+                        iou_val = None
+                    try:
+                        ce_val = float(row[2]) if len(row) > 2 and row[2] not in {None, ""} else None
+                    except Exception:
+                        ce_val = None
+                    per_frame_payload[str(fi)] = {"iou": iou_val, "ce": ce_val}
+                if per_frame_payload:
+                    with open(os.path.join(out_dir, f"{model_name}_per_frame.json"), "w", encoding="utf-8") as f:
+                        json.dump(per_frame_payload, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
             # Success curve csv
             if success_curve:
                 with open(os.path.join(out_dir, f"{model_name}_success_curve.csv"), "w", newline="", encoding="utf-8") as f:

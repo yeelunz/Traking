@@ -384,6 +384,13 @@ class SegmentationWorkflow:
             guided_eps_val = 1e-3
         options["guided_eps"] = max(1e-6, guided_eps_val)
 
+        edge_weight_beta_raw = params.get("edge_weight_beta", 10.0)
+        try:
+            edge_weight_beta_val = float(edge_weight_beta_raw)
+        except Exception:
+            edge_weight_beta_val = 10.0
+        options["edge_weight_beta"] = max(0.1, edge_weight_beta_val)
+
         kernel_raw = params.get("postprocess_kernel", params.get("kernel", 3))
         try:
             kernel_val = int(kernel_raw)
@@ -394,6 +401,22 @@ class SegmentationWorkflow:
         if kernel_val % 2 == 0:
             kernel_val += 1
         options["postprocess_kernel"] = min(max(kernel_val, 1), 15)
+
+        open_iter_raw = params.get("open_iter", 1)
+        close_iter_raw = params.get("close_iter", 1)
+        dilate_iter_raw = params.get("dilate_iter", 0)
+        try:
+            options["open_iter"] = max(0, int(open_iter_raw))
+        except Exception:
+            options["open_iter"] = 1
+        try:
+            options["close_iter"] = max(0, int(close_iter_raw))
+        except Exception:
+            options["close_iter"] = 1
+        try:
+            options["dilate_iter"] = max(0, int(dilate_iter_raw))
+        except Exception:
+            options["dilate_iter"] = 0
 
         canny_low_raw = params.get("canny_low", 30)
         canny_high_raw = params.get("canny_high", 80)
@@ -412,6 +435,30 @@ class SegmentationWorkflow:
 
         use_mgac_raw = params.get("use_mgac", params.get("mgac", True))
         options["use_mgac"] = self._coerce_bool(use_mgac_raw, default=True)
+
+        mgac_balloon_raw = params.get("mgac_balloon", params.get("balloon", 1.0))
+        try:
+            options["mgac_balloon"] = float(mgac_balloon_raw)
+        except Exception:
+            options["mgac_balloon"] = 1.0
+
+        mgac_smoothing_raw = params.get("mgac_smoothing", params.get("smoothing", 1))
+        try:
+            options["mgac_smoothing"] = max(0, int(mgac_smoothing_raw))
+        except Exception:
+            options["mgac_smoothing"] = 1
+
+        mgac_iter_scale_raw = params.get("mgac_iter_scale", params.get("mgac_fraction", 0.25))
+        try:
+            options["mgac_iter_scale"] = max(0.05, float(mgac_iter_scale_raw))
+        except Exception:
+            options["mgac_iter_scale"] = 0.25
+
+        mgac_min_iter_raw = params.get("mgac_min_iter", 60)
+        try:
+            options["mgac_min_iter"] = max(1, int(mgac_min_iter_raw))
+        except Exception:
+            options["mgac_min_iter"] = 60
 
         return options
 
@@ -663,6 +710,7 @@ class SegmentationWorkflow:
             gt_samples = attach_ground_truth_segmentation(gt_annotation, self.dataset_root)
             gt_by_frame = {sample.frame_index: sample for sample in gt_samples}
         accum: Dict[str, list] = {"dice": [], "iou": [], "centroid": []}
+        per_frame_metrics: Dict[int, Dict[str, Optional[float]]] = {}
         mask_files: Dict[int, str] = {}
         total_infer_time = 0.0
         frame_counter = 0
@@ -763,7 +811,10 @@ class SegmentationWorkflow:
                     mask_roi = fill_holes(mask_roi)
                     full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
                 stats = compute_mask_stats(full_mask)
+                dice = None
+                iou = None
                 centroid_err = None
+                gt_mask = None
                 if frame_idx in gt_by_frame:
                     gt_entry = gt_by_frame[frame_idx]
                     gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
@@ -775,6 +826,11 @@ class SegmentationWorkflow:
                         centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
                         if centroid_err is not None:
                             accum["centroid"].append(centroid_err)
+                per_frame_metrics[frame_idx] = {
+                    "dice": float(dice) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                    "iou": float(iou) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                    "centroid": float(centroid_err) if centroid_err is not None else None,
+                }
                 mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
                 cv2.imwrite(mask_filename, full_mask)
                 mask_files[frame_idx] = mask_filename
@@ -804,6 +860,11 @@ class SegmentationWorkflow:
         try:
             with open(os.path.join(output_dir, "metrics.json"), "w", encoding="utf-8") as f:
                 json.dump(metrics_summary, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        try:
+            with open(os.path.join(output_dir, "metrics_per_frame.json"), "w", encoding="utf-8") as f:
+                json.dump({str(k): v for k, v in per_frame_metrics.items()}, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
         return metrics_summary, accum
@@ -841,7 +902,8 @@ class SegmentationWorkflow:
         canny_low = int(self.auto_mask_options.get("canny_low", 30))
         canny_high = int(self.auto_mask_options.get("canny_high", max(canny_low + 1, 80)))
         edges = cv2.Canny((roi_gray * 255).astype(np.uint8), canny_low, canny_high)
-        edge_weight = np.exp(-(edges.astype(np.float32) / 255.0) * 10.0)
+        beta = float(self.auto_mask_options.get("edge_weight_beta", 10.0))
+        edge_weight = np.exp(-(edges.astype(np.float32) / 255.0) * beta)
         denom = float(np.ptp(edge_weight)) if edge_weight.size else 0.0
         edge_weight = (edge_weight - edge_weight.min()) / (denom + 1e-6)
         iterations = int(self.auto_mask_options.get("num_iter", 300))
@@ -849,13 +911,16 @@ class SegmentationWorkflow:
         mask_refined: Optional[np.ndarray] = None
         if use_mgac:
             try:
+                mgac_iter_scale = float(self.auto_mask_options.get("mgac_iter_scale", 0.25))
+                mgac_min_iter = int(self.auto_mask_options.get("mgac_min_iter", 60))
+                mgac_iters = max(mgac_min_iter, int(iterations * mgac_iter_scale))
                 mask_refined = _AUTO_MASK_MGAC(  # type: ignore[misc]
                     edge_weight,
-                    max(60, iterations // 4),
+                    mgac_iters,
                     init_level_set=mask_bool,
-                    smoothing=1,
+                    smoothing=int(self.auto_mask_options.get("mgac_smoothing", 1)),
                     threshold="auto",
-                    balloon=-1,
+                    balloon=float(self.auto_mask_options.get("mgac_balloon", 1.0)),
                 )
                 mask = mask_refined.astype(np.uint8) * 255
             except Exception:
@@ -868,8 +933,12 @@ class SegmentationWorkflow:
         if kernel_size % 2 == 0:
             kernel_size += 1
         kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        open_iter = int(self.auto_mask_options.get("open_iter", 1))
+        close_iter = int(self.auto_mask_options.get("close_iter", 1))
+        if open_iter > 0:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iter)
+        if close_iter > 0:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=close_iter)
         guided = _AUTO_MASK_GUIDED_FILTER(
             roi_gray,
             mask.astype(np.float32) / 255.0,
@@ -877,6 +946,9 @@ class SegmentationWorkflow:
             eps=float(self.auto_mask_options.get("guided_eps", 1e-3)),
         )
         mask = (guided > 0.5).astype(np.uint8) * 255
+        dilate_iter = int(self.auto_mask_options.get("dilate_iter", 0))
+        if dilate_iter > 0:
+            mask = cv2.dilate(mask, kernel, iterations=dilate_iter)
         mask = _AUTO_MASK_STRIP_PADDING(mask, pads)
         mask = _AUTO_MASK_REMOVE_BOUNDARY(mask)
         mask = _AUTO_MASK_LARGEST(mask)

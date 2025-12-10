@@ -941,7 +941,11 @@ async function loadGallery(galleryId, expId, category) {
         link.innerHTML = `<img src="${item.url}" alt="visual" loading="lazy" />`;
         figure.appendChild(link);
         const caption = document.createElement('figcaption');
-        caption.textContent = item.label;
+        const lines = [item.label];
+        if (item.ce_px !== null && item.ce_px !== undefined) {
+          lines.push(`CE: ${formatNumber(item.ce_px, 2)} px`);
+        }
+        caption.textContent = lines.join('\n');
         figure.appendChild(caption);
         grid.appendChild(figure);
       });
@@ -978,34 +982,33 @@ async function selectExperiment(expId) {
 
   buildTable('detection-table', detectionRows, [
     { label: 'Video', format: (row) => row.video },
-    { label: 'IoU μ', format: (row) => formatPercent(row.metrics?.iou_mean) },
-    { label: 'IoU σ', format: (row) => formatPercent(row.metrics?.iou_std) },
-    { label: 'Center Err μ', format: (row) => formatNumber(row.metrics?.ce_mean) },
-    { label: 'Center Err σ', format: (row) => formatNumber(row.metrics?.ce_std) },
+    { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
+    { label: 'Center Err (px)', format: (row) => formatWithStd(row.metrics?.ce_mean, row.metrics?.ce_std) },
     { label: 'SR@0.5', format: (row) => formatPercent(row.metrics?.success_rate_50) }
   ]);
 
   buildTable('segmentation-table', segmentationRows, [
     { label: 'Video', format: (row) => row.video },
-    { label: 'Dice μ', format: (row) => formatPercent(row.metrics?.dice_mean) },
-    { label: 'Dice σ', format: (row) => formatPercent(row.metrics?.dice_std) },
-    { label: 'IoU μ', format: (row) => formatPercent(row.metrics?.iou_mean) },
-    { label: 'IoU σ', format: (row) => formatPercent(row.metrics?.iou_std) },
-    { label: 'Centroid μ', format: (row) => formatNumber(row.metrics?.centroid_mean) },
-    { label: 'Centroid σ', format: (row) => formatNumber(row.metrics?.centroid_std) }
+    { label: 'Dice (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.dice_mean, row.metrics?.dice_std) },
+    { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
+    { label: 'Centroid (px)', format: (row) => formatWithStd(row.metrics?.centroid_mean, row.metrics?.centroid_std) }
   ]);
 
   state.detectionChart = buildChart('detection-chart', state.detectionChart, detectionRows, [
     { key: 'iou_mean', label: 'IoU', color: '#6aa5ff', percent: true },
-    { key: 'success_rate_50', label: 'SR@0.5', color: '#f8c146', percent: true }
+    { key: 'success_rate_50', label: 'SR@0.5', color: '#f8c146', percent: true },
+    { key: 'success_rate_75', label: 'SR@0.75', color: '#bd93f9', percent: true },
+    { key: 'ce_mean', label: 'Center Err (pix)', color: '#66dfc5', axisId: 'y1' }
   ], {
     axes: {
-      y: { percent: true, percentDigits: 2 }
+      y: { percent: true, percentDigits: 2 },
+      y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false } }
     }
   });
 
   state.segmentationChart = buildChart('segmentation-chart', state.segmentationChart, segmentationRows, [
     { key: 'dice_mean', label: 'Dice', color: '#66dfc5', percent: true },
+    { key: 'iou_mean', label: 'IoU', color: '#bd93f9', percent: true },
     { key: 'centroid_mean', label: 'Centroid', color: '#ff8ba7', axisId: 'y1' }
   ], {
     axes: {

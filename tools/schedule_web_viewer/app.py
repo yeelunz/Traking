@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+import re
 from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, HTTPException, Query
@@ -233,7 +235,17 @@ def normalize_media_items(exp_path: Path, files: List[Path], exp_id: str) -> Lis
     return items
 
 
-def list_images(exp_path: Path, pattern_root: Path, patterns: Sequence[str] | str, limit: int, exp_id: str) -> List[Dict]:
+def list_images(
+    exp_path: Path,
+    pattern_root: Path,
+    patterns: Sequence[str] | str,
+    limit: Optional[int],
+    exp_id: str,
+) -> List[Dict]:
+    """Return media items under pattern_root matching patterns.
+
+    limit=None means "no limit" so the UI can show every test image when desired.
+    """
     if not pattern_root.exists():
         return []
     if isinstance(patterns, str):
@@ -243,7 +255,9 @@ def list_images(exp_path: Path, pattern_root: Path, patterns: Sequence[str] | st
         for file_path in pattern_root.rglob(pattern):
             if file_path.is_file():
                 collected.add(file_path)
-    files = sorted(collected)[:limit]
+    files = sorted(collected)
+    if limit is not None:
+        files = files[:limit]
     return normalize_media_items(exp_path, files, exp_id)
 
 
@@ -306,33 +320,187 @@ def create_app(results_root: Path) -> FastAPI:
         return _experiment_payload(exp_id)
 
     @app.get("/api/experiments/{exp_id:path}/visuals")
-    def experiment_visuals_path(exp_id: str, category: str = Query(...), limit: int = Query(24, ge=1, le=200)):
+    def experiment_visuals_path(
+        exp_id: str,
+        category: str = Query(...),
+        limit: Optional[int] = Query(None, ge=1, le=10000, description="Max items to return; leave empty for all"),
+    ):
         return _experiment_visuals(exp_id, category, limit)
 
     @app.get("/api/experiments/visuals")
-    def experiment_visuals_query(exp_id: str = Query(..., description="Relative experiment id"), category: str = Query(...), limit: int = Query(24, ge=1, le=200)):
+    def experiment_visuals_query(
+        exp_id: str = Query(..., description="Relative experiment id"),
+        category: str = Query(...),
+        limit: Optional[int] = Query(None, ge=1, le=10000, description="Max items to return; leave empty for all"),
+    ):
         return _experiment_visuals(exp_id, category, limit)
 
-    def _experiment_visuals(exp_id: str, category: str, limit: int):
+    def _experiment_visuals(exp_id: str, category: str, limit: Optional[int]):
         try:
             exp_path = index.get_path(exp_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Experiment not found")
         category = category.lower()
+        items: List[Dict] = []
+        per_frame_cache: Dict[Path, Dict] = {}
+
         if category == "detection_visualizations":
             base = exp_path / "test" / "detection" / "visualizations"
             items = list_images(exp_path, base, ["*.png", "*.jpg", "*.jpeg", "*.webp"], limit, exp_id)
+            # Attach per-video center error (pixels) if available
+            det_metrics = gather_detection_metrics(exp_path)
+            ce_map: Dict[str, float] = {}
+            for entry in det_metrics.get("per_video", []):
+                video = entry.get("video")
+                metrics = entry.get("metrics") or {}
+                ce_val = metrics.get("ce_mean") if isinstance(metrics, dict) else None
+                if video is not None and ce_val is not None:
+                    video_name = os.path.basename(str(video))
+                    ce_map[str(video_name)] = ce_val
+                    ce_map[Path(video_name).stem] = ce_val
+            for item in items:
+                parts = Path(item.get("label", "")).parts
+                if "visualizations" in parts:
+                    idx = parts.index("visualizations")
+                    if idx + 1 < len(parts):
+                        video_name = parts[idx + 1]
+                        # Try per-frame metrics first
+                        metrics_dir = (exp_path / "test" / "detection" / "metrics" / video_name)
+                        per_frame_metrics = None
+                        if metrics_dir.exists():
+                            per_frame_metrics = per_frame_cache.get(metrics_dir)
+                            if per_frame_metrics is None:
+                                per_frame_metrics = {}
+                                candidates = []
+                                candidates.extend(sorted(metrics_dir.glob("*_per_frame.json")))
+                                candidates.extend(sorted(metrics_dir.glob("metrics_per_frame.json")))
+                                candidates.extend(sorted(metrics_dir.glob("per_frame.json")))
+                                for path in candidates:
+                                    data = load_json(path) or {}
+                                    if data:
+                                        per_frame_metrics = data
+                                        break
+                                # Fallback to CSV if JSON is missing (legacy runs)
+                                if not per_frame_metrics:
+                                    csv_candidates = sorted(metrics_dir.glob("*_per_frame.csv"))
+                                    for csv_path in csv_candidates:
+                                        try:
+                                            with csv_path.open("r", encoding="utf-8") as fh:
+                                                reader = csv.reader(fh)
+                                                header = next(reader, None)
+                                                frame_idx_col = 0
+                                                ce_col = 2 if header and len(header) > 2 else 1
+                                                metrics_map = {}
+                                                for row in reader:
+                                                    if not row or row[0] in {"frame_index", None, ""}:
+                                                        continue
+                                                    try:
+                                                        fi = int(row[frame_idx_col])
+                                                        ce_val = float(row[ce_col]) if len(row) > ce_col and row[ce_col] not in {None, ""} else None
+                                                    except Exception:
+                                                        continue
+                                                    metrics_map[str(fi)] = {"ce": ce_val}
+                                                if metrics_map:
+                                                    per_frame_metrics = metrics_map
+                                                    break
+                                        except Exception:
+                                            continue
+                                per_frame_cache[metrics_dir] = per_frame_metrics
+                        stem = Path(parts[-1]).stem
+                        frame_idx = None
+                        if stem.startswith("frame_"):
+                            try:
+                                frame_idx = int(stem.split("_", 1)[1])
+                            except Exception:
+                                frame_idx = None
+                        if frame_idx is None:
+                            match = re.search(r"(\d+)$", stem)
+                            if match:
+                                try:
+                                    frame_idx = int(match.group(1))
+                                except Exception:
+                                    frame_idx = None
+                        ce_val = None
+                        if per_frame_metrics and frame_idx is not None:
+                            frame_entry = per_frame_metrics.get(str(frame_idx))
+                            if isinstance(frame_entry, dict):
+                                ce_val = frame_entry.get("ce")
+                        if ce_val is None:
+                            ce_val = ce_map.get(video_name)
+                        if ce_val is not None:
+                            item["ce_px"] = ce_val
+
         elif category == "detection_metrics":
             base = exp_path / "test" / "detection" / "metrics"
             items = list_images(exp_path, base, "*.png", limit, exp_id)
-        elif category == "segmentation_overlays":
+
+        elif category in {"segmentation_overlays", "segmentation_errors"}:
             base = exp_path / "test" / "segmentation"
-            items = list_images(exp_path, base, "*overlay.png", limit, exp_id)
-        elif category == "segmentation_errors":
-            base = exp_path / "test" / "segmentation"
-            items = list_images(exp_path, base, "*error.png", limit, exp_id)
+            pattern = "*overlay.png" if category == "segmentation_overlays" else "*error.png"
+            items = list_images(exp_path, base, pattern, limit, exp_id)
+            # Attach centroid error (pixels) per video and per frame if available
+            seg_metrics = gather_segmentation_metrics(exp_path)
+            ce_map: Dict[str, float] = {}
+            for entry in seg_metrics.get("per_video", []):
+                video = entry.get("video")
+                metrics = entry.get("metrics") or {}
+                ce_val = metrics.get("centroid_mean") if isinstance(metrics, dict) else None
+                if video is not None and ce_val is not None:
+                    # map both basename and stem for robustness
+                    video_name = os.path.basename(str(video))
+                    ce_map[video_name] = ce_val
+                    ce_map[Path(video_name).stem] = ce_val
+            per_frame_cache: Dict[Path, Dict[str, Dict]] = {}
+            for item in items:
+                label = item.get("label", "")
+                path_obj = Path(label)
+                stem = path_obj.stem
+                video_dir = None
+                metrics_for_video: Optional[Dict[str, Dict]] = None
+                parts = path_obj.parts
+                if "visualizations_roi" in parts:
+                    idx = parts.index("visualizations_roi")
+                    if idx >= 1:
+                        video_dir = parts[idx - 1]
+                        video_dir_path = exp_path / Path(*parts[: idx])  # path up to video dir
+                        metrics_path = video_dir_path / "metrics_per_frame.json"
+                        if metrics_path.exists():
+                            metrics_for_video = per_frame_cache.get(metrics_path)
+                            if metrics_for_video is None:
+                                metrics_for_video = load_json(metrics_path) or {}
+                                per_frame_cache[metrics_path] = metrics_for_video
+                # strip common suffixes
+                for suffix in ["_overlay", "_error"]:
+                    if stem.endswith(suffix):
+                        stem = stem[: -len(suffix)]
+                        break
+                # Try per-frame centroid error if available
+                frame_idx = None
+                if stem.startswith("frame_"):
+                    try:
+                        frame_idx = int(stem.split("_", 1)[1])
+                    except Exception:
+                        frame_idx = None
+                if frame_idx is None:
+                    match = re.search(r"(\d+)$", stem)
+                    if match:
+                        try:
+                            frame_idx = int(match.group(1))
+                        except Exception:
+                            frame_idx = None
+                ce_val = None
+                if metrics_for_video and frame_idx is not None:
+                    frame_entry = metrics_for_video.get(str(frame_idx))
+                    if isinstance(frame_entry, dict):
+                        ce_val = frame_entry.get("centroid")
+                if ce_val is None:
+                    ce_val = ce_map.get(video_dir) or ce_map.get(stem) or ce_map.get(path_obj.name)
+                if ce_val is not None:
+                    item["ce_px"] = ce_val
+
         else:
             raise HTTPException(status_code=400, detail="Unknown category")
+
         return {"items": items}
 
     @app.get("/media")

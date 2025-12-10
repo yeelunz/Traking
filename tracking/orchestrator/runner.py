@@ -20,6 +20,7 @@ from ..classification.engine import run_subject_classification
 from ..segmentation import SegmentationWorkflow
 # import built-in plugins to populate registries
 from ..preproc import clahe  # noqa: F401
+from ..preproc import augment  # noqa: F401
 from ..models import template_matching  # noqa: F401
 from ..models import csrt  # noqa: F401
 from ..models import optical_flow_lk  # noqa: F401
@@ -499,9 +500,18 @@ class PipelineRunner:
                     except Exception:
                         pass
                     if evaluator:
+                        gt_frames_nonempty = {int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes}
+                        if restrict_to_gt_frames and not gt_frames_nonempty:
+                            self._log(
+                                f"[Eval] Skip metrics for {os.path.basename(vp)} (no GT frames).",
+                                to_console=(tqdm is None),
+                            )
+                            res = {}
+                            # still keep per-model predictions in per_model_video_predictions
+                            continue
                         # Filter predictions to GT frames only for evaluation (avoid penalizing unannotated frames)
                         if restrict_to_gt_frames:
-                            gt_frames_set = {int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes}
+                            gt_frames_set = gt_frames_nonempty
                             eval_pv_predictions = {}
                             if gt_frames_set:
                                 min_gt = min(gt_frames_set)
@@ -998,9 +1008,16 @@ class PipelineRunner:
                         train_summary = seg_workflow.train(train_targets, val_videos, seed=int(seg_seed))
                         if train_summary:
                             stage_entry["metrics"] = train_summary
+                            def _fmt(v: object) -> str:
+                                # Format numbers consistently; fall back to str for non-numerics
+                                try:
+                                    return f"{float(v):.4f}"
+                                except (TypeError, ValueError):
+                                    return str(v)
+
                             self._log(
                                 "[Segmentation] Training summary: "
-                                + ", ".join(f"{k}={v:.4f}" for k, v in train_summary.items()),
+                                + ", ".join(f"{k}={_fmt(v)}" for k, v in train_summary.items()),
                                 to_console=(tqdm is None),
                             )
                         seg_workflow.load_checkpoint()

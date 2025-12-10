@@ -1,0 +1,303 @@
+queue:
+  # ----------------------------------------------------------------
+  # 基準組 (Baseline) - 目前的絕對冠軍
+  # ----------------------------------------------------------------
+  - label: "01_BEST_hybrid_margin24_canny30_80"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "best_hybrid_baseline"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: &detector_base
+                weights: models/detection/best_large_no_clahe.pt
+                conf: 0.25
+                iou: 0.5
+                imgsz: 640
+                device: cuda
+                classes: null
+                max_det: 100
+                fallback_last_prediction: true
+                train_enabled: false
+                epochs: 0
+                batch: 8
+                lr0: 0.01
+                patience: 50
+                workers: 0
+                include_empty_frames: false
+                force_cpu_if_no_cuda: true
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+      classification: {enabled: false}
+      segmentation: &segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            canny_low: 30
+            canny_high: 80
+            edge_weight_beta: 10.0
+            postprocess_kernel: 3
+            open_iter: 0
+            close_iter: 1
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
+        # Common settings
+        padding_min: 0.10
+        padding_max: 0.15
+        jitter: 0.0
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 0
+        batch_size: 1
+        num_workers: 0
+        lr: 0.0
+        weight_decay: 0.0
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.0
+        seed: 1337
+        device: auto
+        train: false
+        inference_checkpoint: null
+      output: &output_defaults
+        results_root: results
+
+  # ----------------------------------------------------------------
+  # 變量 1: Post-process Kernel (後處理平滑度)
+  # 目前是 5，測試更銳利 (3) 和更圓潤 (7, 9)
+  # ----------------------------------------------------------------
+  - label: "02_kernel3_sharper"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "kernel3_sharper"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_base
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation:
+        <<: *segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            canny_low: 30
+            canny_high: 80
+            edge_weight_beta: 10.0
+            # Kernel 變小，保留更多細節，但也可能保留鋸齒
+            postprocess_kernel: 3
+            open_iter: 0
+            close_iter: 1
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
+
+  - label: "03_kernel7_smoother"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "kernel7_smoother"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_base
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation:
+        <<: *segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            canny_low: 30
+            canny_high: 80
+            edge_weight_beta: 10.0
+            # Kernel 變大，結果更像一個圓潤的橢圓
+            postprocess_kernel: 7
+            open_iter: 0
+            close_iter: 1
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
+
+  - label: "04_kernel9_very_smooth"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "kernel9_very_smooth"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_base
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation:
+        <<: *segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            canny_low: 30
+            canny_high: 80
+            edge_weight_beta: 10.0
+            # 極度平滑，可能會讓形狀更符合神經的「概念」形狀
+            postprocess_kernel: 9
+            open_iter: 0
+            close_iter: 1
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
+
+  # ----------------------------------------------------------------
+  # 變量 2: Canny Low Threshold (邊緣連接性)
+  # 目前 Low: 30, High: 80。測試 Low 的極限。
+  # ----------------------------------------------------------------
+  - label: "05_canny_low10_sensitive"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "canny_low10_sensitive"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_base
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation:
+        <<: *segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            # 降低 Low 閾值，允許更弱的邊緣連接起來
+            canny_low: 10
+            canny_high: 80
+            edge_weight_beta: 10.0
+            postprocess_kernel: 5
+            open_iter: 0
+            close_iter: 1
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
+
+  - label: "06_canny_low45_strict"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "canny_low45_strict"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_base
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation:
+        <<: *segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            # 提高 Low 閾值，只保留非常確定的邊緣，減少內部雜訊
+            canny_low: 45
+            canny_high: 80
+            edge_weight_beta: 10.0
+            postprocess_kernel: 5
+            open_iter: 0
+            close_iter: 1
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
+
+  # ----------------------------------------------------------------
+  # 變量 3: 激進組合 (High Kernel + High Close)
+  # ----------------------------------------------------------------
+  - label: "07_smooth_blob_strategy"
+    config:
+      seed: 42
+      dataset:
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments:
+        - name: "smooth_blob_strategy"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_base
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation:
+        <<: *segmentation_base
+        model:
+          name: auto_mask
+          params:
+            margin: 0.24
+            num_iter: 0
+            canny_low: 30
+            canny_high: 80
+            edge_weight_beta: 10.0
+            # 大 Kernel + 更多的 Close，旨在生成一個非常穩定的橢圓形
+            postprocess_kernel: 7
+            open_iter: 0
+            close_iter: 2
+            dilate_iter: 4
+            use_mgac: false
+        padding_inference: 0.18
