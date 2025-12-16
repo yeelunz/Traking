@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ..core.interfaces import FramePrediction, MaskStats, SegmentationData
+from ..core.interfaces import FramePrediction, MaskStats, SegmentationData, PreprocessingModule
 from ..utils.annotations import load_coco_vid
 from .utils import (
     BoundingBox,
@@ -46,6 +46,8 @@ class SegmentationCropDataset(Dataset):
         cache_annotations: Optional[Dict[str, Dict]] = None,
         jitter: float = 0.0,
         target_size: Optional[Tuple[int, int]] = None,
+        preprocs: Optional[Sequence[PreprocessingModule]] = None,
+        roi_preprocs: Optional[Sequence[PreprocessingModule]] = None,
     ) -> None:
         super().__init__()
         self.dataset_root = dataset_root
@@ -61,6 +63,12 @@ class SegmentationCropDataset(Dataset):
         self.entries: List[SegmentationSampleDescriptor] = []
         self._annotations_cache: Dict[str, Dict] = dict(cache_annotations or {})
         self.missing_annotations: List[str] = []
+        self._mask_valid_cache: Dict[str, bool] = {}
+        self.empty_masks: List[Tuple[str, int]] = []
+        # global preprocs apply to full frames before ROI cropping
+        self.preprocs: List[PreprocessingModule] = list(preprocs or [])
+        # roi preprocs apply to ROI crops after cropping
+        self.roi_preprocs: List[PreprocessingModule] = list(roi_preprocs or [])
 
         for video_path in video_paths:
             ann = self._get_annotation(video_path)
@@ -80,6 +88,9 @@ class SegmentationCropDataset(Dataset):
                 item = items[0]
                 bbox = tuple(item.get("bbox", (0.0, 0.0, 0.0, 0.0)))
                 mask_path = item.get("mask_path")
+                if not self._mask_has_content(video_path, mask_path):
+                    self.empty_masks.append((video_path, int(frame_idx)))
+                    continue
                 for _ in range(max(1, redundancy)):
                     pad = self._sample_padding()
                     roi_bbox = self._compute_roi(bbox, pad, video_path, frame_idx, image_shape)
@@ -101,6 +112,8 @@ class SegmentationCropDataset(Dataset):
         frame = self._load_frame(entry.video_path, entry.frame_index)
         if frame is None:
             raise RuntimeError(f"Failed to read frame {entry.frame_index} from {entry.video_path}")
+        if self.preprocs:
+            frame = self._apply_preprocs_frame(frame, self.preprocs)
         mask_full = self._load_mask(entry.video_path, entry.mask_path)
         if mask_full is None:
             raise RuntimeError(f"Mask not found for frame {entry.frame_index} in {entry.video_path}")
@@ -109,6 +122,8 @@ class SegmentationCropDataset(Dataset):
             roi_bbox = self._jitter_bbox(roi_bbox, frame.shape[:2])
         roi_image = crop_with_bbox(frame, roi_bbox)
         roi_mask = crop_with_bbox(mask_full, roi_bbox)
+        if self.roi_preprocs and roi_image.size != 0:
+            roi_image = self._apply_preprocs_frame(roi_image, self.roi_preprocs)
         orig_size = roi_image.shape[:2]
         if self.target_size is not None:
             roi_image = self._resize_image(roi_image, self.target_size)
@@ -128,6 +143,23 @@ class SegmentationCropDataset(Dataset):
             "original_roi_size": orig_size,
             "original_bbox": entry.original_bbox,
         }
+
+    def _apply_preprocs_frame(self, frame: np.ndarray, preprocs: Sequence[PreprocessingModule]) -> np.ndarray:
+        """Apply preprocessing modules to a frame (BGR or grayscale).
+
+        Preprocessing modules operate on RGB for 3-channel images.
+        """
+        if not preprocs:
+            return frame
+        if frame.ndim == 2:
+            out = frame
+            for p in preprocs:
+                out = p.apply_to_frame(out)
+            return out
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        for p in preprocs:
+            rgb = p.apply_to_frame(rgb)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
     # ---------------- internal helpers ----------------
     def _sample_padding(self) -> float:
@@ -222,7 +254,19 @@ class SegmentationCropDataset(Dataset):
         mask_bin = (mask > 0).astype(np.uint8) * 255
         mask_filled = fill_holes(mask_bin)
         mask_clean = keep_largest_component(mask_filled)
+        if mask_clean is None or mask_clean.size == 0 or np.count_nonzero(mask_clean) == 0:
+            return None
         return mask_clean
+
+    def _mask_has_content(self, video_path: str, mask_path: Optional[str]) -> bool:
+        if not mask_path:
+            return False
+        if mask_path in self._mask_valid_cache:
+            return self._mask_valid_cache[mask_path]
+        mask = self._load_mask(video_path, mask_path)
+        has_content = mask is not None
+        self._mask_valid_cache[mask_path] = has_content
+        return has_content
 
     # ---------------- resize helpers -----------------
     @staticmethod

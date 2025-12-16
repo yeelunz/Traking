@@ -7,13 +7,17 @@ const state = {
   selectedGroup: null,
   searchTerm: '',
   current: null,
+  currentView: { mode: 'single', expId: null, label: '' },
   detectionChart: null,
   segmentationChart: null,
   groupDetectionChart: null,
   groupSegmentationChart: null,
+  losoDetectionChart: null,
+  losoSegmentationChart: null,
   detectionCategory: 'detection_visualizations',
   segmentationCategory: 'segmentation_overlays',
-  groupChartSelections: {}
+  groupChartSelections: {},
+  losoChartSelections: {}
 };
 
 const DETECTION_SUMMARY_FIELDS = [
@@ -253,7 +257,8 @@ function renderExperiments() {
   }
   state.filtered.forEach((exp) => {
     const li = document.createElement('li');
-    li.innerHTML = `<strong>${exp.name}</strong><br /><small>${exp.relative_path}</small>`;
+    const foldSuffix = exp.is_loso && exp.fold_count ? ` (LOSO × ${exp.fold_count})` : '';
+    li.innerHTML = `<strong>${exp.name}${foldSuffix}</strong><br /><small>${exp.relative_path}</small>`;
     li.dataset.id = exp.id;
     if (state.current && state.current.id === exp.id) {
       li.classList.add('active');
@@ -361,6 +366,62 @@ function hideWelcome() {
   document.getElementById('experiment-details').classList.remove('hidden');
 }
 
+function resetFoldControls() {
+  const controls = document.getElementById('fold-controls');
+  if (controls) controls.classList.add('hidden');
+}
+
+function hideLosoOverview() {
+  const section = document.getElementById('loso-overview');
+  if (section) section.classList.add('hidden');
+  const subtitle = document.getElementById('loso-subtitle');
+  if (subtitle) subtitle.textContent = '';
+  const controls = document.getElementById('loso-chart-controls');
+  if (controls) {
+    controls.classList.add('hidden');
+    controls.innerHTML = '';
+  }
+  const table = document.getElementById('loso-fold-table');
+  if (table) table.innerHTML = '';
+  renderGroupSummaryChart('loso-detection-chart', [], 'detection', DETECTION_SUMMARY_FIELDS, 'losoDetectionChart');
+  renderGroupSummaryChart('loso-segmentation-chart', [], 'segmentation', SEGMENTATION_SUMMARY_FIELDS, 'losoSegmentationChart');
+}
+
+function showLosoOverview() {
+  const section = document.getElementById('loso-overview');
+  if (section) section.classList.remove('hidden');
+}
+
+function foldPreviewMetric(fold, section, key) {
+  return fold?.preview?.[section]?.[key];
+}
+
+function renderLosoFoldTable(folds) {
+  const table = document.getElementById('loso-fold-table');
+  if (!table) return;
+  if (!folds || !folds.length) {
+    table.innerHTML = '<tr><td>無 fold 資料</td></tr>';
+    return;
+  }
+  const columns = [
+    { label: 'Fold', format: (f) => f.fold || f.exp_id },
+    { label: 'Det IoU', format: (f) => formatPercentWithStd(foldPreviewMetric(f, 'detection', 'iou_mean'), foldPreviewMetric(f, 'detection', 'iou_std')) },
+    { label: 'Det Center Err', format: (f) => formatWithStd(foldPreviewMetric(f, 'detection', 'ce_mean'), foldPreviewMetric(f, 'detection', 'ce_std')) },
+    { label: 'Det SR@0.5', format: (f) => formatPercent(foldPreviewMetric(f, 'detection', 'success_rate_50')) },
+    { label: 'Seg Dice', format: (f) => formatPercentWithStd(foldPreviewMetric(f, 'segmentation', 'dice_mean'), foldPreviewMetric(f, 'segmentation', 'dice_std')) },
+    { label: 'Seg IoU', format: (f) => formatPercentWithStd(foldPreviewMetric(f, 'segmentation', 'iou_mean'), foldPreviewMetric(f, 'segmentation', 'iou_std')) },
+    { label: 'Seg Centroid', format: (f) => formatWithStd(foldPreviewMetric(f, 'segmentation', 'centroid_mean'), foldPreviewMetric(f, 'segmentation', 'centroid_std')) }
+  ];
+  const thead = '<tr>' + columns.map((c) => `<th>${c.label}</th>`).join('') + '</tr>';
+  const tbody = folds
+    .map((fold) => {
+      const cells = columns.map((c) => `<td>${c.format(fold)}</td>`).join('');
+      return `<tr data-exp-id="${fold.exp_id}">${cells}</tr>`;
+    })
+    .join('');
+  table.innerHTML = thead + tbody;
+}
+
 function previewMetric(exp, section, key) {
   return exp?.preview?.[section]?.[key];
 }
@@ -393,6 +454,122 @@ function getGroupChartSelection(group) {
 
 function setGroupChartSelection(groupKey, ids) {
   state.groupChartSelections[groupKey] = new Set(ids);
+}
+
+function initializeLosoChartSelection(expId, folds) {
+  if (!expId) return;
+  const validIds = new Set((folds || []).map((f) => f.exp_id).filter(Boolean));
+  const existing = state.losoChartSelections[expId];
+  if (!existing) {
+    state.losoChartSelections[expId] = new Set(validIds);
+    return;
+  }
+  const filtered = new Set();
+  existing.forEach((id) => {
+    if (validIds.has(id)) {
+      filtered.add(id);
+    }
+  });
+  if (!filtered.size && existing.size) {
+    state.losoChartSelections[expId] = new Set(validIds);
+  } else {
+    state.losoChartSelections[expId] = filtered;
+  }
+}
+
+function getLosoChartSelection(expId, folds) {
+  initializeLosoChartSelection(expId, folds);
+  return state.losoChartSelections[expId] || new Set();
+}
+
+function setLosoChartSelection(expId, ids) {
+  state.losoChartSelections[expId] = new Set(ids);
+}
+
+function getSelectedLosoFolds(expId, folds) {
+  if (!expId) return folds || [];
+  const selection = getLosoChartSelection(expId, folds);
+  return (folds || []).filter((f) => selection.has(f.exp_id));
+}
+
+function updateLosoCharts(expId, folds) {
+  const selected = getSelectedLosoFolds(expId, folds);
+  const foldAsExperiments = selected.map((f) => ({
+    name: f.fold || f.exp_id,
+    preview: f.preview || {},
+    has_detection: !!f.has_detection,
+    has_segmentation: !!f.has_segmentation
+  }));
+  renderGroupSummaryChart('loso-detection-chart', foldAsExperiments, 'detection', DETECTION_SUMMARY_FIELDS, 'losoDetectionChart');
+  renderGroupSummaryChart('loso-segmentation-chart', foldAsExperiments, 'segmentation', SEGMENTATION_SUMMARY_FIELDS, 'losoSegmentationChart');
+}
+
+function renderLosoChartControls(expId, folds) {
+  const container = document.getElementById('loso-chart-controls');
+  if (!container) return;
+  if (!expId || !folds || folds.length <= 1) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+  const selection = getLosoChartSelection(expId, folds);
+  container.classList.remove('hidden');
+  container.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'chart-controls-header';
+  const title = document.createElement('h4');
+  title.textContent = `比較圖顯示 folds (${selection.size}/${folds.length})`;
+  header.appendChild(title);
+  const actions = document.createElement('div');
+  const selectAll = document.createElement('button');
+  selectAll.type = 'button';
+  selectAll.className = 'ghost-button compact';
+  selectAll.textContent = '全選';
+  selectAll.addEventListener('click', () => {
+    setLosoChartSelection(expId, folds.map((f) => f.exp_id).filter(Boolean));
+    renderLosoChartControls(expId, folds);
+    updateLosoCharts(expId, folds);
+  });
+  const clearAll = document.createElement('button');
+  clearAll.type = 'button';
+  clearAll.className = 'ghost-button compact';
+  clearAll.textContent = '清除';
+  clearAll.addEventListener('click', () => {
+    setLosoChartSelection(expId, []);
+    renderLosoChartControls(expId, folds);
+    updateLosoCharts(expId, folds);
+  });
+  actions.appendChild(selectAll);
+  actions.appendChild(clearAll);
+  header.appendChild(actions);
+  container.appendChild(header);
+  const toggleList = document.createElement('div');
+  toggleList.className = 'chart-toggle-list';
+  folds.forEach((fold) => {
+    const foldId = fold.exp_id;
+    if (!foldId) return;
+    const label = document.createElement('label');
+    label.className = 'chart-toggle';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = selection.has(foldId);
+    input.addEventListener('change', () => {
+      const currentSelection = getLosoChartSelection(expId, folds);
+      if (input.checked) {
+        currentSelection.add(foldId);
+      } else {
+        currentSelection.delete(foldId);
+      }
+      renderLosoChartControls(expId, folds);
+      updateLosoCharts(expId, folds);
+    });
+    const span = document.createElement('span');
+    span.textContent = fold.fold || foldId;
+    label.appendChild(input);
+    label.appendChild(span);
+    toggleList.appendChild(label);
+  });
+  container.appendChild(toggleList);
 }
 
 function getSelectedGroupExperiments(group) {
@@ -627,6 +804,78 @@ function buildCards(metrics) {
     div.innerHTML = `<h4>${item.label}</h4><span>${item.value}</span>`;
     cards.appendChild(div);
   });
+}
+
+function clearVisuals() {
+  const det = document.getElementById('detection-gallery');
+  const seg = document.getElementById('segmentation-gallery');
+  if (det) det.innerHTML = '<p>聚合視圖不提供可視化，請選擇 fold 查看。</p>';
+  if (seg) seg.innerHTML = '<p>聚合視圖不提供可視化，請選擇 fold 查看。</p>';
+}
+
+function clearPerVideoTablesAndCharts() {
+  buildTable('detection-table', [], [{ label: 'Video', format: (row) => row.video }]);
+  buildTable('segmentation-table', [], [{ label: 'Video', format: (row) => row.video }]);
+  state.detectionChart = buildChart('detection-chart', state.detectionChart, [], []);
+  state.segmentationChart = buildChart('segmentation-chart', state.segmentationChart, [], []);
+}
+
+async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
+  document.getElementById('exp-name').textContent = payload.experiment?.name || viewLabel || expIdForAssets || '';
+  document.getElementById('exp-path').textContent = payload.experiment?.output_dir || '';
+  buildCards(payload);
+  renderSummaryTable('detection-summary-table', payload.detection?.summary, DETECTION_SUMMARY_FIELDS);
+  renderSummaryTable('segmentation-summary-table', payload.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS);
+
+  const detectionRows = payload.detection?.per_video || [];
+  const segmentationRows = payload.segmentation?.per_video || [];
+
+  buildTable('detection-table', detectionRows, [
+    { label: 'Video', format: (row) => row.video },
+    { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
+    { label: 'Center Err (px)', format: (row) => formatWithStd(row.metrics?.ce_mean, row.metrics?.ce_std) },
+    { label: 'SR@0.5', format: (row) => formatPercent(row.metrics?.success_rate_50) }
+  ]);
+
+  buildTable('segmentation-table', segmentationRows, [
+    { label: 'Video', format: (row) => row.video },
+    { label: 'Dice (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.dice_mean, row.metrics?.dice_std) },
+    { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
+    { label: 'Centroid (px)', format: (row) => formatWithStd(row.metrics?.centroid_mean, row.metrics?.centroid_std) }
+  ]);
+
+  state.detectionChart = buildChart('detection-chart', state.detectionChart, detectionRows, [
+    { key: 'iou_mean', label: 'IoU', color: '#6aa5ff', percent: true },
+    { key: 'success_rate_50', label: 'SR@0.5', color: '#f8c146', percent: true },
+    { key: 'success_rate_75', label: 'SR@0.75', color: '#bd93f9', percent: true },
+    { key: 'ce_mean', label: 'Center Err (pix)', color: '#66dfc5', axisId: 'y1' }
+  ], {
+    axes: {
+      y: { percent: true, percentDigits: 2 },
+      y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false } }
+    }
+  });
+
+  state.segmentationChart = buildChart('segmentation-chart', state.segmentationChart, segmentationRows, [
+    { key: 'dice_mean', label: 'Dice', color: '#66dfc5', percent: true },
+    { key: 'iou_mean', label: 'IoU', color: '#bd93f9', percent: true },
+    { key: 'centroid_mean', label: 'Centroid', color: '#ff8ba7', axisId: 'y1' }
+  ], {
+    axes: {
+      y: { percent: true, percentDigits: 2 },
+      y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false } }
+    }
+  });
+
+  if (!expIdForAssets) {
+    clearVisuals();
+    return;
+  }
+
+  await loadGallery('detection-gallery', expIdForAssets, state.detectionCategory);
+  await loadGallery('segmentation-gallery', expIdForAssets, state.segmentationCategory);
+  renderVisualTabs('detection-gallery', 'detectionCategory');
+  renderVisualTabs('segmentation-gallery', 'segmentationCategory');
 }
 
 function buildTable(el, rows, columns) {
@@ -967,60 +1216,45 @@ async function selectExperiment(expId) {
     return;
   }
   state.current = target;
+  state.currentView = { mode: 'single', expId: expId, label: '' };
   renderExperiments();
   hideWelcome();
+  resetFoldControls();
+  hideLosoOverview();
+
   const params = new URLSearchParams({ exp_id: expId });
   const res = await fetchJSON(`/api/experiments/metrics?${params.toString()}`);
-  document.getElementById('exp-name').textContent = res.experiment.name || expId;
-  document.getElementById('exp-path').textContent = res.experiment.output_dir || '';
-  buildCards(res);
-  renderSummaryTable('detection-summary-table', res.detection?.summary, DETECTION_SUMMARY_FIELDS);
-  renderSummaryTable('segmentation-summary-table', res.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS);
 
-  const detectionRows = res.detection?.per_video || [];
-  const segmentationRows = res.segmentation?.per_video || [];
+  // LOSO aggregated experiment: show folds big table + aggregate charts; click fold to drill down.
+  if (res && res.mode === 'aggregate' && Array.isArray(res.folds) && res.folds.length) {
+    state.currentView = { mode: 'aggregate', expId: expId, label: '' };
+    await renderExperimentPayload(res, null, `${res.experiment?.name || expId}`);
+    clearPerVideoTablesAndCharts();
+    showLosoOverview();
+    const subtitle = document.getElementById('loso-subtitle');
+    if (subtitle) subtitle.textContent = `${res.folds.length} folds | 點選 fold 可載入細節`;
+    renderLosoFoldTable(res.folds);
 
-  buildTable('detection-table', detectionRows, [
-    { label: 'Video', format: (row) => row.video },
-    { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
-    { label: 'Center Err (px)', format: (row) => formatWithStd(row.metrics?.ce_mean, row.metrics?.ce_std) },
-    { label: 'SR@0.5', format: (row) => formatPercent(row.metrics?.success_rate_50) }
-  ]);
+    renderLosoChartControls(expId, res.folds);
+    updateLosoCharts(expId, res.folds);
 
-  buildTable('segmentation-table', segmentationRows, [
-    { label: 'Video', format: (row) => row.video },
-    { label: 'Dice (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.dice_mean, row.metrics?.dice_std) },
-    { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
-    { label: 'Centroid (px)', format: (row) => formatWithStd(row.metrics?.centroid_mean, row.metrics?.centroid_std) }
-  ]);
-
-  state.detectionChart = buildChart('detection-chart', state.detectionChart, detectionRows, [
-    { key: 'iou_mean', label: 'IoU', color: '#6aa5ff', percent: true },
-    { key: 'success_rate_50', label: 'SR@0.5', color: '#f8c146', percent: true },
-    { key: 'success_rate_75', label: 'SR@0.75', color: '#bd93f9', percent: true },
-    { key: 'ce_mean', label: 'Center Err (pix)', color: '#66dfc5', axisId: 'y1' }
-  ], {
-    axes: {
-      y: { percent: true, percentDigits: 2 },
-      y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false } }
+    const table = document.getElementById('loso-fold-table');
+    if (table) {
+      table.querySelectorAll('tr[data-exp-id]').forEach((row) => {
+        row.addEventListener('click', async () => {
+          const foldId = row.getAttribute('data-exp-id');
+          if (!foldId) return;
+          state.currentView = { mode: 'fold', expId: foldId, label: '' };
+          const foldParams = new URLSearchParams({ exp_id: foldId });
+          const foldRes = await fetchJSON(`/api/experiments/metrics?${foldParams.toString()}`);
+          await renderExperimentPayload(foldRes, foldId, `${foldRes.experiment?.name || expId}`);
+        });
+      });
     }
-  });
+  } else {
+    await renderExperimentPayload(res, expId, `${res.experiment?.name || expId}`);
+  }
 
-  state.segmentationChart = buildChart('segmentation-chart', state.segmentationChart, segmentationRows, [
-    { key: 'dice_mean', label: 'Dice', color: '#66dfc5', percent: true },
-    { key: 'iou_mean', label: 'IoU', color: '#bd93f9', percent: true },
-    { key: 'centroid_mean', label: 'Centroid', color: '#ff8ba7', axisId: 'y1' }
-  ], {
-    axes: {
-      y: { percent: true, percentDigits: 2 },
-      y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false } }
-    }
-  });
-
-  await loadGallery('detection-gallery', expId, state.detectionCategory);
-  await loadGallery('segmentation-gallery', expId, state.segmentationCategory);
-  renderVisualTabs('detection-gallery', 'detectionCategory');
-  renderVisualTabs('segmentation-gallery', 'segmentationCategory');
   renderGroupOverview();
 }
 

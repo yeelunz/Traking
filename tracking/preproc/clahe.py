@@ -18,8 +18,9 @@ class CLAHE(PreprocessingModule):
     def __init__(self, config: Dict):
         if cv2 is None:
             raise RuntimeError("OpenCV (opencv-python) is required for CLAHE preprocessor.")
-        clip = float(config.get("clipLimit", 2.0))
-        grid = config.get("tileGridSize", [8, 8])
+        # Accept both OpenCV-style keys and schedule-friendly aliases.
+        clip = float(config.get("clipLimit", config.get("clip", 2.0)))
+        grid = config.get("tileGridSize", config.get("grid", [8, 8]))
         self.clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=tuple(grid))
 
     def apply_to_frame(self, frame: np.ndarray) -> np.ndarray:

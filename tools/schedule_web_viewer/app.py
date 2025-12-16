@@ -5,7 +5,7 @@ import csv
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 import re
 from urllib.parse import quote, urlencode
 
@@ -51,12 +51,120 @@ def segmentation_summary_metrics(exp_path: Path) -> Optional[Dict]:
     return first_value(first_model) if first_model else None
 
 
+def _format_loso_fold(subject: Optional[object], fallback: Optional[str] = None) -> str:
+    """Normalize fold label for display/grouping.
+
+    Prefer metadata dataset.split.subject. If it's numeric, format as losoXYZ.
+    """
+    if subject is None:
+        return fallback or "loso"
+    try:
+        s = str(subject).strip()
+    except Exception:
+        return fallback or "loso"
+    if not s:
+        return fallback or "loso"
+    # numeric subject ids like "4" or "004"
+    if s.isdigit():
+        return f"loso{int(s):03d}"
+    # already looks like loso...
+    if s.lower().startswith("loso"):
+        return s.lower()
+    return s
+
+
+def _is_loso_run(meta: Dict) -> bool:
+    split = (meta.get("dataset") or {}).get("split") or {}
+    method = str(split.get("method") or "").strip().lower()
+    if method == "loso":
+        return True
+    if bool(split.get("loso", False)):
+        return True
+    # heuristic: if subject exists and total_folds > 1
+    if split.get("subject") is not None:
+        try:
+            total_folds = int(split.get("total_folds") or 0)
+        except Exception:
+            total_folds = 0
+        if total_folds > 1:
+            return True
+    return False
+
+
+def _aggregate_id(group_path: str, exp_name: str) -> str:
+    group = (group_path or "").strip("/")
+    name = (exp_name or "").strip()
+    if group:
+        return f"{group}/{name}"
+    return name
+
+
+def _mean(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return sum(values) / float(len(values))
+
+
+def _std(values: List[float]) -> Optional[float]:
+    if len(values) < 2:
+        return None
+    mu = _mean(values)
+    if mu is None:
+        return None
+    var = sum((v - mu) ** 2 for v in values) / float(len(values) - 1)
+    return var ** 0.5
+
+
+def aggregate_preview_dicts(previews: List[Optional[Dict]]) -> Optional[Dict]:
+    """Aggregate per-fold preview dicts into mean/std across folds.
+
+    Notes:
+    - We only aggregate numeric scalar fields.
+    - We skip existing '*_std' inputs and compute std from the corresponding value field.
+    - If both 'fps' and 'fps_mean' exist, we prefer '*_mean' variants.
+    """
+    preview_dicts = [p for p in previews if isinstance(p, dict)]
+    if not preview_dicts:
+        return None
+
+    all_keys: set[str] = set()
+    for p in preview_dicts:
+        all_keys.update(p.keys())
+
+    values_by_key: Dict[str, List[float]] = {}
+    for p in preview_dicts:
+        for key, value in p.items():
+            if key.endswith("_std"):
+                continue
+            if f"{key}_mean" in all_keys:
+                continue
+            if isinstance(value, (int, float)):
+                values_by_key.setdefault(key, []).append(float(value))
+
+    aggregated: Dict[str, float] = {}
+    for key, values in values_by_key.items():
+        mu = _mean(values)
+        if mu is None:
+            continue
+        aggregated[key] = mu
+        if key.endswith("_mean"):
+            std_key = f"{key[:-5]}_std"
+        else:
+            std_key = f"{key}_std"
+        sigma = _std(values)
+        if sigma is not None:
+            aggregated[std_key] = sigma
+
+    return aggregated or None
+
+
 class ExperimentIndex:
     def __init__(self, root: Path):
         self.root = root.resolve()
         if not self.root.exists():
             raise FileNotFoundError(f"Results root not found: {self.root}")
         self.entries: Dict[str, Dict] = {}
+        self.loso_groups: Dict[str, List[Dict]] = {}
         self.refresh()
 
     def _experiment_dirs(self) -> List[Path]:
@@ -77,6 +185,7 @@ class ExperimentIndex:
 
     def refresh(self) -> None:
         entries: Dict[str, Dict] = {}
+        loso_groups: Dict[str, List[Dict]] = {}
         for exp_path in self._experiment_dirs():
             meta_path = exp_path / "metadata.json"
             meta = load_json(meta_path)
@@ -90,6 +199,11 @@ class ExperimentIndex:
             models = [step.get("name") for step in pipeline if step.get("type") == "model"]
             rel = self._relative_label(exp_path)
             group_path = self._group_path(rel)
+            exp_name = experiment_meta.get("name") or exp_path.name
+            is_loso = _is_loso_run(meta)
+            split = (meta.get("dataset") or {}).get("split") or {}
+            fold_label = _format_loso_fold(split.get("subject"), fallback=None) if is_loso else None
+            aggregate_rel = _aggregate_id(group_path, str(exp_name)) if is_loso else None
             det_summary = exp_path / "test" / "detection" / "metrics" / "summary.json"
             seg_summary = exp_path / "test" / "segmentation" / "metrics_summary.json"
             det_preview = detection_summary_metrics(exp_path)
@@ -99,7 +213,10 @@ class ExperimentIndex:
                 "path": exp_path,
                 "relative_path": rel,
                 "group_path": group_path,
-                "name": experiment_meta.get("name") or exp_path.name,
+                "is_loso": is_loso,
+                "fold": fold_label,
+                "aggregate_id": aggregate_rel,
+                "name": exp_name,
                 "created_at": meta.get("created_at"),
                 "preprocs": preprocs,
                 "models": models,
@@ -113,7 +230,13 @@ class ExperimentIndex:
                 },
             }
             entries[rel] = entry
+            if is_loso and aggregate_rel and fold_label:
+                loso_groups.setdefault(aggregate_rel, []).append({
+                    "fold": fold_label,
+                    "exp_id": rel,
+                })
         self.entries = entries
+        self.loso_groups = loso_groups
 
     def _relative_label(self, path: Path) -> str:
         try:
@@ -132,7 +255,73 @@ class ExperimentIndex:
         return "/".join(parts[:-1])
 
     def list_entries(self) -> List[Dict]:
-        public_entries = [self._public_entry(e) for e in self.entries.values()]
+        public_entries: List[Dict] = []
+
+        # 1) Non-LOSO (or already aggregated) experiments
+        for entry in self.entries.values():
+            if entry.get("is_loso"):
+                continue
+            public_entries.append(self._public_entry(entry))
+
+        # 2) LOSO aggregated experiments (one entry per base experiment across folds)
+        for aggregate_id, fold_entries in self.loso_groups.items():
+            fold_public: List[Dict] = []
+            for fold_item in fold_entries:
+                raw_id = fold_item.get("exp_id")
+                if not raw_id:
+                    continue
+                raw_entry = self.entries.get(raw_id)
+                if not raw_entry:
+                    continue
+                fold_public.append({
+                    "fold": fold_item.get("fold"),
+                    "id": raw_entry.get("id"),
+                    "relative_path": raw_entry.get("relative_path"),
+                    "created_at": raw_entry.get("created_at"),
+                    "has_detection": raw_entry.get("has_detection"),
+                    "has_segmentation": raw_entry.get("has_segmentation"),
+                    "preview": raw_entry.get("preview", {}),
+                })
+
+            if not fold_public:
+                continue
+
+            # Use the newest fold for name/config display
+            fold_public.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+            newest_raw = self.entries.get(fold_public[0]["id"])
+            if not newest_raw:
+                continue
+
+            det_previews = [f.get("preview", {}).get("detection") for f in fold_public]
+            seg_previews = [f.get("preview", {}).get("segmentation") for f in fold_public]
+            aggregate_preview = {
+                "detection": aggregate_preview_dicts(det_previews),
+                "segmentation": aggregate_preview_dicts(seg_previews),
+            }
+            created_at = fold_public[0].get("created_at")
+            group_path = ""
+            try:
+                if "/" in aggregate_id:
+                    group_path = aggregate_id.rsplit("/", 1)[0]
+            except Exception:
+                group_path = ""
+            public_entries.append({
+                "id": aggregate_id,
+                "name": newest_raw.get("name"),
+                "relative_path": aggregate_id,
+                "group_path": group_path,
+                "created_at": created_at,
+                "preprocs": newest_raw.get("preprocs", []),
+                "models": newest_raw.get("models", []),
+                "has_detection": any(bool(f.get("has_detection")) for f in fold_public),
+                "has_segmentation": any(bool(f.get("has_segmentation")) for f in fold_public),
+                "has_detection_visuals": any(self.entries.get(f.get("id"), {}).get("has_detection_visuals") for f in fold_public),
+                "has_segmentation_visuals": any(self.entries.get(f.get("id"), {}).get("has_segmentation_visuals") for f in fold_public),
+                "preview": aggregate_preview,
+                "is_loso": True,
+                "fold_count": len(fold_public),
+            })
+
         return sorted(public_entries, key=lambda item: item.get("created_at") or "", reverse=True)
 
     def _public_entry(self, entry: Dict) -> Dict:
@@ -149,6 +338,7 @@ class ExperimentIndex:
             "has_detection_visuals": entry["has_detection_visuals"],
             "has_segmentation_visuals": entry["has_segmentation_visuals"],
             "preview": entry.get("preview", {}),
+            "is_loso": bool(entry.get("is_loso", False)),
         }
 
     def get_path(self, exp_id: str) -> Path:
@@ -156,6 +346,9 @@ class ExperimentIndex:
         if not entry:
             raise KeyError(exp_id)
         return Path(entry["path"])
+
+    def get_loso_folds(self, aggregate_id: str) -> List[Dict]:
+        return list(self.loso_groups.get(aggregate_id) or [])
 
 
 def gather_detection_metrics(exp_path: Path) -> Dict:
@@ -289,6 +482,60 @@ def create_app(results_root: Path) -> FastAPI:
         return {"count": len(index.entries)}
 
     def _experiment_payload(exp_id: str):
+        # Aggregated LOSO entry (virtual experiment id)
+        folds = index.get_loso_folds(exp_id)
+        if folds:
+            fold_payloads: List[Dict] = []
+            det_fold_previews: List[Optional[Dict]] = []
+            seg_fold_previews: List[Optional[Dict]] = []
+            newest_created_at = None
+            newest_entry: Optional[Dict] = None
+
+            for fold in folds:
+                raw_id = fold.get("exp_id")
+                if not raw_id:
+                    continue
+                raw_entry = index.entries.get(raw_id)
+                if not raw_entry:
+                    continue
+                created_at = raw_entry.get("created_at")
+                if created_at and (newest_created_at is None or str(created_at) > str(newest_created_at)):
+                    newest_created_at = created_at
+                    newest_entry = raw_entry
+
+                det_fold_previews.append((raw_entry.get("preview") or {}).get("detection"))
+                seg_fold_previews.append((raw_entry.get("preview") or {}).get("segmentation"))
+                fold_payloads.append({
+                    "fold": fold.get("fold"),
+                    "exp_id": raw_id,
+                    "created_at": created_at,
+                    "preview": raw_entry.get("preview") or {},
+                    "has_detection": raw_entry.get("has_detection"),
+                    "has_segmentation": raw_entry.get("has_segmentation"),
+                })
+
+            fold_payloads.sort(key=lambda item: item.get("fold") or "")
+            aggregate_detection = aggregate_preview_dicts(det_fold_previews)
+            aggregate_segmentation = aggregate_preview_dicts(seg_fold_previews)
+
+            experiment_name = (newest_entry or {}).get("name") if newest_entry else exp_id
+            created_at = newest_created_at
+
+            return {
+                "id": exp_id,
+                "mode": "aggregate",
+                "experiment": {
+                    "name": experiment_name,
+                    "output_dir": None,
+                    "pipeline": None,
+                    "created_at": created_at,
+                },
+                "dataset": None,
+                "detection": {"summary": aggregate_detection, "per_video": []},
+                "segmentation": {"summary": aggregate_segmentation, "per_video": []},
+                "folds": fold_payloads,
+            }
+
         try:
             exp_path = index.get_path(exp_id)
         except KeyError:
@@ -300,6 +547,7 @@ def create_app(results_root: Path) -> FastAPI:
         segmentation = gather_segmentation_metrics(exp_path) if (exp_path / "test" / "segmentation").exists() else None
         return {
             "id": exp_id,
+            "mode": "single",
             "experiment": {
                 "name": experiment_info.get("name"),
                 "output_dir": experiment_info.get("output_dir"),

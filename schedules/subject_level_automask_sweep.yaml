@@ -1,11 +1,12 @@
-queue:
+﻿queue:
   - label: "01_automask_no_mgac_dilate4_baseline"
     config:
       seed: 42
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -84,7 +85,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -119,7 +121,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -154,7 +157,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -192,7 +196,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -230,7 +235,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -268,7 +274,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -306,7 +313,8 @@ queue:
       dataset:
         root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
         split:
-          method: subject_level
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments:
@@ -334,3 +342,5 @@ queue:
             dilate_iter: 3
             use_mgac: false
         padding_inference: 0.18
+
+

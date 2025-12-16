@@ -145,6 +145,46 @@ main {
   display: none;
 }
 
+#fold-controls {
+  margin-top: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+#fold-controls label {
+  color: #9ea6c6;
+  font-size: 0.85rem;
+}
+
+#fold-select {
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #2b3142;
+  background: #0b0d13;
+  color: #f5f5f5;
+}
+
+#loso-overview {
+  margin-top: 1.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #1f2330;
+}
+
+#loso-fold-table tr {
+  cursor: pointer;
+}
+
+#loso-fold-table tr:hover {
+  background: rgba(63, 140, 255, 0.08);
+}
+
+.hint {
+  color: #9ea6c6;
+  font-size: 0.85rem;
+  margin-top: 0.6rem;
+}
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

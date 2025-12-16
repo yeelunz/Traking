@@ -24,7 +24,7 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover
     _auto_mask_module = None
 
-from ..core.interfaces import FramePrediction, MaskStats, SegmentationData
+from ..core.interfaces import FramePrediction, MaskStats, SegmentationData, PreprocessingModule
 from ..core.registry import SEGMENTATION_MODEL_REGISTRY
 from ..utils.annotations import load_coco_vid
 from .dataset import SegmentationCropDataset, attach_ground_truth_segmentation
@@ -298,6 +298,11 @@ class SegmentationWorkflow:
         self.using_default_pretrained = False
         self.auto_mask_options: Dict[str, Any] = {}
         self._cuda_fallback_triggered = False
+        # Runtime-injected preproc chains.
+        # - preprocs: applied to full frames before ROI cropping (global scope)
+        # - roi_preprocs: applied to ROI crops after cropping (ROI scope)
+        self.preprocs: List[PreprocessingModule] = []
+        self.roi_preprocs: List[PreprocessingModule] = []
 
         if self.using_auto_mask:
             if not _AUTO_MASK_SUPPORT:
@@ -337,6 +342,24 @@ class SegmentationWorkflow:
                 and not self.inference_checkpoint
             ):
                 self._maybe_use_default_pretrained_model()
+
+    @staticmethod
+    def _apply_preprocs_frame(frame: np.ndarray, preprocs: Sequence[PreprocessingModule]) -> np.ndarray:
+        """Apply preprocessing modules to a frame (BGR or grayscale).
+
+        Preprocessing modules operate on RGB for 3-channel images.
+        """
+        if not preprocs:
+            return frame
+        if frame.ndim == 2:
+            out = frame
+            for p in preprocs:
+                out = p.apply_to_frame(out)
+            return out
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        for p in preprocs:
+            rgb = p.apply_to_frame(rgb)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -497,6 +520,8 @@ class SegmentationWorkflow:
             seed=train_seed,
             jitter=self.cfg.jitter,
             target_size=self.input_size,
+            preprocs=self.preprocs,
+            roi_preprocs=self.roi_preprocs,
         )
         if getattr(dataset, "missing_annotations", None):
             missing = dataset.missing_annotations
@@ -527,6 +552,8 @@ class SegmentationWorkflow:
                 seed=train_seed,
                 jitter=0.0,
                 target_size=self.input_size,
+                preprocs=self.preprocs,
+                roi_preprocs=self.roi_preprocs,
             )
             val_loader = DataLoader(
                 val_dataset,
@@ -714,43 +741,251 @@ class SegmentationWorkflow:
         mask_files: Dict[int, str] = {}
         total_infer_time = 0.0
         frame_counter = 0
+
+        def _ensure_mean_std_keys(summary: Dict[str, float]) -> Dict[str, float]:
+            # Viewer expects *_mean/std; keep legacy keys too.
+            for k in ("dice", "iou", "centroid"):
+                if k in summary and f"{k}_mean" not in summary:
+                    try:
+                        summary[f"{k}_mean"] = float(summary.get(k, 0.0))
+                    except Exception:
+                        summary[f"{k}_mean"] = 0.0
+                    summary.setdefault(f"{k}_std", 0.0)
+            return summary
+
+        # If GT exists, we should evaluate ALL GT frames.
+        # Missing bbox handling order:
+        # 1) Use bbox at the same frame (if any)
+        # 2) Fallback to previous bbox
+        # 3) If even the first bbox is missing, fallback to full-frame ROI
+        gt_frame_indices: List[int] = sorted(int(i) for i in gt_by_frame.keys()) if gt_by_frame else []
+        pred_by_frame: Dict[int, FramePrediction] = {int(p.frame_index): p for p in predictions}
+        work_predictions: List[FramePrediction] = []
         try:
-            for pred in predictions:
-                frame_idx = int(pred.frame_index)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    continue
-                bbox = expand_bbox(pred.bbox, self.cfg.padding_inference, frame.shape[:2])
-                roi = crop_with_bbox(frame, bbox)
-                if roi.size == 0:
-                    continue
-                if self.using_medsam and self.model is not None and hasattr(self.model, "set_prompts"):
-                    prompt_box = self._project_bbox_to_roi(pred.bbox, bbox, roi.shape[:2])
-                    if prompt_box is not None:
-                        box_flat = prompt_box.reshape(-1, 4)[0]
-                        cx = float((box_flat[0] + box_flat[2]) * 0.5)
-                        cy = float((box_flat[1] + box_flat[3]) * 0.5)
-                        self.model.set_prompts([
-                            {
-                                "box": prompt_box,
-                                "point_coords": [[cx, cy]],
-                                "point_labels": [1],
-                            }
-                        ])
+            if gt_frame_indices:
+                # last_bbox_raw stores an unpadded/unexpanded bbox estimate (either from detector
+                # or from bootstrap using the segmentation mask). We intentionally do NOT store
+                # padded/expanded ROI bboxes here to avoid expansion accumulating over time.
+                last_bbox_raw: Optional[tuple] = None
+                for frame_idx in gt_frame_indices:
+                    pred = pred_by_frame.get(int(frame_idx))
+                    use_bbox_raw: Optional[tuple] = None
+                    used_prev_bbox = False
+                    forced_full_frame = False
+                    pred_bbox_raw: Optional[tuple] = None
+                    if pred is not None:
+                        try:
+                            pred_bbox_raw = tuple(map(float, pred.bbox))
+                        except Exception:
+                            pred_bbox_raw = None
+
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        continue
+                    frame = self._apply_preprocs_frame(frame, self.preprocs)
+                    frame_h, frame_w = frame.shape[:2]
+
+                    if pred_bbox_raw is not None:
+                        # Best case: detector bbox for this frame.
+                        use_bbox_raw = pred_bbox_raw
+                        last_bbox_raw = pred_bbox_raw
+                    elif last_bbox_raw is not None:
+                        # Strategy 1: detector bbox missing -> reuse previous bbox.
+                        # When reusing, first expand bbox by 15% per side (same logic as ROI padding)
+                        # to be more tolerant of motion and detector dropouts.
+                        use_bbox_raw = expand_bbox(last_bbox_raw, self.cfg.padding_inference, (frame_h, frame_w)).as_tuple()
+                        used_prev_bbox = True
+                        # Do NOT update last_bbox_raw here; keep it stable so expansions don't accumulate.
                     else:
-                        roi_h, roi_w = roi.shape[:2]
-                        if roi_h > 0 and roi_w > 0:
-                            cx = float(max(0.0, min(roi_w - 1.0, roi_w / 2.0)))
-                            cy = float(max(0.0, min(roi_h - 1.0, roi_h / 2.0)))
+                        # Strategy 0: no bbox yet -> full-frame segmentation.
+                        use_bbox_raw = (0.0, 0.0, float(frame_w), float(frame_h))
+                        forced_full_frame = True
+
+                    work_pred = pred if pred is not None else FramePrediction(frame_index=int(frame_idx), bbox=use_bbox_raw, score=None)
+                    work_predictions.append(work_pred)
+                    bbox = expand_bbox(use_bbox_raw, self.cfg.padding_inference, (frame_h, frame_w))
+                    roi = crop_with_bbox(frame, bbox)
+                    if roi.size == 0:
+                        continue
+                    # ROI-scope preprocs are applied after cropping.
+                    if self.roi_preprocs:
+                        roi = self._apply_preprocs_frame(roi, self.roi_preprocs)
+                    if self.using_medsam and self.model is not None and hasattr(self.model, "set_prompts"):
+                        prompt_box = self._project_bbox_to_roi(use_bbox, bbox, roi.shape[:2])
+                        if prompt_box is not None:
+                            box_flat = prompt_box.reshape(-1, 4)[0]
+                            cx = float((box_flat[0] + box_flat[2]) * 0.5)
+                            cy = float((box_flat[1] + box_flat[3]) * 0.5)
                             self.model.set_prompts([
                                 {
+                                    "box": prompt_box,
                                     "point_coords": [[cx, cy]],
                                     "point_labels": [1],
                                 }
                             ])
                         else:
-                            self.model.set_prompts(None)
+                            roi_h, roi_w = roi.shape[:2]
+                            if roi_h > 0 and roi_w > 0:
+                                cx = float(max(0.0, min(roi_w - 1.0, roi_w / 2.0)))
+                                cy = float(max(0.0, min(roi_h - 1.0, roi_h / 2.0)))
+                                self.model.set_prompts([
+                                    {
+                                        "point_coords": [[cx, cy]],
+                                        "point_labels": [1],
+                                    }
+                                ])
+                            else:
+                                self.model.set_prompts(None)
+
+                    if self.using_auto_mask:
+                        start_time = time.perf_counter()
+                        auto_full = self._auto_mask_generate_full(frame, bbox)
+                        infer_elapsed = time.perf_counter() - start_time
+                        total_infer_time += infer_elapsed
+                        frame_counter += 1
+                        if auto_full is None:
+                            if not getattr(self, "_auto_mask_warning_emitted", False):
+                                self.logger("[Segmentation] Auto-mask generation failed for a frame; falling back to empty mask.")
+                                self._auto_mask_warning_emitted = True
+                            auto_full = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        mask_roi = crop_with_bbox(auto_full, bbox)
+                        if mask_roi.size == 0:
+                            mask_roi = np.zeros(
+                                (
+                                    int(max(1, round(bbox.h))),
+                                    int(max(1, round(bbox.w))),
+                                ),
+                                dtype=np.uint8,
+                            )
+                        else:
+                            if mask_roi.dtype != np.uint8:
+                                mask_roi = (mask_roi > 0).astype(np.uint8) * 255
+                        mask_roi = keep_largest_component(mask_roi)
+                        mask_roi = fill_holes(mask_roi)
+                        full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
+                    else:
+                        if roi.ndim == 2:
+                            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+                        orig_h, orig_w = roi.shape[:2]
+                        if self.input_size:
+                            roi_resized = cv2.resize(
+                                roi,
+                                (self.input_size[1], self.input_size[0]),
+                                interpolation=cv2.INTER_LINEAR,
+                            )
+                        else:
+                            roi_resized = roi
+                        roi_tensor = (
+                            torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
+                            .permute(2, 0, 1)
+                            .unsqueeze(0)
+                        )
+                        roi_tensor = roi_tensor.to(self.device)
+                        start_time = time.perf_counter()
+                        logits = self._run_model_with_fallback(roi_tensor)
+                        probs = torch.sigmoid(logits)
+                        infer_elapsed = time.perf_counter() - start_time
+                        total_infer_time += infer_elapsed
+                        frame_counter += 1
+                        mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
+                        mask_roi = keep_largest_component(mask_roi)
+                        mask_roi = fill_holes(mask_roi)
+                        if self.input_size and (orig_h, orig_w) != self.input_size:
+                            mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                        mask_roi = keep_largest_component(mask_roi)
+                        mask_roi = fill_holes(mask_roi)
+                        full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
+
+                    stats = compute_mask_stats(full_mask)
+
+                    # Strategy 2 (bootstrap): if we were forced to do full-frame segmentation and
+                    # it produced a non-empty mask, derive a bbox from the mask and store it as the
+                    # next frame's last_bbox_raw. This allows subsequent frames to use Strategy 1.
+                    if forced_full_frame and float(getattr(stats, "area_px", 0.0)) > 0.0:
+                        try:
+                            bx, by, bw, bh = tuple(map(float, stats.bbox))
+                        except Exception:
+                            bx = by = bw = bh = 0.0
+                        if bw > 0.0 and bh > 0.0:
+                            last_bbox_raw = (bx, by, bw, bh)
+                            # Also reflect the bootstrapped bbox in the per-frame prediction object.
+                            try:
+                                work_pred.bbox = last_bbox_raw  # type: ignore[assignment]
+                            except Exception:
+                                pass
+                    dice = None
+                    iou = None
+                    centroid_err = None
+                    gt_mask = None
+                    if frame_idx in gt_by_frame:
+                        gt_entry = gt_by_frame[frame_idx]
+                        gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
+                        if gt_mask is not None:
+                            dice = dice_coefficient(full_mask, gt_mask)
+                            iou = intersection_over_union(full_mask, gt_mask)
+                            accum["dice"].append(dice)
+                            accum["iou"].append(iou)
+                            centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
+                            if centroid_err is not None:
+                                accum["centroid"].append(centroid_err)
+                    per_frame_metrics[frame_idx] = {
+                        "dice": float(dice) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                        "iou": float(iou) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                        "centroid": float(centroid_err) if centroid_err is not None else None,
+                    }
+                    mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
+                    cv2.imwrite(mask_filename, full_mask)
+                    mask_files[frame_idx] = mask_filename
+                    work_pred.segmentation = SegmentationData(
+                        mask_path=mask_filename,
+                        stats=stats,
+                        roi_bbox=bbox.as_tuple(),
+                        centroid_error_px=centroid_err,
+                    )
+            else:
+                # Inference-only mode: only process frames where we have bbox predictions.
+                work_predictions = list(predictions)
+                for pred in predictions:
+                    frame_idx = int(pred.frame_index)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        continue
+                    frame = self._apply_preprocs_frame(frame, self.preprocs)
+                    bbox = expand_bbox(pred.bbox, self.cfg.padding_inference, frame.shape[:2])
+                    roi = crop_with_bbox(frame, bbox)
+                    if roi.size == 0:
+                        continue
+                    # ROI-scope preprocs are applied after cropping.
+                    if self.roi_preprocs:
+                        roi = self._apply_preprocs_frame(roi, self.roi_preprocs)
+                    if self.using_medsam and self.model is not None and hasattr(self.model, "set_prompts"):
+                        prompt_box = self._project_bbox_to_roi(pred.bbox, bbox, roi.shape[:2])
+                        if prompt_box is not None:
+                            box_flat = prompt_box.reshape(-1, 4)[0]
+                            cx = float((box_flat[0] + box_flat[2]) * 0.5)
+                            cy = float((box_flat[1] + box_flat[3]) * 0.5)
+                            self.model.set_prompts([
+                                {
+                                    "box": prompt_box,
+                                    "point_coords": [[cx, cy]],
+                                    "point_labels": [1],
+                                }
+                            ])
+                        else:
+                            roi_h, roi_w = roi.shape[:2]
+                            if roi_h > 0 and roi_w > 0:
+                                cx = float(max(0.0, min(roi_w - 1.0, roi_w / 2.0)))
+                                cy = float(max(0.0, min(roi_h - 1.0, roi_h / 2.0)))
+                                self.model.set_prompts([
+                                    {
+                                        "point_coords": [[cx, cy]],
+                                        "point_labels": [1],
+                                    }
+                                ])
+                            else:
+                                self.model.set_prompts(None)
 
                 if self.using_auto_mask:
                     start_time = time.perf_counter()
@@ -847,13 +1082,31 @@ class SegmentationWorkflow:
         if mask_files:
             self._render_segmentation_visualizations(
                 video_path,
-                predictions,
+                work_predictions,
                 mask_files,
                 output_dir,
                 gt_by_frame,
                 viz_settings or {},
             )
         metrics_summary = summarise_metrics(accum)
+        # If we have GT frames but ended up with no evaluable samples, penalize instead of implicitly skipping.
+        if gt_by_frame and not accum.get("dice") and not accum.get("iou"):
+            metrics_summary = {
+                "dice_mean": 0.0,
+                "dice_std": 0.0,
+                "iou_mean": 0.0,
+                "iou_std": 0.0,
+                "centroid_mean": 0.0,
+                "centroid_std": 0.0,
+            }
+        metrics_summary = _ensure_mean_std_keys(metrics_summary)
+        # Debug counters (non-breaking)
+        try:
+            metrics_summary.setdefault("debug_gt_frames", float(len(gt_by_frame) if gt_by_frame else 0))
+            metrics_summary.setdefault("debug_pred_frames", float(len(predictions) if predictions else 0))
+            metrics_summary.setdefault("debug_processed_frames", float(frame_counter))
+        except Exception:
+            pass
         if frame_counter > 0 and total_infer_time > 0.0:
             fps_value = float(frame_counter) / float(total_infer_time)
             metrics_summary["fps"] = fps_value
@@ -1118,6 +1371,7 @@ class SegmentationWorkflow:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
+            frame = self._apply_preprocs_frame(frame, self.preprocs)
             frame_h, frame_w = frame.shape[:2]
             pred_entry = pred_map.get(frame_idx)
             gt_entry = gt_by_frame.get(frame_idx)
@@ -1125,6 +1379,8 @@ class SegmentationWorkflow:
             roi_frame = crop_with_bbox(frame, roi_bbox)
             if roi_frame.size == 0:
                 continue
+            if self.roi_preprocs:
+                roi_frame = self._apply_preprocs_frame(roi_frame, self.roi_preprocs)
             mask_path = mask_files.get(frame_idx)
             if not mask_path or not os.path.exists(mask_path):
                 continue
@@ -1259,7 +1515,10 @@ class SegmentationWorkflow:
         mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
         if mask is None:
             return None
-        mask_bin = (mask > 0).astype(np.uint8) * 255
+        mask_bin = (mask > 0).astype(np.uint8)
+        if mask_bin.size == 0 or np.count_nonzero(mask_bin) == 0:
+            return None
+        mask_bin = mask_bin * 255
         mask_filled = fill_holes(mask_bin)
         mask_clean = keep_largest_component(mask_filled)
         return mask_clean

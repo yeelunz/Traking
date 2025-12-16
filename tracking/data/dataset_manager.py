@@ -116,6 +116,13 @@ class COCOJsonDatasetManager(DatasetManager):
         self.last_split_method = method
         if method == "subject_level":
             train, val, test = self._split_subject_level(seed, ratios)
+        elif method == "loso":
+            # For LOSO we still return a single split if caller expects split(); prefer k_fold/iterators for full CV.
+            folds = list(self.loso())
+            if folds:
+                train, val, test = folds[0]["train"], [], folds[0]["test"]
+            else:
+                train, val, test = [], [], []
         else:
             train, val, test = self._split_video_level(seed, ratios)
         return {
@@ -123,6 +130,21 @@ class COCOJsonDatasetManager(DatasetManager):
             "val": SimpleDataset(val, self.ann_by_video),
             "test": SimpleDataset(test, self.ann_by_video),
         }
+
+    def loso(self) -> Iterable[Dict[str, Any]]:
+        """
+        Leave-One-Subject-Out splits: each subject's videos become the test set once.
+        """
+        groups = self._group_by_subject()
+        subjects = sorted(groups.keys())
+        for subject in subjects:
+            test_videos = groups.get(subject, [])
+            train_videos = [v for s, vids in groups.items() if s != subject for v in vids]
+            yield {
+                "subject": subject,
+                "train": train_videos,
+                "test": test_videos,
+            }
 
     def _split_video_level(self, seed: int, ratios: Tuple[float, float, float]) -> Tuple[List[str], List[str], List[str]]:
         vids = self.videos[:]

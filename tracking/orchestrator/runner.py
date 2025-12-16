@@ -126,26 +126,9 @@ class PipelineRunner:
         method = split_cfg.get("method", "video_level")
         ratios = split_cfg.get("ratios", [0.8, 0.2])
         k_fold = int(split_cfg.get("k_fold", 1) or 1)
+        loso_enabled = str(method).lower() == "loso" or bool(split_cfg.get("loso", False))
         self._log(f"Dataset root: {self.dataset_root}")
         self._log(f"Results root: {self.results_root}")
-        # accept [train,test] or [train,val,test]; always map to (train, 0.0, test)
-        if isinstance(ratios, list) and len(ratios) == 2:
-            train_r, test_r = float(ratios[0]), float(ratios[1])
-        elif isinstance(ratios, list) and len(ratios) == 3:
-            train_r, test_r = float(ratios[0]), float(ratios[2])
-        else:
-            train_r, test_r = 0.8, 0.2
-        split_tt = dm.split(method=method, seed=self.seed, ratios=(train_r, 0.0, test_r))
-        train_ds = split_tt["train"]
-        test_ds = split_tt["test"]
-        train_count = len(train_ds)
-        test_count = len(test_ds)
-        self._log(
-            f"Dataset split created (train/test). Train videos: {train_count} | Test videos: {test_count}"
-        )
-        if train_count == 0:
-            self._log("[Train] No annotated training videos detected. Training steps will be skipped.")
-
         def _rel_path(path: str) -> str:
             try:
                 base_root = self.dataset_root if isinstance(self.dataset_root, str) and self.dataset_root else None
@@ -172,124 +155,179 @@ class PipelineRunner:
                     continue
             return names
 
-        dataset_info = {
-            "root": self.dataset_root,
-            "total_videos": total_videos,
-            "annotated_videos": annotated_videos,
-            "missing_annotations": len(missing_ann),
-            "missing_preview": [_rel_path(p) for p in missing_ann[:5]],
-            "split": {
-                "method": method,
-                "ratios": ratios,
-                "k_fold": k_fold,
-            },
-            "train_videos": train_count,
-            "test_videos": test_count,
-            "train_preview": _dataset_preview(train_ds),
-            "test_preview": _dataset_preview(test_ds),
-        }
+        loso_folds: List[Dict[str, Any]] = []
+        if loso_enabled:
+            for fold in dm.loso():
+                train_ds = SimpleDataset(fold.get("train", []), dm.ann_by_video)
+                test_ds = SimpleDataset(fold.get("test", []), dm.ann_by_video)
+                loso_folds.append({"subject": fold.get("subject"), "train": train_ds, "test": test_ds})
+            self._log(f"LOSO folds prepared: {len(loso_folds)} subjects")
+        else:
+            # accept [train,test] or [train,val,test]; always map to (train, 0.0, test)
+            if isinstance(ratios, list) and len(ratios) == 2:
+                train_r, test_r = float(ratios[0]), float(ratios[1])
+            elif isinstance(ratios, list) and len(ratios) == 3:
+                train_r, test_r = float(ratios[0]), float(ratios[2])
+            else:
+                train_r, test_r = 0.8, 0.2
+            split_tt = dm.split(method=method, seed=self.seed, ratios=(train_r, 0.0, test_r))
+            train_ds = split_tt["train"]
+            test_ds = split_tt["test"]
+            loso_folds.append({"subject": None, "train": train_ds, "test": test_ds})
 
-        # orchestrate experiments
-        for exp in self.cfg.get("experiments", []):
-            exp_name = exp.get("name", "exp")
-            out_dir = self._timestamp_dir(exp_name)
-            experiment_start = time.perf_counter()
-            out_cfg = self.cfg.get("output", {}) or {}
-            skip_freeze = bool(out_cfg.get("skip_pip_freeze", False))
-            pipeline_summary: List[Dict[str, Any]] = []
-            for step in exp.get("pipeline", []):
-                if not isinstance(step, dict):
-                    continue
-                pipeline_summary.append(
-                    {
-                        "type": step.get("type"),
-                        "name": step.get("name"),
-                        "params": step.get("params", {}),
-                    }
-                )
-            stage_metrics_collector: Dict[str, Any] = {}
-            stage_records: List[Dict[str, Any]] = []
-            try:
-                rel_out = os.path.relpath(out_dir, self.results_root)
-            except Exception:
-                rel_out = None
-            meta_path = os.path.join(out_dir, "metadata.json")
-            meta: Dict[str, Any] = {
-                "created_at": datetime.utcnow().isoformat() + "Z",
-                "seed": self.seed,
-                "dataset": dataset_info,
-                "config": exp,
-                "env": capture_env(skip_freeze=skip_freeze),
-                "experiment": {
-                    "name": exp_name,
-                    "output_dir": out_dir,
-                    "results_root": self.results_root,
-                    "relative_output": rel_out,
-                    "pipeline": pipeline_summary,
-                    "k_fold": k_fold,
-                    "split_method": method,
+        def _dataset_info(train_ds: Any, test_ds: Any, subject: Optional[str], fold_idx: int, total_folds: int) -> Dict[str, Any]:
+            train_count = len(train_ds)
+            test_count = len(test_ds)
+            info = {
+                "root": self.dataset_root,
+                "total_videos": total_videos,
+                "annotated_videos": annotated_videos,
+                "missing_annotations": len(missing_ann),
+                "missing_preview": [_rel_path(p) for p in missing_ann[:5]],
+                "split": {
+                    "method": "loso" if loso_enabled else method,
                     "ratios": ratios,
+                    "k_fold": k_fold,
+                    "fold": fold_idx + 1,
+                    "total_folds": total_folds,
+                    "subject": subject,
                 },
-                "metrics": {},
-                "artifacts": {},
-                "stages": stage_records,
-                "runtime": {
-                    "started_at": datetime.utcnow().isoformat() + "Z",
-                },
+                "train_videos": train_count,
+                "test_videos": test_count,
+                "train_preview": _dataset_preview(train_ds),
+                "test_preview": _dataset_preview(test_ds),
             }
+            return info
 
-            def _dump_meta() -> None:
-                meta["runtime"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, ensure_ascii=False, indent=2)
+        if loso_enabled and not loso_folds:
+            self._log("[Dataset] No LOSO folds could be built (no subjects).")
+            return
+        if not loso_enabled:
+            self._log(
+                f"Dataset split created (train/test). Train videos: {len(loso_folds[0]['train'])} | Test videos: {len(loso_folds[0]['test'])}"
+            )
+            if len(loso_folds[0]["train"]) == 0:
+                self._log("[Train] No annotated training videos detected. Training steps will be skipped.")
 
-            def _record_stage_skip(name: str, kind: str, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
-                entry: Dict[str, Any] = {
-                    "name": name,
-                    "kind": kind,
-                    "status": "skipped",
-                    "reason": reason,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-                if extra:
-                    entry.update(extra)
-                stage_records.append(entry)
-                _dump_meta()
+        # orchestrate experiments (per fold if LOSO)
+        folds_total = len(loso_folds)
+        for fold_idx, fold_data in enumerate(loso_folds):
+            train_ds = fold_data["train"]
+            test_ds = fold_data["test"]
+            subject = fold_data.get("subject")
+            dataset_info = _dataset_info(train_ds, test_ds, subject, fold_idx, folds_total)
 
-            @contextmanager
-            def stage_scope(name: str, kind: str, info: Optional[Dict[str, Any]] = None):
-                entry: Dict[str, Any] = {
-                    "name": name,
-                    "kind": kind,
-                    "started_at": datetime.utcnow().isoformat() + "Z",
-                }
-                if info:
-                    entry.update(info)
-                stage_records.append(entry)
-                _dump_meta()
-                stage_start = time.perf_counter()
+            for exp in self.cfg.get("experiments", []):
+                exp_name = exp.get("name", "exp")
+                suffix = ""
+                if loso_enabled:
+                    subj_tag = subject or f"fold{fold_idx+1}"
+                    suffix = f"_loso_{subj_tag}"
+                out_dir = self._timestamp_dir(exp_name + suffix)
+                experiment_start = time.perf_counter()
+                out_cfg = self.cfg.get("output", {}) or {}
+                skip_freeze = bool(out_cfg.get("skip_pip_freeze", False))
+                pipeline_summary: List[Dict[str, Any]] = []
+                for step in exp.get("pipeline", []):
+                    if not isinstance(step, dict):
+                        continue
+                    pipeline_summary.append(
+                        {
+                            "type": step.get("type"),
+                            "name": step.get("name"),
+                            "params": step.get("params", {}),
+                        }
+                    )
+                stage_metrics_collector: Dict[str, Any] = {}
+                stage_records: List[Dict[str, Any]] = []
                 try:
-                    yield entry
-                    entry.setdefault("status", "completed")
-                except Exception as exc:
-                    entry["status"] = "failed"
-                    entry["error"] = {"type": type(exc).__name__, "message": str(exc)}
-                    _dump_meta()
-                    raise
-                finally:
-                    entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
-                    entry["duration_sec"] = max(0.0, time.perf_counter() - stage_start)
+                    rel_out = os.path.relpath(out_dir, self.results_root)
+                except Exception:
+                    rel_out = None
+                meta_path = os.path.join(out_dir, "metadata.json")
+                meta: Dict[str, Any] = {
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                    "seed": self.seed,
+                    "dataset": dataset_info,
+                    "config": exp,
+                    "env": capture_env(skip_freeze=skip_freeze),
+                    "experiment": {
+                        "name": exp_name,
+                        "output_dir": out_dir,
+                        "results_root": self.results_root,
+                        "relative_output": rel_out,
+                        "pipeline": pipeline_summary,
+                        "k_fold": k_fold,
+                        "split_method": "loso" if loso_enabled else method,
+                        "ratios": ratios,
+                        "fold": fold_idx + 1 if loso_enabled else None,
+                        "total_folds": folds_total if loso_enabled else None,
+                        "subject": subject,
+                    },
+                    "metrics": {},
+                    "artifacts": {},
+                    "stages": stage_records,
+                    "runtime": {
+                        "started_at": datetime.utcnow().isoformat() + "Z",
+                    },
+                }
+
+                def _dump_meta() -> None:
+                    meta["runtime"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+                def _record_stage_skip(name: str, kind: str, reason: str, extra: Optional[Dict[str, Any]] = None) -> None:
+                    entry: Dict[str, Any] = {
+                        "name": name,
+                        "kind": kind,
+                        "status": "skipped",
+                        "reason": reason,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                    if extra:
+                        entry.update(extra)
+                    stage_records.append(entry)
                     _dump_meta()
 
-            _dump_meta()
-            # init log file for this experiment
-            logs_dir = os.path.join(out_dir, "logs")
-            os.makedirs(logs_dir, exist_ok=True)
-            self._log_file = os.path.join(logs_dir, "run.log")
-            self._log(f"Started experiment: {exp_name}")
-            self._log(f"Experiment folder: {out_dir}")
-            meta.setdefault("artifacts", {})["run_log"] = self._log_file
-            _dump_meta()
+                @contextmanager
+                def stage_scope(name: str, kind: str, info: Optional[Dict[str, Any]] = None):
+                    entry: Dict[str, Any] = {
+                        "name": name,
+                        "kind": kind,
+                        "started_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                    if info:
+                        entry.update(info)
+                    stage_records.append(entry)
+                    _dump_meta()
+                    stage_start = time.perf_counter()
+                    try:
+                        yield entry
+                        entry.setdefault("status", "completed")
+                    except Exception as exc:
+                        entry["status"] = "failed"
+                        entry["error"] = {"type": type(exc).__name__, "message": str(exc)}
+                        _dump_meta()
+                        raise
+                    finally:
+                        entry["finished_at"] = datetime.utcnow().isoformat() + "Z"
+                        entry["duration_sec"] = max(0.0, time.perf_counter() - stage_start)
+                        _dump_meta()
+
+                _dump_meta()
+                # init log file for this experiment
+                logs_dir = os.path.join(out_dir, "logs")
+                os.makedirs(logs_dir, exist_ok=True)
+                self._log_file = os.path.join(logs_dir, "run.log")
+                self._log(f"Started experiment: {exp_name}")
+                self._log(f"Experiment folder: {out_dir}")
+                meta.setdefault("artifacts", {})["run_log"] = self._log_file
+                _dump_meta()
+
+            # If no experiments were defined, skip this fold (e.g., defs-only queue entries)
+            if not self.cfg.get("experiments"):
+                continue
 
             test_root = os.path.join(out_dir, "test")
             detection_root = os.path.join(test_root, "detection")
@@ -302,12 +340,45 @@ class PipelineRunner:
             os.makedirs(os.path.join(train_root, "segmentation"), exist_ok=True)
 
             # build preproc chain
-            preprocs = []
+            # - global: applied to full frames before any downstream stage (affects detector + segmentation)
+            # - roi: applied only after ROI crop (affects segmentation only)
+            preprocs = []  # detector/global preprocs (kept name for backward-compat)
+            preprocs_roi = []  # segmentation ROI-only preprocs
+
+            # Simplified scheme selector (preferred UI control): A / B / C
+            # IMPORTANT: this is a "作用域" choice that applies to *all* preprocessing steps, not just CLAHE.
+            # - A (Global): preprocs affect detector and segmentation (before crop)
+            # - B (ROI): detector sees raw; segmentation applies preprocs only after ROI crop
+            # - C (Hybrid): detector uses global-preproc frames for better bbox; segmentation crops from RAW then applies ROI preprocs
+            scheme_raw = exp.get("preproc_scheme") or exp.get("preprocessing_scheme") or exp.get("preproc_mode")
+            scheme = str(scheme_raw).strip().upper() if scheme_raw is not None else "A"
+            if scheme in {"GLOBAL", "A"}:
+                scheme = "A"
+            elif scheme in {"ROI", "B"}:
+                scheme = "B"
+            elif scheme in {"HYBRID", "C"}:
+                scheme = "C"
+            else:
+                raise ValueError(f"Invalid preproc_scheme: {scheme_raw!r}. Expected one of: A/B/C (or GLOBAL/ROI/HYBRID).")
+
             for step in exp.get("pipeline", []):
                 if step.get("type") == "preproc":
                     cls = PREPROC_REGISTRY[step["name"]]
-                    preprocs.append(cls(step.get("params", {})))
-            self._log(f"Preprocs: {[type(p).__name__ for p in preprocs]}")
+                    params = step.get("params", {})
+
+                    # Only scheme-based routing is supported (no per-step `scope`).
+                    if scheme == "A":
+                        preprocs.append(cls(params))
+                    elif scheme == "B":
+                        preprocs_roi.append(cls(params))
+                    elif scheme == "C":
+                        preprocs.append(cls(params))
+                        preprocs_roi.append(cls(params))
+
+            self._log(f"Preprocs(global): {[type(p).__name__ for p in preprocs]}")
+            if preprocs_roi:
+                self._log(f"Preprocs(roi): {[type(p).__name__ for p in preprocs_roi]}")
+            self._log(f"Preproc scheme: {scheme}")
 
             # factory for model(s) to ensure fresh instance per fold/final
             model_steps = [step for step in exp.get("pipeline", []) if step.get("type") == "model"]
@@ -968,6 +1039,22 @@ class PipelineRunner:
             os.makedirs(seg_results_root, exist_ok=True)
             seg_train_root = os.path.join(train_root, "segmentation")
             seg_workflow = SegmentationWorkflow(seg_cfg, self.dataset_root, seg_train_root, self._log)
+            # Ensure preprocessing scheme is honored for segmentation:
+            # - global preprocs: applied to full frames before ROI cropping
+            # - roi preprocs: applied to ROI crops (after cropping) before model inference
+            try:
+                seg_global_preprocs = preprocs
+                seg_roi_preprocs = preprocs_roi
+
+                # Scheme B/C: segmentation should NOT receive global preprocs,
+                # because it must crop from RAW frames (C) or keep detector raw (B).
+                if scheme in {"B", "C"}:
+                    seg_global_preprocs = []
+
+                setattr(seg_workflow, "preprocs", seg_global_preprocs)
+                setattr(seg_workflow, "roi_preprocs", seg_roi_preprocs)
+            except Exception:
+                pass
             train_video_paths = [train_ds[i]["video_path"] for i in range(len(train_ds))]
             train_annotations = _load_annotations_for_videos(train_video_paths)
             annotated_train_paths = list(train_annotations.keys())

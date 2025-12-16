@@ -1,0 +1,362 @@
+queue:
+  # Common defaults
+  - label: "00_defs"
+    config:
+      seed: 42
+      dataset: &dataset_subject
+        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: loso
+          loso: true
+          ratios: [0.8, 0.2]
+          k_fold: 1
+      experiments: []
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+      classification: {enabled: false}
+      output: &output_defaults
+        results_root: results
+
+      # ROI detector: yolov11l pretrained, always re-train 30 epochs
+      detector: &detector_yolo11l
+        weights: models/detection/yolo11l.pt
+        conf: 0.25
+        iou: 0.5
+        imgsz: 640
+        device: cuda
+        classes: null
+        max_det: 100
+        fallback_last_prediction: true
+        train_enabled: true
+        epochs: 30
+        batch: 8
+        lr0: 0.01
+        patience: 50
+        workers: 0
+        include_empty_frames: false
+        force_cpu_if_no_cuda: true
+
+      # CLAHE default from clahe_clip1p5_grid8_unetpp
+      clahe_default: &clahe_default
+        clipLimit: 1.5
+        tileGridSize: [8, 8]
+
+      # Segmentation configs (all train 50 epochs)
+      segmentation_nnunet: &seg_nnunet
+        model:
+          name: nnunet
+          params:
+            dimension: 2
+            n_stages: 5
+            base_features: 32
+            deep_supervision: false
+            return_highres_only: true
+            init_weights: true
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.0
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 50
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_unetpp: &seg_unetpp
+        model:
+          name: unetpp
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.05
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 50
+        batch_size: 8
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_deeplabv3p: &seg_deeplabv3p
+        model:
+          name: "deeplabv3+"
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.05
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 50
+        batch_size: 8
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+  # 12 experiments: (none / CLAHE scheme A/B/C) x (nnunet, unetpp, deeplabv3+)
+
+  # --- none ---
+  - label: "01_none_A_yolo11l_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "none_A_yolo11l_nnunet"
+          preproc_scheme: "A"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "02_none_A_yolo11l_unetpp"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "none_A_yolo11l_unetpp"
+          preproc_scheme: "A"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "03_none_A_yolo11l_deeplabv3p"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "none_A_yolo11l_deeplabv3p"
+          preproc_scheme: "A"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  # --- CLAHE scheme A (global) ---
+  - label: "04_clahe_A_yolo11l_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_A_yolo11l_nnunet"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "05_clahe_A_yolo11l_unetpp"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_A_yolo11l_unetpp"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "06_clahe_A_yolo11l_deeplabv3p"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_A_yolo11l_deeplabv3p"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  # --- CLAHE scheme B (ROI) ---
+  - label: "07_clahe_B_yolo11l_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_B_yolo11l_nnunet"
+          preproc_scheme: "B"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "08_clahe_B_yolo11l_unetpp"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_B_yolo11l_unetpp"
+          preproc_scheme: "B"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "09_clahe_B_yolo11l_deeplabv3p"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_B_yolo11l_deeplabv3p"
+          preproc_scheme: "B"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  # --- CLAHE scheme C (hybrid) ---
+  - label: "10_clahe_C_yolo11l_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_C_yolo11l_nnunet"
+          preproc_scheme: "C"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "11_clahe_C_yolo11l_unetpp"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_C_yolo11l_unetpp"
+          preproc_scheme: "C"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "12_clahe_C_yolo11l_deeplabv3p"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_C_yolo11l_deeplabv3p"
+          preproc_scheme: "C"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults

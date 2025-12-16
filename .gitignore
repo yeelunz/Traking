@@ -42,6 +42,9 @@ results/
 logs/
 *.log
 
+# --- Local datasets (do not commit) ---
+dataset/
+
 # --- Checkpoints / models ---
 *.pth
 *.pt

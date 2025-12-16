@@ -80,9 +80,44 @@
             <div>
               <h2 id="exp-name"></h2>
               <p id="exp-path"></p>
+              <div id="fold-controls" class="hidden"></div>
             </div>
           </div>
           <div class="cards" id="metric-cards"></div>
+
+          <section id="loso-overview" class="hidden">
+            <div class="section-header">
+              <div>
+                <h3>LOSO 彙總（folds）</h3>
+                <p id="loso-subtitle"></p>
+              </div>
+            </div>
+            <div id="loso-chart-controls" class="chart-controls hidden"></div>
+            <div class="group-chart-grid" id="loso-chart-grid">
+              <div>
+                <div class="chart-header">
+                  <h3>Detection（fold 比較）</h3>
+                  <div class="chart-actions">
+                    <button class="ghost-button" data-chart-key="losoDetectionChart" data-canvas-id="loso-detection-chart" data-filename="loso_detection">下載 PNG</button>
+                    <button class="ghost-button" data-export-chart="losoDetectionChart" data-export-format="csv">複製 CSV</button>
+                  </div>
+                </div>
+                <canvas id="loso-detection-chart" height="240"></canvas>
+              </div>
+              <div>
+                <div class="chart-header">
+                  <h3>Segmentation（fold 比較）</h3>
+                  <div class="chart-actions">
+                    <button class="ghost-button" data-chart-key="losoSegmentationChart" data-canvas-id="loso-segmentation-chart" data-filename="loso_segmentation">下載 PNG</button>
+                    <button class="ghost-button" data-export-chart="losoSegmentationChart" data-export-format="csv">複製 CSV</button>
+                  </div>
+                </div>
+                <canvas id="loso-segmentation-chart" height="240"></canvas>
+              </div>
+            </div>
+            <table id="loso-fold-table"></table>
+            <p class="hint">提示：點選某個 fold 會載入該 fold 的 per-video / 可視化細節。</p>
+          </section>
           <div class="grid summary-grid">
             <div>
               <div class="summary-header">
