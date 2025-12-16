@@ -1,0 +1,252 @@
+queue:
+  # Fast smoke-test schedule
+  # - LOSO + subject-level
+  # - All training epochs set to 1 for speed
+  # - Dataset root points to the local `dataset/` folder in this repo
+
+  - label: "00_defs"
+    config:
+      seed: 42
+      dataset: &dataset_subject
+        # Use repo-local dataset folder (recommended for quick smoke tests)
+        root: "dataset/超音波檔案-20251126T083302Z-1-001"
+        split:
+          method: loso
+          loso: true
+          ratios: [0.8, 0.2]
+          k_fold: 1
+
+      experiments: []
+
+      evaluation: &evaluation_fast
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: false
+          samples: 0
+          include_detection: false
+          include_segmentation: false
+
+      classification: {enabled: false}
+
+      output: &output_fast
+        results_root: results
+        skip_pip_freeze: true
+
+      # Detector: YOLOv11l, train only 1 epoch
+      detector: &detector_yolo11l_fast
+        weights: models/detection/yolo11l.pt
+        conf: 0.25
+        iou: 0.5
+        imgsz: 640
+        device: cuda
+        classes: null
+        max_det: 100
+        fallback_last_prediction: true
+        include_empty_frames: false
+
+        train_enabled: true
+        epochs: 1
+        batch: 4
+        lr0: 0.01
+        patience: 1
+        workers: 0
+
+      # Preproc defaults
+      clahe_default: &clahe_default
+        clipLimit: 1.5
+        tileGridSize: [8, 8]
+
+      # Segmentation: train only 1 epoch
+      segmentation_nnunet_fast: &seg_nnunet_fast
+        model:
+          name: nnunet
+          params:
+            dimension: 2
+            n_stages: 5
+            base_features: 32
+            deep_supervision: false
+            return_highres_only: true
+            init_weights: true
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.0
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 1
+        batch_size: 1
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.0
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_unetpp_fast: &seg_unetpp_fast
+        model:
+          name: unetpp
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.05
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 1
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.0
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_deeplabv3p_fast: &seg_deeplabv3p_fast
+        model:
+          name: "deeplabv3+"
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.05
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 1
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.0
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+  # Smoke tests: (none / CLAHE) x (nnunet / unetpp / deeplabv3+)
+
+  - label: "01_none_A_yolo11l_nnunet_fast"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "none_A_yolo11l_nnunet_fast"
+          preproc_scheme: "A"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l_fast
+      evaluation: *evaluation_fast
+      classification: {enabled: false}
+      segmentation: *seg_nnunet_fast
+      output: *output_fast
+
+  - label: "02_none_A_yolo11l_unetpp_fast"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "none_A_yolo11l_unetpp_fast"
+          preproc_scheme: "A"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l_fast
+      evaluation: *evaluation_fast
+      classification: {enabled: false}
+      segmentation: *seg_unetpp_fast
+      output: *output_fast
+
+  - label: "03_none_A_yolo11l_deeplabv3p_fast"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "none_A_yolo11l_deeplabv3p_fast"
+          preproc_scheme: "A"
+          pipeline:
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l_fast
+      evaluation: *evaluation_fast
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p_fast
+      output: *output_fast
+
+  - label: "04_clahe_A_yolo11l_nnunet_fast"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_A_yolo11l_nnunet_fast"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l_fast
+      evaluation: *evaluation_fast
+      classification: {enabled: false}
+      segmentation: *seg_nnunet_fast
+      output: *output_fast
+
+  - label: "05_clahe_A_yolo11l_unetpp_fast"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_A_yolo11l_unetpp_fast"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l_fast
+      evaluation: *evaluation_fast
+      classification: {enabled: false}
+      segmentation: *seg_unetpp_fast
+      output: *output_fast
+
+  - label: "06_clahe_A_yolo11l_deeplabv3p_fast"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "clahe_A_yolo11l_deeplabv3p_fast"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l_fast
+      evaluation: *evaluation_fast
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p_fast
+      output: *output_fast
