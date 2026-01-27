@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import hashlib
 from datetime import datetime
 from contextlib import contextmanager
 from typing import Dict, Any, List, Callable, Optional, Sequence
@@ -63,7 +64,12 @@ class PipelineRunner:
             proj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         except Exception:
             proj_root = os.getcwd()
-        self.results_root = out_cfg.get("results_root") or os.path.join(proj_root, "results")
+        res_root_cfg = out_cfg.get("results_root")
+        if res_root_cfg:
+            # If user provided a relative path, anchor it to project root to avoid cwd-dependent outputs.
+            self.results_root = res_root_cfg if os.path.isabs(res_root_cfg) else os.path.join(proj_root, res_root_cfg)
+        else:
+            self.results_root = os.path.join(proj_root, "results")
         os.makedirs(self.results_root, exist_ok=True)
         self._logger = logger
         self._log_file: Optional[str] = None
@@ -157,10 +163,44 @@ class PipelineRunner:
 
         loso_folds: List[Dict[str, Any]] = []
         if loso_enabled:
+            # Optional LOSO limiting knobs (useful for smoke tests / debugging)
+            # - subjects: only run a subset of subject IDs
+            # - max_folds: stop after N folds
+            # - max_train_videos / max_test_videos: truncate per-fold video lists
+            subj_filter_raw = split_cfg.get("subjects") or split_cfg.get("subject") or split_cfg.get("subject_ids")
+            subjects_filter = None
+            if isinstance(subj_filter_raw, str) and subj_filter_raw.strip():
+                subjects_filter = {subj_filter_raw.strip()}
+            elif isinstance(subj_filter_raw, (list, tuple)):
+                subjects_filter = {str(s).strip() for s in subj_filter_raw if str(s).strip()}
+            try:
+                max_folds = int(split_cfg.get("max_folds") or 0)
+            except Exception:
+                max_folds = 0
+            try:
+                max_train_videos = int(split_cfg.get("max_train_videos") or 0)
+            except Exception:
+                max_train_videos = 0
+            try:
+                max_test_videos = int(split_cfg.get("max_test_videos") or 0)
+            except Exception:
+                max_test_videos = 0
+
             for fold in dm.loso():
-                train_ds = SimpleDataset(fold.get("train", []), dm.ann_by_video)
-                test_ds = SimpleDataset(fold.get("test", []), dm.ann_by_video)
-                loso_folds.append({"subject": fold.get("subject"), "train": train_ds, "test": test_ds})
+                subject_id = fold.get("subject")
+                if subjects_filter is not None and str(subject_id) not in subjects_filter:
+                    continue
+                train_videos = list(fold.get("train", []) or [])
+                test_videos = list(fold.get("test", []) or [])
+                if max_train_videos > 0:
+                    train_videos = train_videos[:max_train_videos]
+                if max_test_videos > 0:
+                    test_videos = test_videos[:max_test_videos]
+                train_ds = SimpleDataset(train_videos, dm.ann_by_video)
+                test_ds = SimpleDataset(test_videos, dm.ann_by_video)
+                loso_folds.append({"subject": subject_id, "train": train_ds, "test": test_ds})
+                if max_folds > 0 and len(loso_folds) >= max_folds:
+                    break
             self._log(f"LOSO folds prepared: {len(loso_folds)} subjects")
         else:
             # accept [train,test] or [train,val,test]; always map to (train, 0.0, test)
@@ -211,6 +251,50 @@ class PipelineRunner:
 
         # orchestrate experiments (per fold if LOSO)
         folds_total = len(loso_folds)
+        detector_reuse_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+        def _detector_signature(
+            exp_cfg: Dict[str, Any],
+            scheme_key: str,
+            train_dataset: Any,
+            subject_id: Optional[str],
+            fold_index: int,
+        ) -> Dict[str, Any]:
+            detector_preprocs: List[Dict[str, Any]] = []
+            for step in exp_cfg.get("pipeline", []) or []:
+                if step.get("type") != "preproc":
+                    continue
+                if scheme_key in {"A", "C"}:
+                    detector_preprocs.append(
+                        {"name": step.get("name"), "params": step.get("params", {})}
+                    )
+
+            detector_models: List[Dict[str, Any]] = []
+            for step in exp_cfg.get("pipeline", []) or []:
+                if step.get("type") != "model":
+                    continue
+                detector_models.append(
+                    {"name": step.get("name"), "params": step.get("params", {})}
+                )
+
+            train_videos: List[str] = []
+            try:
+                train_videos = sorted({train_dataset[i]["video_path"] for i in range(len(train_dataset))})
+            except Exception:
+                train_videos = []
+
+            signature_payload = {
+                "detector_models": detector_models,
+                "detector_preprocs": detector_preprocs,
+                "preproc_scheme": scheme_key,
+                "dataset_root": self.dataset_root,
+                "train_videos": train_videos,
+                "subject": subject_id,
+                "fold": fold_index + 1,
+            }
+            sig_raw = json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
+            sig_key = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()
+            return {"key": sig_key, "payload": signature_payload}
         for fold_idx, fold_data in enumerate(loso_folds):
             train_ds = fold_data["train"]
             test_ds = fold_data["test"]
@@ -565,6 +649,8 @@ class PipelineRunner:
                                     conf_val = getattr(p, "confidence", None)
                                     if conf_val is not None:
                                         row["confidence"] = conf_val
+                                    if bool(getattr(p, "is_fallback", False)):
+                                        row["fallback"] = True
                                     rows.append(row)
                                 json.dump(rows, f, ensure_ascii=False, indent=2)
                         self._log(f"Per-video predictions saved: {pred_dir}", to_console=(tqdm is None))
@@ -596,7 +682,18 @@ class PipelineRunner:
                                         min_pred = int(min(int(getattr(p, 'frame_index', 0)) for p in pl))
                                         delta = int(min_gt) - int(min_pred)
                                         if delta != 0:
-                                            shifted = [FramePrediction(int(p.frame_index) + delta, p.bbox, p.score) for p in pl]
+                                            shifted = [
+                                                FramePrediction(
+                                                    frame_index=int(p.frame_index) + delta,
+                                                    bbox=p.bbox,
+                                                    score=p.score,
+                                                    confidence=getattr(p, "confidence", None),
+                                                    confidence_components=getattr(p, "confidence_components", None),
+                                                    segmentation=getattr(p, "segmentation", None),
+                                                    is_fallback=bool(getattr(p, "is_fallback", False)),
+                                                )
+                                                for p in pl
+                                            ]
                                             shifted_f = [p for p in shifted if int(getattr(p, 'frame_index', -1)) in gt_frames_set]
                                             # choose the one with higher coverage on GT frames
                                             if len(shifted_f) > len(direct):
@@ -686,7 +783,10 @@ class PipelineRunner:
                                 for mn, pl in (eval_pv_predictions.items() if restrict_to_gt_frames else pv_predictions.items()):
                                     m = {}
                                     for p in pl:
-                                        m[int(p.frame_index)] = p.bbox
+                                        m[int(p.frame_index)] = {
+                                            "bbox": p.bbox,
+                                            "fallback": bool(getattr(p, "is_fallback", False)),
+                                        }
                                     eval_pred_maps[mn] = m
                                 for fi in selected_frames:
                                     cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
@@ -699,12 +799,22 @@ class PipelineRunner:
                                         cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0,255,0), 2)
                                     # draw per-model pred in red (one per model)
                                     for mn, fmap in eval_pred_maps.items():
-                                        pb = fmap.get(fi)
+                                        pb_entry = fmap.get(fi)
+                                        if pb_entry is None:
+                                            continue
+                                        if isinstance(pb_entry, dict):
+                                            pb = pb_entry.get("bbox")
+                                            is_fb = bool(pb_entry.get("fallback"))
+                                        else:
+                                            pb = pb_entry
+                                            is_fb = False
                                         if pb is None:
                                             continue
                                         x, y, w, h = map(float, pb)
-                                        cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0,0,255), 2)
-                                        cv2.putText(frame, mn, (int(x), max(0, int(y)-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1, cv2.LINE_AA)
+                                        color = (0, 165, 255) if is_fb else (0, 0, 255)
+                                        label = f"{mn} (fallback)" if is_fb else mn
+                                        cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), color, 2)
+                                        cv2.putText(frame, label, (int(x), max(0, int(y)-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
                                     out_path = os.path.join(vis_dir, f"frame_{fi:06d}.jpg")
                                     try:
                                         cv2.imwrite(out_path, frame)
@@ -771,6 +881,8 @@ class PipelineRunner:
                             components = getattr(p, "confidence_components", None)
                             if components:
                                 row["components"] = {k: float(v) for k, v in components.items()}
+                            if bool(getattr(p, "is_fallback", False)):
+                                row["fallback"] = True
                             rows.append(row)
                         json.dump(rows, f, ensure_ascii=False, indent=2)
                     self._log(f"Predictions saved: {outp}", to_console=(tqdm is None))
@@ -963,17 +1075,37 @@ class PipelineRunner:
             final_models = build_models()
             final_train_dir = os.path.join(train_root, "detection")
             os.makedirs(final_train_dir, exist_ok=True)
+            det_sig = _detector_signature(exp, scheme, train_ds, subject, fold_idx)
 
             with stage_scope(
                 "detector_train_full",
                 "detection",
-                {"train_videos": len(train_ds), "output_dir": final_train_dir},
+                {
+                    "train_videos": len(train_ds),
+                    "output_dir": final_train_dir,
+                    "reuse_signature": det_sig.get("key"),
+                },
             ) as stage_entry:
                 model_reports: List[Dict[str, Any]] = []
                 stage_entry["models"] = model_reports
                 for model_name, model in final_models:
                     report: Dict[str, Any] = {"model": model_name, "train_videos": len(train_ds)}
                     model_reports.append(report)
+                    cached = detector_reuse_cache.get(det_sig["key"], {}).get(model_name)
+                    cached_ckpt = cached.get("checkpoint") if isinstance(cached, dict) else None
+                    if cached_ckpt and os.path.exists(cached_ckpt) and hasattr(model, "load_checkpoint"):
+                        try:
+                            model.load_checkpoint(cached_ckpt)
+                            report["status"] = "reused"
+                            report["checkpoint"] = cached_ckpt
+                            report["reuse_signature"] = det_sig.get("key")
+                            self._log(
+                                f"[Train] Reuse detector | model={model_name} | ckpt={cached_ckpt}",
+                                to_console=(tqdm is None),
+                            )
+                            continue
+                        except Exception as e:
+                            report["reuse_error"] = {"type": type(e).__name__, "message": str(e)}
                     if not hasattr(model, "train"):
                         report["status"] = "unsupported"
                         continue
@@ -1010,6 +1142,13 @@ class PipelineRunner:
                                     "[Warn] No training samples found (check that each video has a matching .json annotation next to it).",
                                     to_console=(tqdm is None),
                                 )
+                            best_ckpt = ret.get("best_ckpt") or ret.get("best_checkpoint") or ret.get("checkpoint")
+                            if best_ckpt and os.path.exists(best_ckpt):
+                                detector_reuse_cache.setdefault(det_sig["key"], {})[model_name] = {
+                                    "checkpoint": best_ckpt,
+                                    "signature": det_sig.get("payload"),
+                                }
+                                report["checkpoint"] = best_ckpt
                     except Exception as e:
                         report["status"] = "train_failed"
                         report["error"] = {"type": type(e).__name__, "message": str(e)}
@@ -1146,6 +1285,162 @@ class PipelineRunner:
                     "predictions_root": predictions_root,
                 },
             ) as stage_entry:
+                def _augment_detection_visuals_with_seg_roi(det_vis_dir: str, roi_trace_path: str, model_label: str) -> None:
+                    cv2 = None
+                    try:
+                        import cv2 as _cv2  # type: ignore
+                        cv2 = _cv2
+                    except Exception:
+                        return
+                    try:
+                        if not os.path.isdir(det_vis_dir) or not os.path.exists(roi_trace_path):
+                            return
+                        with open(roi_trace_path, "r", encoding="utf-8") as f:
+                            trace = json.load(f) or {}
+                        if not isinstance(trace, dict) or not trace:
+                            return
+                        # Build a lookup frame_index(int) -> row
+                        trace_map: Dict[int, Dict[str, Any]] = {}
+                        for k, v in trace.items():
+                            try:
+                                fi = int(k)
+                            except Exception:
+                                continue
+                            if isinstance(v, dict):
+                                trace_map[fi] = v
+                        if not trace_map:
+                            return
+
+                        for fname in os.listdir(det_vis_dir):
+                            if not (fname.startswith("frame_") and fname.endswith(".jpg")):
+                                continue
+                            try:
+                                fi = int(fname[len("frame_") : len("frame_") + 6])
+                            except Exception:
+                                continue
+                            row = trace_map.get(fi)
+                            if not row:
+                                continue
+                            if str(row.get("bbox_source", "")) != "prev_segmentation":
+                                continue
+
+                            # Prefer ROI bbox (expanded crop) if available; otherwise fall back to raw bbox.
+                            bb = row.get("roi_bbox") or row.get("bbox")
+                            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
+                                continue
+                            try:
+                                x, y, w, h = map(float, bb)
+                            except Exception:
+                                continue
+                            if w <= 1.0 or h <= 1.0:
+                                continue
+
+                            img_path = os.path.join(det_vis_dir, fname)
+                            img = cv2.imread(img_path)
+                            if img is None:
+                                continue
+
+                            color = (255, 0, 0)  # blue (BGR)
+                            label = f"{model_label} ROI(From Last Seg)"
+                            cv2.rectangle(img, (int(x), int(y)), (int(x + w), int(y + h)), color, 2)
+                            cv2.putText(
+                                img,
+                                label,
+                                (int(x), max(0, int(y) - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                color,
+                                1,
+                                cv2.LINE_AA,
+                            )
+                            try:
+                                cv2.imwrite(img_path, img)
+                            except Exception:
+                                pass
+                    except Exception:
+                        return
+
+                def _roi_trace_fallback_stats(roi_trace_path: str) -> Optional[Dict[str, float]]:
+                    """Compute ROI fallback stats from roi_trace.json.
+
+                    Fallback definition:
+                    - Direct ROI: bbox_source in {detector, tracker}
+                    - Fallback ROI: everything else (prev_bbox / prev_segmentation / full_frame / segmentation_bootstrap / unknown)
+                    Denominator: total frames in roi_trace (int keys).
+                    """
+                    try:
+                        if not os.path.exists(roi_trace_path):
+                            return None
+                        with open(roi_trace_path, "r", encoding="utf-8") as f:
+                            trace = json.load(f) or {}
+                        if not isinstance(trace, dict) or not trace:
+                            return None
+                        direct_sources = {"detector", "tracker"}
+                        total = 0
+                        fallback = 0
+                        for k, v in trace.items():
+                            try:
+                                _ = int(k)
+                            except Exception:
+                                continue
+                            if not isinstance(v, dict):
+                                continue
+                            total += 1
+                            src = str(v.get("bbox_source", "")).strip().lower()
+                            if src not in direct_sources:
+                                fallback += 1
+                        if total <= 0:
+                            return None
+                        rate = float(fallback) / float(total)
+                        return {
+                            "roi_total_frames": float(total),
+                            "roi_fallback_frames": float(fallback),
+                            "roi_fallback_rate": float(rate),
+                        }
+                    except Exception:
+                        return None
+
+                def _inject_roi_fallback_metrics_into_detection(
+                    model_label: str,
+                    vid_stem: str,
+                    stats: Dict[str, float],
+                ) -> None:
+                    """Update detection metrics JSON files in-place for viewer consumption."""
+                    try:
+                        # Per-video summary.json
+                        if vid_stem:
+                            det_vid_summary = os.path.join(detection_test_dir, "metrics", vid_stem, "summary.json")
+                            if os.path.exists(det_vid_summary):
+                                try:
+                                    with open(det_vid_summary, "r", encoding="utf-8") as f:
+                                        data = json.load(f) or {}
+                                except Exception:
+                                    data = {}
+                                if isinstance(data, dict):
+                                    model_metrics = data.get(model_label)
+                                    if isinstance(model_metrics, dict):
+                                        model_metrics.update(stats)
+                                        data[model_label] = model_metrics
+                                        with open(det_vid_summary, "w", encoding="utf-8") as f:
+                                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        # Dataset-level summary.json
+                        det_ds_summary = os.path.join(detection_test_dir, "metrics", "summary.json")
+                        if os.path.exists(det_ds_summary):
+                            try:
+                                with open(det_ds_summary, "r", encoding="utf-8") as f:
+                                    ds = json.load(f) or {}
+                            except Exception:
+                                ds = {}
+                            if isinstance(ds, dict):
+                                mm = ds.get(model_label)
+                                if isinstance(mm, dict):
+                                    mm.update(stats)
+                                    ds[model_label] = mm
+                                    with open(det_ds_summary, "w", encoding="utf-8") as f:
+                                        json.dump(ds, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        return
+
                 for model_name, preds_by_video in test_predictions.items():
                     out_dir_model = os.path.join(predictions_root, model_name)
                     os.makedirs(out_dir_model, exist_ok=True)
@@ -1155,6 +1450,47 @@ class PipelineRunner:
                         gt_annotations=test_annotations,
                         viz_settings=seg_viz_cfg,
                     )
+
+                    # Compute ROI fallback rate per video from roi_trace.json and inject into detection metrics.
+                    # Also aggregate across dataset using total frames as denominator (micro-average).
+                    roi_total_sum = 0.0
+                    roi_fallback_sum = 0.0
+                    try:
+                        for vp in preds_by_video.keys():
+                            vid_stem = os.path.splitext(os.path.basename(vp))[0]
+                            roi_trace_path = os.path.join(out_dir_model, vid_stem, "roi_trace.json")
+                            stats = _roi_trace_fallback_stats(roi_trace_path)
+                            if not stats:
+                                continue
+                            roi_total_sum += float(stats.get("roi_total_frames", 0.0))
+                            roi_fallback_sum += float(stats.get("roi_fallback_frames", 0.0))
+                            _inject_roi_fallback_metrics_into_detection(str(model_name), vid_stem, stats)
+                    except Exception:
+                        pass
+                    if roi_total_sum > 0.0:
+                        ds_rate = float(roi_fallback_sum) / float(roi_total_sum)
+                        ds_stats = {
+                            "roi_total_frames": float(roi_total_sum),
+                            "roi_fallback_frames": float(roi_fallback_sum),
+                            "roi_fallback_rate": float(ds_rate),
+                        }
+                        _inject_roi_fallback_metrics_into_detection(str(model_name), "", ds_stats)
+                        try:
+                            test_stage = stage_metrics_collector.get("test", {}).get("summary")
+                            if isinstance(test_stage, dict) and isinstance(test_stage.get(str(model_name)), dict):
+                                test_stage[str(model_name)].update(ds_stats)
+                        except Exception:
+                            pass
+
+                    # Post-process detection visualization JPGs to include ROI bbox derived from previous segmentation.
+                    try:
+                        for vp in preds_by_video.keys():
+                            vid_stem = os.path.splitext(os.path.basename(vp))[0]
+                            det_vis_dir = os.path.join(detection_test_dir, "visualizations", vid_stem)
+                            roi_trace_path = os.path.join(out_dir_model, vid_stem, "roi_trace.json")
+                            _augment_detection_visuals_with_seg_roi(det_vis_dir, roi_trace_path, str(model_name))
+                    except Exception:
+                        pass
                     summary_metrics = metrics_payload.get("summary", {})
                     per_video_metrics = metrics_payload.get("videos", {})
                     if per_video_metrics:
