@@ -654,7 +654,7 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
         classifier_name = self.combo_class_classifier.currentText() if self.combo_class_classifier.count() else ''
         feature_params = dict(self.class_feature_params.get(feature_name, {})) if feature_name else {}
         classifier_params = dict(self.class_classifier_params.get(classifier_name, {})) if classifier_name else {}
-        fallback_feature = feature_name or (self.combo_class_feature.itemText(0) if self.combo_class_feature.count() else 'basic')
+        fallback_feature = feature_name or (self.combo_class_feature.itemText(0) if self.combo_class_feature.count() else 'motion_only')
         fallback_classifier = classifier_name or (self.combo_class_classifier.itemText(0) if self.combo_class_classifier.count() else 'random_forest')
         class_cfg: Dict[str, Any] = {
             'enabled': class_enabled,
@@ -771,6 +771,9 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
 
     # ---------------- Synchronization -----------------
     def _on_builder_changed(self, force: bool = False):
+        # early guard: raw editor might not exist yet during __init__
+        if not hasattr(self, 'txt_cfg') or self.txt_cfg is None:
+            return
         if self._setting_exp_name and not force:
             return
         if self._syncing:  # currently applying parsed raw into builder
@@ -828,12 +831,17 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
             self.log(f'[RawParse][Error] {e}')
 
     def _highlight_raw_error(self, err: bool):
+        if not hasattr(self, 'txt_cfg') or self.txt_cfg is None:
+            return
         if err:
             self.txt_cfg.setStyleSheet("QTextEdit { font-family:Consolas; font-size:12px; border:2px solid #d73a49; }")
         else:
             self.txt_cfg.setStyleSheet("QTextEdit { font-family:Consolas; font-size:12px; }")
 
     def _set_raw_text_programmatically(self, text: str):
+        # guard in case called before widget created
+        if not hasattr(self, 'txt_cfg') or self.txt_cfg is None:
+            return
         self._updating_raw_programmatically = True
         self.txt_cfg.blockSignals(True)
         self.txt_cfg.setPlainText(text)
@@ -1561,16 +1569,17 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
             pass
         self._start_run_thread(cfg)
 
-    def _start_run_thread(self, cfg: dict):
+    def _start_run_thread(self, cfg: dict, detector_cache: Optional[dict] = None):
         class _Worker(QObject):
             finished = Signal()
             error = Signal(str)
             progress = Signal(str, int, int, dict)
             log = Signal(str)
 
-            def __init__(self, cfg):
+            def __init__(self, cfg, detector_cache):
                 super().__init__()
                 self.cfg = cfg
+                self.detector_cache = detector_cache
 
             def run(self):
                 from traceback import format_exc
@@ -1580,7 +1589,8 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
                     runner = PipelineRunner(
                         self.cfg,
                         logger=_logger,
-                        progress_cb=lambda stage, cur, tot, extra: self.progress.emit(stage, cur, tot, extra)
+                        progress_cb=lambda stage, cur, tot, extra: self.progress.emit(stage, cur, tot, extra),
+                        detector_reuse_cache=self.detector_cache,
                     )
                     runner.run()
                     self.finished.emit()
@@ -1598,7 +1608,7 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
 
         # Thread setup
         self._run_thread = QThread(self)
-        self._run_worker = _Worker(cfg)
+        self._run_worker = _Worker(cfg, detector_cache)
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
         self._run_worker.finished.connect(self._on_run_finished)

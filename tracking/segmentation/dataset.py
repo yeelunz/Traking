@@ -112,18 +112,27 @@ class SegmentationCropDataset(Dataset):
         frame = self._load_frame(entry.video_path, entry.frame_index)
         if frame is None:
             raise RuntimeError(f"Failed to read frame {entry.frame_index} from {entry.video_path}")
-        if self.preprocs:
-            frame = self._apply_preprocs_frame(frame, self.preprocs)
         mask_full = self._load_mask(entry.video_path, entry.mask_path)
         if mask_full is None:
             raise RuntimeError(f"Mask not found for frame {entry.frame_index} in {entry.video_path}")
         roi_bbox = entry.roi_bbox
+        if self.preprocs:
+            frame, mask_full, roi_bbox = self._apply_preprocs_frame_mask_bbox(
+                frame,
+                mask_full,
+                roi_bbox,
+                self.preprocs,
+            )
         if self.jitter > 0.0:
             roi_bbox = self._jitter_bbox(roi_bbox, frame.shape[:2])
         roi_image = crop_with_bbox(frame, roi_bbox)
         roi_mask = crop_with_bbox(mask_full, roi_bbox)
         if self.roi_preprocs and roi_image.size != 0:
-            roi_image = self._apply_preprocs_frame(roi_image, self.roi_preprocs)
+            roi_image, roi_mask = self._apply_preprocs_frame_and_mask(
+                roi_image,
+                roi_mask,
+                self.roi_preprocs,
+            )
         orig_size = roi_image.shape[:2]
         if self.target_size is not None:
             roi_image = self._resize_image(roi_image, self.target_size)
@@ -160,6 +169,66 @@ class SegmentationCropDataset(Dataset):
         for p in preprocs:
             rgb = p.apply_to_frame(rgb)
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    def _apply_preprocs_frame_and_mask(
+        self,
+        frame: np.ndarray,
+        mask: np.ndarray,
+        preprocs: Sequence[PreprocessingModule],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if not preprocs:
+            return frame, mask
+        if frame.ndim == 2:
+            out = frame
+            out_mask = mask
+            for p in preprocs:
+                if hasattr(p, "apply_to_frame_and_mask"):
+                    out, out_mask = p.apply_to_frame_and_mask(out, out_mask)
+                else:
+                    out = p.apply_to_frame(out)
+            return out, out_mask
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        out_mask = mask
+        for p in preprocs:
+            if hasattr(p, "apply_to_frame_and_mask"):
+                rgb, out_mask = p.apply_to_frame_and_mask(rgb, out_mask)
+            else:
+                rgb = p.apply_to_frame(rgb)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), out_mask
+
+    def _apply_preprocs_frame_mask_bbox(
+        self,
+        frame: np.ndarray,
+        mask: np.ndarray,
+        bbox: BoundingBox,
+        preprocs: Sequence[PreprocessingModule],
+    ) -> Tuple[np.ndarray, np.ndarray, BoundingBox]:
+        if not preprocs:
+            return frame, mask, bbox
+        bbox_tuple = bbox.as_tuple()
+        if frame.ndim == 2:
+            out = frame
+            out_mask = mask
+            out_bbox = bbox_tuple
+            for p in preprocs:
+                if hasattr(p, "apply_to_frame_mask_bbox"):
+                    out, out_mask, out_bbox = p.apply_to_frame_mask_bbox(out, out_mask, out_bbox)
+                elif hasattr(p, "apply_to_frame_and_mask"):
+                    out, out_mask = p.apply_to_frame_and_mask(out, out_mask)
+                else:
+                    out = p.apply_to_frame(out)
+            return out, out_mask, BoundingBox(*out_bbox)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        out_mask = mask
+        out_bbox = bbox_tuple
+        for p in preprocs:
+            if hasattr(p, "apply_to_frame_mask_bbox"):
+                rgb, out_mask, out_bbox = p.apply_to_frame_mask_bbox(rgb, out_mask, out_bbox)
+            elif hasattr(p, "apply_to_frame_and_mask"):
+                rgb, out_mask = p.apply_to_frame_and_mask(rgb, out_mask)
+            else:
+                rgb = p.apply_to_frame(rgb)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), out_mask, BoundingBox(*out_bbox)
 
     # ---------------- internal helpers ----------------
     def _sample_padding(self) -> float:
@@ -247,6 +316,12 @@ class SegmentationCropDataset(Dataset):
             abs_path = mask_file
         else:
             abs_path = os.path.join(self.dataset_root, mask_file)
+            # Fallback: resolve relative to video directory
+            if not os.path.exists(abs_path):
+                video_dir = os.path.dirname(video_path)
+                alt_path = os.path.join(video_dir, mask_file)
+                if os.path.exists(alt_path):
+                    abs_path = alt_path
         mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
         if mask is None:
             return None

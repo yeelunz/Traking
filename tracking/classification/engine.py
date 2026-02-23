@@ -4,6 +4,7 @@ import json
 import os
 import random
 from collections import defaultdict
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -22,7 +23,26 @@ from ..segmentation.dataset import attach_ground_truth_segmentation
 from ..utils.annotations import load_coco_vid
 
 
-def _subject_from_video_path(path: str) -> str:
+def _subject_from_video_path(path: str, dataset_root: str | None = None) -> str:
+    """Derive subject ID from video path.
+
+    Strategy:
+    1. If *dataset_root* is given, compute the relative path; if there is a
+       parent directory component, use the first directory name as subject.
+    2. Otherwise, fall back to extracting leading digits from the filename stem.
+    """
+    # Try directory-based derivation first
+    if dataset_root:
+        try:
+            rel = os.path.relpath(path, dataset_root)
+            parts = Path(rel).parts
+            if len(parts) > 1:
+                # e.g. "n001/D.avi" → subject = "n001"
+                return parts[0]
+        except Exception:
+            pass
+
+    # Fallback: leading digits from filename
     stem = os.path.splitext(os.path.basename(path))[0]
     digits = []
     for ch in stem:
@@ -100,34 +120,78 @@ def _prepare_entity_features(
     videos: Dict[str, List[FramePrediction]],
     level: str,
     logger: Callable[[str], None],
+    dataset_root: str | None = None,
+    *,
+    fit_batch: bool = True,
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, str], Dict[str, List[str]]]:
+    """Extract features for every entity (video or subject).
+
+    If the feature_extractor exposes a ``finalize_batch`` method (e.g. for
+    batch PCA on texture features), it is called on the collected video-level
+    feature dicts **before** subject aggregation.
+
+    Parameters
+    ----------
+    fit_batch : bool
+        Forwarded to ``finalize_batch(fit=...)``.  Use ``True`` for the
+        training set (to fit PCA etc.) and ``False`` for the test set.
+    """
     level_lc = str(level).lower()
     features: Dict[str, Dict[str, float]] = {}
     owners: Dict[str, str] = {}
     sources: Dict[str, List[str]] = {}
+    has_finalize = callable(getattr(feature_extractor, "finalize_batch", None))
+
     if level_lc == "subject":
-        grouped: Dict[str, List[Dict[str, float]]] = defaultdict(list)
+        # 1) Extract video-level features
+        subject_video_feats: Dict[str, List[Dict[str, float]]] = defaultdict(list)
         source_paths: Dict[str, List[str]] = defaultdict(list)
+        all_video_feats: List[Dict[str, float]] = []
+        video_meta: List[Tuple[str, int]] = []  # (subject, idx_in_subject_list)
+
         for video_path, samples in videos.items():
-            subject = _subject_from_video_path(video_path)
-            grouped[subject].append(
-                feature_extractor.extract_video(samples, video_path=video_path)
-            )
+            subject = _subject_from_video_path(video_path, dataset_root)
+            vf = feature_extractor.extract_video(samples, video_path=video_path)
+            idx = len(subject_video_feats[subject])
+            subject_video_feats[subject].append(vf)
             source_paths[subject].append(video_path)
-        for subject, feats in grouped.items():
+            all_video_feats.append(vf)
+            video_meta.append((subject, idx))
+
+        # 2) Batch finalize (PCA etc.) on video-level features
+        if has_finalize and all_video_feats:
+            all_video_feats = list(feature_extractor.finalize_batch(all_video_feats, fit=fit_batch))
+            # Rebuild per-subject dict from updated flat list
+            subject_video_feats_new: Dict[str, List[Dict[str, float]]] = defaultdict(list)
+            for (subj, _local_idx), vf in zip(video_meta, all_video_feats):
+                subject_video_feats_new[subj].append(vf)
+            subject_video_feats = subject_video_feats_new
+
+        # 3) Aggregate to subject level
+        for subject, feats in subject_video_feats.items():
             features[subject] = feature_extractor.aggregate_subject(feats)
             owners[subject] = subject
             sources[subject] = source_paths[subject]
             logger(f"[Classification] Subject {subject}: aggregated {len(feats)} video(s)")
     else:
+        all_video_feats_flat: List[Dict[str, float]] = []
+        entity_ids: List[str] = []
+
         for video_path, samples in videos.items():
             video_id = os.path.splitext(os.path.basename(video_path))[0]
-            features[video_id] = feature_extractor.extract_video(samples, video_path=video_path)
-            owners[video_id] = _subject_from_video_path(video_path)
+            vf = feature_extractor.extract_video(samples, video_path=video_path)
+            all_video_feats_flat.append(vf)
+            entity_ids.append(video_id)
+            owners[video_id] = _subject_from_video_path(video_path, dataset_root)
             sources[video_id] = [video_path]
-            logger(
-                f"[Classification] Video {video_id}: extracted {len(samples)} sample(s)"
-            )
+            logger(f"[Classification] Video {video_id}: extracted {len(samples)} sample(s)")
+
+        if has_finalize and all_video_feats_flat:
+            all_video_feats_flat = list(feature_extractor.finalize_batch(all_video_feats_flat, fit=fit_batch))
+
+        for eid, vf in zip(entity_ids, all_video_feats_flat):
+            features[eid] = vf
+
     return features, owners, sources
 
 
@@ -283,6 +347,7 @@ def run_subject_classification(
         train_videos,
         level,
         logger,
+        dataset_root=dataset_root,
     )
     train_entities = _filter_entities(train_features, train_owner, labels, logger)
     if not train_entities:
@@ -327,6 +392,8 @@ def run_subject_classification(
         test_predictions[source_model],
         level,
         logger,
+        dataset_root=dataset_root,
+        fit_batch=False,
     )
     test_entities = _filter_entities(test_features, test_owner, labels, logger)
     if not test_entities:

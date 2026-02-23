@@ -364,7 +364,14 @@ class ToMPTracker(TrackingModel):
                         preds.append(FramePrediction(frame_idx, out.bbox, out.score))
                         last_bbox = out.bbox
                     elif self.fallback_last_prediction and last_bbox is not None:
-                        preds.append(FramePrediction(frame_idx, last_bbox, out.score))
+                        preds.append(
+                            FramePrediction(
+                                frame_index=frame_idx,
+                                bbox=last_bbox,
+                                score=out.score,
+                                is_fallback=True,
+                            )
+                        )
 
                 frame_idx += 1
         finally:

@@ -223,7 +223,7 @@ class QueueMixin:
 
     def _queue_default_results_root(self) -> str:
         try:
-            proj_root = os.path.dirname(os.path.abspath(__file__))
+            proj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         except Exception:
             proj_root = os.getcwd()
         return os.path.join(proj_root, 'results')
@@ -293,6 +293,7 @@ class QueueMixin:
         self._queue_error = False
         self._queue_results_root = schedule_root
         self._queue_current_label = None
+        self._queue_detector_cache = {}
         self.btn_queue_import.setEnabled(False)
         self.btn_queue_add.setEnabled(False)
         self.btn_queue_remove.setEnabled(False)
@@ -322,7 +323,7 @@ class QueueMixin:
             display_item.setText(f"{label}（執行中 {idx}/{self._queue_total}）")
         self.log(f"[Queue] 開始第 {idx}/{self._queue_total}: {label}")
         self._set_status(f"排程 {idx}/{self._queue_total} 執行中…")
-        self._start_run_thread(payload['config'])
+        self._start_run_thread(payload['config'], detector_cache=self._queue_detector_cache)
 
     def _queue_handle_run_completion(self, success: bool):
         if not self._queue_running:
@@ -358,6 +359,7 @@ class QueueMixin:
         self._queue_total = 0
         self._queue_completed = 0
         self._queue_results_root = None
+        self._queue_detector_cache = None
         self._queue_current_label = None
         self.btn_queue_import.setEnabled(True)
         self.btn_queue_add.setEnabled(True)

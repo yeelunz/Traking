@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from tracking.core.registry import CLASSIFIER_REGISTRY
+import tracking.classification.classifiers  # noqa: F401  - trigger registration
 
 
 @pytest.fixture()
@@ -27,14 +28,14 @@ def _build_classifier(name: str, params=None):
     return cls(params or {})
 
 
-def test_logistic_regression_classifier(toy_dataset):
+def test_decision_tree_classifier(toy_dataset):
     X, y = toy_dataset
     clf = _build_classifier(
-        "logistic_regression",
-        {"penalty": "l2", "max_iter": 500, "C": 1.5, "class_weight": None},
+        "decision_tree",
+        {"max_depth": 5, "criterion": "gini", "class_weight": None},
     )
     summary = clf.fit(X, y)
-    assert "coefficients" in summary
+    assert "feature_importances" in summary
     preds = clf.predict(X)
     assert preds.shape == y.shape
     proba = clf.predict_proba(X)
@@ -58,13 +59,10 @@ def test_svm_classifier(toy_dataset):
 @pytest.mark.parametrize(
     "name, params",
     [
-        ("xgboost", {"n_estimators": 25, "max_depth": 3, "learning_rate": 0.2}),
         ("lightgbm", {"n_estimators": 25, "learning_rate": 0.2, "num_leaves": 25}),
     ],
 )
 def test_gradient_boosting_classifiers_optional(toy_dataset, name, params):
-    if name == "xgboost":
-        pytest.importorskip("xgboost")
     if name == "lightgbm":
         pytest.importorskip("lightgbm")
     X, y = toy_dataset

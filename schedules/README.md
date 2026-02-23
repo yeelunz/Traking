@@ -264,6 +264,7 @@ python -c "from tracking.core.registry import MODEL_REGISTRY, PREPROC_REGISTRY, 
 
 #### `AUGMENT`
 - `hflip_prob`, `vflip_prob`
+- `translate_frac`
 - `rotate_max_deg`
 - `brightness`, `contrast`
 - `noise_std`

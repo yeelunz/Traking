@@ -40,7 +40,7 @@
       <main>
         <section id="welcome">
           <h2>請從左側選擇一個實驗</h2>
-          <p>這個 Web UI 會自動讀取 schedule 中的 metadata、detection 與 segmentation 指標、可視化結果。選擇實驗後即可查看詳細資訊。</p>
+          <p>這個 Web UI 會自動讀取 schedule 中的 metadata、detection、segmentation 及 classification 指標、可視化結果。選擇實驗後即可查看詳細資訊。</p>
         </section>
         <section id="group-overview" class="hidden">
           <div class="section-header">
@@ -72,6 +72,16 @@
                 </div>
               </div>
               <canvas id="group-segmentation-chart" height="240"></canvas>
+            </div>
+            <div>
+              <div class="chart-header">
+                <h3>Classification 指標比較</h3>
+                <div class="chart-actions">
+                  <button class="ghost-button" data-chart-key="groupClassificationChart" data-canvas-id="group-classification-chart" data-filename="group_classification">下載 PNG</button>
+                  <button class="ghost-button" data-export-chart="groupClassificationChart" data-export-format="csv">複製 CSV</button>
+                </div>
+              </div>
+              <canvas id="group-classification-chart" height="240"></canvas>
             </div>
           </div>
         </section>
@@ -114,6 +124,16 @@
                 </div>
                 <canvas id="loso-segmentation-chart" height="240"></canvas>
               </div>
+              <div>
+                <div class="chart-header">
+                  <h3>Classification（fold 比較）</h3>
+                  <div class="chart-actions">
+                    <button class="ghost-button" data-chart-key="losoClassificationChart" data-canvas-id="loso-classification-chart" data-filename="loso_classification">下載 PNG</button>
+                    <button class="ghost-button" data-export-chart="losoClassificationChart" data-export-format="csv">複製 CSV</button>
+                  </div>
+                </div>
+                <canvas id="loso-classification-chart" height="240"></canvas>
+              </div>
             </div>
             <table id="loso-fold-table"></table>
             <p class="hint">提示：點選某個 fold 會載入該 fold 的 per-video / 可視化細節。</p>
@@ -132,6 +152,35 @@
               <table id="segmentation-summary-table" class="summary-table"></table>
             </div>
           </div>
+
+          <!-- Classification Section -->
+          <section id="classification-section" class="hidden">
+            <div class="section-header">
+              <h3>Classification 結果</h3>
+            </div>
+            <div class="grid summary-grid">
+              <div>
+                <div class="summary-header"><h4>分類彙總</h4></div>
+                <table id="classification-summary-table" class="summary-table"></table>
+              </div>
+              <div>
+                <div class="summary-header"><h4>混淆矩陣</h4></div>
+                <div id="confusion-matrix" class="confusion-matrix-container"></div>
+              </div>
+            </div>
+            <div class="chart-header" style="margin-top:1rem;">
+              <h3>預測機率分佈</h3>
+              <div class="chart-actions">
+                <button class="ghost-button" data-chart-key="classificationChart" data-canvas-id="classification-chart" data-filename="classification_probs">下載 PNG</button>
+                <button class="ghost-button" data-export-chart="classificationChart" data-export-format="csv">複製 CSV</button>
+              </div>
+            </div>
+            <canvas id="classification-chart" height="200"></canvas>
+            <div class="summary-header" style="margin-top:1rem;">
+              <h4>Per-Subject 預測</h4>
+            </div>
+            <table id="classification-predictions-table"></table>
+          </section>
           <div class="grid">
             <div>
               <div class="chart-header">
@@ -181,6 +230,6 @@
         </section>
       </main>
     </div>
-    <script src="/assets/app.js"></script>
+    <script src="/assets/app.js?v=20260106a"></script>
   </body>
 </html>

@@ -631,10 +631,24 @@ class FasterRCNNModel(TrackingModel):
                             preds.append(FramePrediction(int(fidx), bbox, sc))
                         else:
                             if self.fallback_last_prediction and last_bbox is not None:
-                                preds.append(FramePrediction(int(fidx), last_bbox, None))
+                                preds.append(
+                                    FramePrediction(
+                                        frame_index=int(fidx),
+                                        bbox=last_bbox,
+                                        score=None,
+                                        is_fallback=True,
+                                    )
+                                )
                     else:
                         if self.fallback_last_prediction and last_bbox is not None:
-                            preds.append(FramePrediction(int(fidx), last_bbox, None))
+                            preds.append(
+                                FramePrediction(
+                                    frame_index=int(fidx),
+                                    bbox=last_bbox,
+                                    score=None,
+                                    is_fallback=True,
+                                )
+                            )
             frames_buf.clear()
             indices_buf.clear()
         with torch.no_grad():
@@ -716,10 +730,24 @@ class FasterRCNNModel(TrackingModel):
                             preds.append(FramePrediction(int(fidx), bbox, sc))
                         else:
                             if self.fallback_last_prediction and last_bbox is not None:
-                                preds.append(FramePrediction(int(fidx), last_bbox, None))
+                                preds.append(
+                                    FramePrediction(
+                                        frame_index=int(fidx),
+                                        bbox=last_bbox,
+                                        score=None,
+                                        is_fallback=True,
+                                    )
+                                )
                     else:
                         if self.fallback_last_prediction and last_bbox is not None:
-                            preds.append(FramePrediction(int(fidx), last_bbox, None))
+                            preds.append(
+                                FramePrediction(
+                                    frame_index=int(fidx),
+                                    bbox=last_bbox,
+                                    score=None,
+                                    is_fallback=True,
+                                )
+                            )
             buf_frames.clear()
             buf_indices.clear()
         with torch.no_grad():

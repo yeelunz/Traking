@@ -1,65 +1,179 @@
 # Segmentation Annotator
 
-這個資料夾提供一個專門針對神經追蹤資料的遮罩標註工具，可與原本的 Bounding Box 標註器並行使用。它支援筆刷與橡皮擦操作、改良後的 YOLO + Chan–Vese 自動遮罩輔助，以及完整的 COCO-VID 匯出。
+本資料夾提供一套針對神經追蹤資料的遮罩標註工具，主打即時筆刷編輯、單幀單遮罩策略與自動遮罩輔助，並輸出含 bbox + mask + motion 的 COCO-VID 相容標註。
 
-## 主要功能
+以下內容已依程式碼現況重新檢核並整理。
 
-- **遮罩編輯**：滑鼠左鍵繪製、右鍵橡皮擦，滾輪調整筆刷半徑，支援 Ctrl+Z 復原。
-- **遮罩清理**：每次儲存會自動保留面積最大的連通區，避免橡皮擦遺留噪聲碎片。
-- **單一遮罩策略**：每個影格只保留一個遮罩並沿用同一個 track ID，避免同幀多個 mask 造成 downstream 模型混淆。
-- **遮罩視覺化控制**：提供透明度滑桿與 5 種色票，可即時切換並微調遮罩顯示強度。
-- **筆刷控制**：UI 內建筆刷大小滑桿與數值框，並顯示滑鼠懸停時的筆刷/橡皮擦覆蓋範圍。
-- **縮放與導覽**：滑桿或 Ctrl + 滾輪可連續縮放畫布；放大超過 100% 時會在右下角顯示全局縮圖與可拖曳的視窗框，快速定位欲編輯的區域。
-- **遮罩預覽**：按下空白鍵可暫時加強遮罩顏色以利檢視。
-- **自動建議**：整合現有的 YOLO 權重 (`best.pt`) 進行檢測，取單一高分偵測結果後以鏡像 padding 擴張 ROI、橢圓初始化，再透過局部 Chan–Vese / MorphACWE + MGAC、導向濾波與形態學後處理生成乾淨遮罩。
-- **擴充資料結構**：匯出的 JSON 同時保留原本的 bbox、mask 路徑以及推算出的質心、位移距離等運動量指標。
-- **與舊流程相容**：匯出的資料可直接轉為 COCO-VID 標註；每個標註含有 `bbox` 與遮罩相對路徑，tracker/detector 仍可取得 bounding box，同時額外的 `motion` 欄位描述神經在連續幀間的位移。
+## 功能摘要
 
-## 安裝額外依賴
+- **遮罩編輯**：左鍵繪製、右鍵橡皮擦、滾輪調整筆刷，支援 `Ctrl+Z`。
+- **遮罩清理**：任何新增/更新遮罩都會自動只保留面積最大的連通區。
+- **單一遮罩策略**：每個影格只保留一個遮罩並沿用單一 `track_id`，避免同幀多個 mask 造成 downstream 模型混淆。
+- **顯示控制**：透明度、色票、背景亮度、縮放與縮圖導覽。
+- **自動遮罩**：YOLO 偵測 → ROI 反射擴張 → GrabCut 初始化 → MGAC(若可用) → 形態學與導向濾波 → 邊界清理與最大連通區保留。
+- **擴充資訊**：輸出 JSON 同時保留 `bbox`、`mask_path`、`metadata`(質心/周長/等效直徑) 與 `motion`(dx/dy/距離)。
 
-為了方便把這個工具獨立打包，我們另外準備了最精簡的需求檔 `segmentation_annotator/requirements.txt`，僅包含：
+## 安裝需求
 
-- `numpy`
-- `opencv-python`
-- `PySide6`
-- `scikit-image`
-- `ultralytics>=8.3.0`
-
-醫師的工作站只要執行：
+本工具可獨立安裝，請使用 [segmentation_annotator/requirements.txt](segmentation_annotator/requirements.txt)。
 
 ```cmd
 pip install -r segmentation_annotator/requirements.txt
 ```
 
-即可具備執行所需的全部元件。YOLOv11 推論預設以 CPU 進行，無需安裝 CUDA；如果現場有 GPU 需要加速，再在 `YOLO+ChanVese` 按鈕前設定 `AutoMaskGenerator(device="cuda:0")` 即可。
+> 註：ultralytics 初次使用會自動下載模型定義/權重，請確保網路可用。
 
-> 注意：ultralytics 會在第一次使用時自動下載模型定義或權重，請確保網路環境允許。
+## 啟動方式
 
-## 使用方式
+```cmd
+python -m segmentation_annotator.main
+```
 
-1. 執行 `python -m segmentation_annotator.main`。
-2. 點「檔案 → 開啟資料夾」，選擇含有影片的資料夾；右側清單會列出該資料夾中的所有支援格式 (`.mp4`, `.avi`, `.mov`, `.mkv`, ...)，點選即可切換影片。
-3. 若資料夾內沒有 `labels.txt`，程式會自動建立並帶入預設類別 `median_nerve`。
-4. 每次繪製、套用自動遮罩或刪除遮罩時，系統會立即自動儲存結果；生成的 JSON 與遮罩檔會放在同一資料夾下（`seg_masks/` 子資料夾），無需額外匯出按鈕。
-   - 右下方可調整遮罩透明度/顏色，左側筆刷列提供滑桿與數值框直接調整筆刷大小，滑鼠懸停時會顯示筆刷半徑預覽。
-   - 當縮放比例大於 100% 時，畫布右下角會浮現縮圖導覽視窗，可拖曳黃色外框來切換當前視角，或直接拖曳畫布（中鍵）微調位置。
-   - 透過「說明 → 快捷鍵說明」可隨時查看滑鼠與鍵盤操作提醒。
-5. 如需 YOLO + Chan–Vese 輔助，設定好 `best.pt` 權重的路徑（可放在與影片相同資料夾），按下 `YOLO+ChanVese` 按鈕即可產生候選遮罩；演算法會自動擴張 ROI、鏡像 padding、以局部能量模型處理亮度不均並移除貼邊假影，只留下面積最大的遮罩。
-6. 完成後資料夾會包含：
-   - `seg_masks/<video_name>/track_xxxx/frame_00000001.png` 形式的遮罩影像
-   - `<video_name>.json`：COCO-VID 格式的標註檔，含 `bbox`、`mask_path`、`metadata` (質心、周長、等效直徑)、`motion` (dx/dy/距離)
+## 輸入資料夾結構（選取的資料夾）
 
-## 分割格式說明
+使用「檔案 → 開啟資料夾」選取包含影片的資料夾，支援副檔名：`.mp4`, `.avi`, `.mov`, `.mkv`, `.mpg`, `.mpeg`, `.wmv`。
 
-- `annotations[].bbox`：由遮罩自動推算的外接框，維持舊有流程所需的輸入。
-- `annotations[].mask_path`：遮罩相對路徑，讀取後可重建 binary mask。
-- `annotations[].metadata`: 包含 `centroid`、`perimeter_px`、`equivalent_diameter_px`。
-- `annotations[].motion`: 以 centroid 差值計算的 `(dx, dy, distance)`，提供神經移動量的衡量指標。
-- `tracks[]`: 每個 track 的運動時間序列彙整，便於後續分析。
+程式會自動確保該資料夾有 `labels.txt`：
 
-## 與現有流程整合
+```
+<dataset_root>/
+   ├─ labels.txt                # 類別清單，若不存在會自動建立（預設 median_nerve）
+   ├─ video_001.mp4
+   ├─ video_002.avi
+   └─ ...
+```
 
-- `segmentation_annotator/data.py` 中的 `SegmentationProject.export_dataset` 會輸出與原 pipeline 相容的 JSON，既可在 `tracking` 模組中載入 bounding box，也能視需求透過 `mask_path` 取得遮罩。不需依賴 `mmtracking` 套件或任何外部 C++ 擴充套件。
-- 未來若需於 `tracking` 匯入遮罩，可透過 `mask_path` 重新讀入二值影像，再透過 `MaskMetadata.from_mask` 提供的資訊取得 bbox / 面積 / 質心等特徵。
+若同資料夾內已存在 `<video_stem>.json` 與 `seg_masks/`，啟動時會自動載入既有遮罩。
 
-歡迎依照實際工作流程再行擴充使用者介面或資料格式。
+## 輸出檔案結構（自動儲存）
+
+每次繪製、刪除遮罩或套用自動遮罩都會觸發自動儲存；輸出會寫在「開啟的資料夾」內（即 `dataset_root`）：
+
+```
+<dataset_root>/
+   ├─ labels.txt
+   ├─ video_001.mp4
+   ├─ video_001.json            # COCO-VID 相容標註（自動更新）
+   ├─ seg_masks/
+   │   └─ video_001/
+   │       ├─ frame_00000001.png
+   │       ├─ frame_00000002.png
+   │       └─ ...
+   └─ ...
+```
+
+### 遮罩檔命名規則
+
+- 單遮罩模式（預設）：`frame_00000001.png`
+- 若同幀存在多個 track（雖然目前 UI 會強制只留一個）：`frame_00000001_track_0001.png`
+
+## JSON 規格（COCO-VID 相容）
+
+輸出 JSON 由 [segmentation_annotator/data.py](segmentation_annotator/data.py) 的 `SegmentationProject.export_dataset()` 產生。
+
+### Top-level
+
+```text
+info                # 資訊與 mask 根目錄
+videos              # 影片資訊
+images              # 影格資訊（含 frame_index）
+annotations         # bbox + mask + metadata + motion
+categories          # 類別清單
+tracks              # 依 track 彙整的運動序列
+```
+
+### info
+
+- `description`: 固定描述文字
+- `annotation_type`: `bbox+mask`
+- `mask_root`: 預設 `seg_masks`
+
+### videos[]
+
+- `id`: 影片 ID（固定 1）
+- `name`: 影片檔名
+- `height`, `width`, `fps`, `total_frames`
+
+### images[]
+
+- `id`: 影格 ID（從 1 起算）
+- `video_id`: 固定 1
+- `frame_index`: 0-based 影格序號
+- `file_name`: `<video_stem>/<frame+1:08d>.jpg`（僅作為索引，程式不輸出影格影像）
+- `height`, `width`
+
+### annotations[]
+
+- `id`, `image_id`, `category_id`, `track_id`
+- `bbox`: `[x, y, w, h]`（由遮罩自動計算）
+- `area`: mask 像素面積
+- `iscrowd`: 固定 0
+- `mask_path`: 遮罩相對路徑（相對 `mask_root`）
+- `metadata`:
+   - `centroid`: `[cx, cy]`（像素座標）
+   - `perimeter_px`
+   - `equivalent_diameter_px`
+- `motion`:
+   - `dx`, `dy`, `distance`（與同 track 前一筆的質心差；首筆為 0）
+
+### categories[]
+
+- `id`, `name`
+
+### tracks[]
+
+- `track_id`, `category_id`
+- `samples[]`：
+   - `frame_index`
+   - `centroid`
+   - `displacement`: `[dx, dy]`
+   - `distance`
+- `total_path_length`
+- `average_speed_per_frame`
+
+## UI 區塊說明
+
+### 左側（畫布與播放控制）
+
+- **畫布**：影格與遮罩疊合顯示，支援縮放/平移與縮圖導覽。
+- **上一幀/下一幀**：切換影格；也可用上下鍵。
+- **進度滑桿 + 影格輸入框**：快速定位到指定幀。
+- **清除遮罩**：清除當前幀所有遮罩。
+- **YOLO+ChanVese**：執行自動遮罩（實作為 YOLO + GrabCut + MGAC）。
+
+### 右側（狀態與工具列）
+
+- **影片清單**：顯示資料夾內所有影片與已標註幀數。
+- **類別清單**：來自 `labels.txt`。
+- **筆刷設定**：滑桿/數值框/復原按鈕，並顯示筆刷半徑。
+- **遮罩顯示**：透明度與色票切換。
+- **背景亮度**：便於在暗/亮背景下檢視。
+- **檢視**：縮放百分比與重設檢視。
+- **已標註幀**：可快速跳轉。
+- **狀態列**：顯示自動儲存或錯誤訊息。
+
+## 自動遮罩權重搜尋路徑
+
+啟動自動遮罩時會依序尋找 `best.pt`：
+
+1. 專案根目錄的 `best.pt`
+2. 目前工作目錄的 `best.pt`
+3. `dataset_root/best.pt`
+4. 影片所在資料夾的 `best.pt`
+
+找不到權重時會提示並中止自動遮罩。
+
+## 快捷鍵
+
+- 左鍵：筆刷填色
+- 右鍵：橡皮擦
+- 滾輪：調整筆刷大小
+- `Ctrl+滾輪`：縮放畫布
+- 中鍵拖曳：平移畫面
+- 空白鍵：暫時加強遮罩預覽
+- `Ctrl+Z`：復原
+- 上/下鍵：切換影格
+
+---
+
+若要在其他流程中讀取遮罩，可用 `mask_path` 還原二值影像，再透過 `MaskMetadata.from_mask()` 取得 bbox、面積與質心等特徵。歡迎依實際流程擴充。 

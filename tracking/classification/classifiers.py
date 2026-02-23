@@ -7,23 +7,15 @@ import numpy as np
 
 try:  # pragma: no cover - optional dependency guard
     from sklearn.ensemble import RandomForestClassifier
-    from sklearn.linear_model import LogisticRegression
     from sklearn.svm import SVC
+    from sklearn.tree import DecisionTreeClassifier
 except Exception as exc:  # noqa: BLE001
     RandomForestClassifier = None  # type: ignore
-    LogisticRegression = None  # type: ignore
     SVC = None  # type: ignore
+    DecisionTreeClassifier = None  # type: ignore
     _SKLEARN_IMPORT_ERROR = exc
 else:
     _SKLEARN_IMPORT_ERROR = None
-
-try:  # pragma: no cover - optional dependency guard
-    from xgboost import XGBClassifier  # type: ignore[import-not-found]
-except Exception as exc:  # noqa: BLE001
-    XGBClassifier = None  # type: ignore
-    _XGBOOST_IMPORT_ERROR = exc
-else:
-    _XGBOOST_IMPORT_ERROR = None
 
 try:  # pragma: no cover - optional dependency guard
     from lightgbm import LGBMClassifier  # type: ignore[import-not-found]
@@ -120,49 +112,39 @@ class RandomForestSubjectClassifier(_PickleSubjectClassifier):
         raise RuntimeError("Classifier does not support predict_proba().")
 
 
-@register_classifier("logistic_regression")
-class LogisticRegressionSubjectClassifier(_PickleSubjectClassifier):
-    """Logistic regression classifier with configurable regularisation."""
+@register_classifier("decision_tree")
+class DecisionTreeSubjectClassifier(_PickleSubjectClassifier):
+    """Decision tree classifier for subject-level diagnosis."""
 
-    name = "LogisticRegression"
+    name = "DecisionTree"
+    DEFAULT_CONFIG = {
+        "max_depth": 5,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "criterion": "gini",
+    }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         _require_estimator(
-            "LogisticRegressionSubjectClassifier",
-            LogisticRegression,
+            "DecisionTreeSubjectClassifier",
+            DecisionTreeClassifier,
             _SKLEARN_IMPORT_ERROR,
             "scikit-learn",
         )
         cfg = params or {}
-        penalty = str(cfg.get("penalty", "l2")).lower()
-        solver = cfg.get("solver")
-        if solver is None:
-            if penalty == "l1":
-                solver = "liblinear"
-            elif penalty == "elasticnet":
-                solver = "saga"
-            elif penalty == "none":
-                solver = "lbfgs"
-            else:
-                solver = "lbfgs"
         kwargs: Dict[str, Any] = {
-            "penalty": penalty,
-            "C": float(cfg.get("C", 1.0)),
-            "solver": solver,
-            "max_iter": int(cfg.get("max_iter", 1000)),
+            "max_depth": cfg.get("max_depth"),
+            "min_samples_split": int(cfg.get("min_samples_split", 2)),
+            "min_samples_leaf": int(cfg.get("min_samples_leaf", 1)),
             "class_weight": cfg.get("class_weight", "balanced"),
-            "tol": float(cfg.get("tol", 1e-4)),
-            "fit_intercept": bool(cfg.get("fit_intercept", True)),
+            "criterion": cfg.get("criterion", "gini"),
         }
-        multi_class = cfg.get("multi_class")
-        if multi_class is not None:
-            kwargs["multi_class"] = multi_class
-        if penalty == "elasticnet":
-            kwargs["l1_ratio"] = float(cfg.get("l1_ratio", 0.5))
+        if kwargs["max_depth"] is not None:
+            kwargs["max_depth"] = int(kwargs["max_depth"])
         random_state = cfg.get("random_state")
         if random_state is not None:
             kwargs["random_state"] = int(random_state)
-        self._model = LogisticRegression(**kwargs)
+        self._model = DecisionTreeClassifier(**kwargs)
         self.classes_: Optional[np.ndarray] = None
 
     def fit(self, X, y) -> Dict[str, Any]:  # noqa: ANN001
@@ -172,12 +154,7 @@ class LogisticRegressionSubjectClassifier(_PickleSubjectClassifier):
             raise ValueError("No training data provided for classifier.")
         self._model.fit(X, y)
         self.classes_ = getattr(self._model, "classes_", None)
-        intercept = getattr(self._model, "intercept_", np.zeros(1, dtype=np.float32))
-        summary = {
-            "coefficients": self._model.coef_.tolist(),
-            "intercept": np.asarray(intercept, dtype=np.float32).tolist(),
-        }
-        return summary
+        return {"feature_importances": self._model.feature_importances_.tolist()}
 
     def predict(self, X):  # noqa: ANN001
         X = np.asarray(X, dtype=np.float32)
@@ -240,67 +217,6 @@ class SVMSubjectClassifier(_PickleSubjectClassifier):
             raise RuntimeError("Classifier does not support predict_proba(); set probability=True.")
         X = np.asarray(X, dtype=np.float32)
         return self._model.predict_proba(X)
-
-
-@register_classifier("xgboost")
-class XGBoostSubjectClassifier(_PickleSubjectClassifier):
-    """Gradient boosted trees via XGBoost."""
-
-    name = "XGBoostClassifier"
-
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
-        _require_estimator(
-            "XGBoostSubjectClassifier",
-            XGBClassifier,
-            _XGBOOST_IMPORT_ERROR,
-            "xgboost",
-        )
-        cfg = params or {}
-        kwargs: Dict[str, Any] = {
-            "n_estimators": int(cfg.get("n_estimators", 200)),
-            "max_depth": int(cfg.get("max_depth", 6)),
-            "learning_rate": float(cfg.get("learning_rate", 0.1)),
-            "subsample": float(cfg.get("subsample", 1.0)),
-            "colsample_bytree": float(cfg.get("colsample_bytree", 1.0)),
-            "gamma": float(cfg.get("gamma", 0.0)),
-            "reg_lambda": float(cfg.get("reg_lambda", 1.0)),
-            "reg_alpha": float(cfg.get("reg_alpha", 0.0)),
-            "n_jobs": int(cfg.get("n_jobs", -1)),
-            "use_label_encoder": bool(cfg.get("use_label_encoder", False)),
-            "eval_metric": cfg.get("eval_metric", "logloss"),
-        }
-        if "scale_pos_weight" in cfg:
-            kwargs["scale_pos_weight"] = float(cfg["scale_pos_weight"])
-        tree_method = cfg.get("tree_method")
-        if tree_method is not None:
-            kwargs["tree_method"] = tree_method
-        random_state = cfg.get("random_state")
-        if random_state is not None:
-            kwargs["random_state"] = int(random_state)
-        self._model = XGBClassifier(**kwargs)
-        self.classes_: Optional[np.ndarray] = None
-
-    def fit(self, X, y) -> Dict[str, Any]:  # noqa: ANN001
-        X = np.asarray(X, dtype=np.float32)
-        y = np.asarray(y, dtype=np.int64)
-        if X.size == 0:
-            raise ValueError("No training data provided for classifier.")
-        self._model.fit(X, y)
-        self.classes_ = getattr(self._model, "classes_", None)
-        summary = {
-            "feature_importances": getattr(self._model, "feature_importances_", np.array([])).tolist(),
-        }
-        return summary
-
-    def predict(self, X):  # noqa: ANN001
-        X = np.asarray(X, dtype=np.float32)
-        return self._model.predict(X)
-
-    def predict_proba(self, X):  # noqa: ANN001
-        X = np.asarray(X, dtype=np.float32)
-        if hasattr(self._model, "predict_proba"):
-            return self._model.predict_proba(X)
-        raise RuntimeError("Classifier does not support predict_proba().")
 
 
 @register_classifier("lightgbm")

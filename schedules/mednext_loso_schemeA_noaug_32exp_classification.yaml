@@ -1,0 +1,918 @@
+queue:
+  # ─────────────────────────────────────────────────────────────
+  # 00  共用錨點定義  (不執行任何實驗)
+  # ─────────────────────────────────────────────────────────────
+  - label: "00_defs"
+    config:
+      seed: 42
+
+      dataset: &dataset_subject
+        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged"
+        split:
+          method: subject_level
+          ratios: [0.8, 0.2]
+          k_fold: 1
+
+      experiments: []
+
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+
+      output: &output_defaults
+        results_root: results
+
+      # ── ROI偵測器 ──────────────────────────────────────────────
+      detector: &detector_yolo11l
+        weights: models/detection/yolo11l.pt
+        conf: 0.05
+        iou: 0.5
+        imgsz: 640
+        device: cuda
+        classes: null
+        max_det: 100
+        fallback_last_prediction: true
+        train_enabled: true
+        epochs: 30
+        batch: 8
+        lr0: 0.01
+        patience: 50
+        workers: 0
+        include_empty_frames: false
+        force_cpu_if_no_cuda: true
+
+      # ── 前處理 ─────────────────────────────────────────────────
+      clahe_default: &clahe_default
+        clipLimit: 1.5
+        tileGridSize: [8, 8]
+
+      # ── 分割模型 ───────────────────────────────────────────────
+      segmentation_mednext: &seg_mednext
+        model:
+          name: mednext
+          params:
+            in_channels: 3
+            classes: 1
+            model_id: "B"
+            kernel_size: 3
+            deep_supervision: false
+            dim: "2d"
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_nnunet: &seg_nnunet
+        model:
+          name: nnunet
+          params:
+            dimension: 2
+            n_stages: 5
+            base_features: 32
+            deep_supervision: false
+            return_highres_only: true
+            init_weights: true
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_unetpp: &seg_unetpp
+        model:
+          name: unetpp
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 8
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_deeplabv3p: &seg_deeplabv3p
+        model:
+          name: "deeplabv3+"
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 8
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      # ── 分類設定錨點 (2 FE × 4 Classifier = 8 錨點) ────────────
+      clf_motion_only_rf: &clf_motion_only_rf
+        enabled: true
+        feature_extractor:
+          name: motion_only
+          params: {}
+        classifier:
+          name: random_forest
+          params:
+            n_estimators: 100
+            random_state: 42
+        segmentation:
+          enabled: false      # classification no longer requires seg masks
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_only_dt: &clf_motion_only_dt
+        enabled: true
+        feature_extractor:
+          name: motion_only
+          params: {}
+        classifier:
+          name: decision_tree
+          params:
+            max_depth: 5
+            random_state: 42
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_only_svm: &clf_motion_only_svm
+        enabled: true
+        feature_extractor:
+          name: motion_only
+          params: {}
+        classifier:
+          name: svm
+          params:
+            C: 1.0
+            kernel: rbf
+            probability: true
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_only_lgbm: &clf_motion_only_lgbm
+        enabled: true
+        feature_extractor:
+          name: motion_only
+          params: {}
+        classifier:
+          name: lightgbm
+          params:
+            n_estimators: 100
+            random_state: 42
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_texture_rf: &clf_motion_texture_rf
+        enabled: true
+        feature_extractor:
+          name: motion_texture
+          params: {}
+        classifier:
+          name: random_forest
+          params:
+            n_estimators: 100
+            random_state: 42
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_texture_dt: &clf_motion_texture_dt
+        enabled: true
+        feature_extractor:
+          name: motion_texture
+          params: {}
+        classifier:
+          name: decision_tree
+          params:
+            max_depth: 5
+            random_state: 42
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_texture_svm: &clf_motion_texture_svm
+        enabled: true
+        feature_extractor:
+          name: motion_texture
+          params: {}
+        classifier:
+          name: svm
+          params:
+            C: 1.0
+            kernel: rbf
+            probability: true
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      clf_motion_texture_lgbm: &clf_motion_texture_lgbm
+        enabled: true
+        feature_extractor:
+          name: motion_texture
+          params: {}
+        classifier:
+          name: lightgbm
+          params:
+            n_estimators: 100
+            random_state: 42
+        segmentation:
+          enabled: false
+          params: {}
+        label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+  # ═════════════════════════════════════════════════════════════
+  # MedNeXt × 8 分類組合  (01–08)
+  # ═════════════════════════════════════════════════════════════
+
+  - label: "01_mednext_motion_only_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_only_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_rf
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "02_mednext_motion_only_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_only_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_dt
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "03_mednext_motion_only_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_only_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_svm
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "04_mednext_motion_only_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_only_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_lgbm
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "05_mednext_motion_texture_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_texture_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_rf
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "06_mednext_motion_texture_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_texture_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_dt
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "07_mednext_motion_texture_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_texture_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_svm
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "08_mednext_motion_texture_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_motion_texture_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_lgbm
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  # ═════════════════════════════════════════════════════════════
+  # nnUNet × 8 分類組合  (09–16)
+  # ═════════════════════════════════════════════════════════════
+
+  - label: "09_nnunet_motion_only_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_only_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_rf
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "10_nnunet_motion_only_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_only_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_dt
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "11_nnunet_motion_only_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_only_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_svm
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "12_nnunet_motion_only_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_only_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_lgbm
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "13_nnunet_motion_texture_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_texture_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_rf
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "14_nnunet_motion_texture_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_texture_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_dt
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "15_nnunet_motion_texture_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_texture_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_svm
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "16_nnunet_motion_texture_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_motion_texture_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_lgbm
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  # ═════════════════════════════════════════════════════════════
+  # UNet++ × 8 分類組合  (17–24)
+  # ═════════════════════════════════════════════════════════════
+
+  - label: "17_unetpp_motion_only_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_only_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_rf
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "18_unetpp_motion_only_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_only_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_dt
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "19_unetpp_motion_only_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_only_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_svm
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "20_unetpp_motion_only_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_only_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_lgbm
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "21_unetpp_motion_texture_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_texture_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_rf
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "22_unetpp_motion_texture_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_texture_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_dt
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "23_unetpp_motion_texture_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_texture_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_svm
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "24_unetpp_motion_texture_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_motion_texture_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_lgbm
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  # ═════════════════════════════════════════════════════════════
+  # DeepLabV3+ × 8 分類組合  (25–32)
+  # ═════════════════════════════════════════════════════════════
+
+  - label: "25_deeplabv3p_motion_only_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_only_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_rf
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "26_deeplabv3p_motion_only_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_only_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_dt
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "27_deeplabv3p_motion_only_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_only_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_svm
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "28_deeplabv3p_motion_only_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_only_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_only_lgbm
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "29_deeplabv3p_motion_texture_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_texture_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_rf
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "30_deeplabv3p_motion_texture_dt"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_texture_dt"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_dt
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "31_deeplabv3p_motion_texture_svm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_texture_svm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_svm
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "32_deeplabv3p_motion_texture_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_motion_texture_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_motion_texture_lgbm
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults

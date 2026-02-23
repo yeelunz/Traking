@@ -30,6 +30,14 @@ class FramePrediction:
     confidence: Optional[float] = None
     confidence_components: Optional[Dict[str, float]] = None
     segmentation: Optional[SegmentationData] = None
+    is_fallback: bool = False
+    # Metadata for downstream visualization/debugging. Typical values:
+    # - "detector": bbox provided by detector at this frame
+    # - "prev_bbox": bbox reused from previous frame (detector-based)
+    # - "prev_segmentation": bbox reused from previous frame, bootstrapped from segmentation mask
+    # - "full_frame": forced full-frame ROI due to missing bbox
+    # - "segmentation_bootstrap": bbox derived from this frame's segmentation mask (seed for next frames)
+    bbox_source: str = "detector"
 
     @property
     def center(self) -> Tuple[float, float]:

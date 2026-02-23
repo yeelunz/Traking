@@ -51,6 +51,27 @@ def segmentation_summary_metrics(exp_path: Path) -> Optional[Dict]:
     return first_value(first_model) if first_model else None
 
 
+def classification_summary_metrics(exp_path: Path) -> Optional[Dict]:
+    """Load classification summary from ``<exp>/classification/summary.json``."""
+    summary_path = exp_path / "classification" / "summary.json"
+    if not summary_path.exists():
+        return None
+    return load_json(summary_path)
+
+
+def gather_classification_metrics(exp_path: Path) -> Dict:
+    """Collect classification summary, predictions and artefact metadata."""
+    cls_dir = exp_path / "classification"
+    summary = load_json(cls_dir / "summary.json") if (cls_dir / "summary.json").exists() else None
+    predictions = load_json(cls_dir / "predictions.json") if (cls_dir / "predictions.json").exists() else None
+    artefacts = load_json(cls_dir / "artefacts.json") if (cls_dir / "artefacts.json").exists() else None
+    return {
+        "summary": summary,
+        "predictions": predictions or [],
+        "artefacts": artefacts,
+    }
+
+
 def _format_loso_fold(subject: Optional[object], fallback: Optional[str] = None) -> str:
     """Normalize fold label for display/grouping.
 
@@ -206,8 +227,10 @@ class ExperimentIndex:
             aggregate_rel = _aggregate_id(group_path, str(exp_name)) if is_loso else None
             det_summary = exp_path / "test" / "detection" / "metrics" / "summary.json"
             seg_summary = exp_path / "test" / "segmentation" / "metrics_summary.json"
+            cls_summary_path = exp_path / "classification" / "summary.json"
             det_preview = detection_summary_metrics(exp_path)
             seg_preview = segmentation_summary_metrics(exp_path)
+            cls_preview = classification_summary_metrics(exp_path)
             entry = {
                 "id": rel,
                 "path": exp_path,
@@ -222,11 +245,13 @@ class ExperimentIndex:
                 "models": models,
                 "has_detection": det_summary.exists(),
                 "has_segmentation": seg_summary.exists(),
+                "has_classification": cls_summary_path.exists(),
                 "has_detection_visuals": (exp_path / "test" / "detection" / "visualizations").exists(),
                 "has_segmentation_visuals": bool(list((exp_path / "test" / "segmentation").rglob("visualizations_roi"))) if (exp_path / "test" / "segmentation").exists() else False,
                 "preview": {
                     "detection": det_preview,
                     "segmentation": seg_preview,
+                    "classification": cls_preview,
                 },
             }
             entries[rel] = entry
@@ -280,6 +305,7 @@ class ExperimentIndex:
                     "created_at": raw_entry.get("created_at"),
                     "has_detection": raw_entry.get("has_detection"),
                     "has_segmentation": raw_entry.get("has_segmentation"),
+                    "has_classification": raw_entry.get("has_classification"),
                     "preview": raw_entry.get("preview", {}),
                 })
 
@@ -294,9 +320,11 @@ class ExperimentIndex:
 
             det_previews = [f.get("preview", {}).get("detection") for f in fold_public]
             seg_previews = [f.get("preview", {}).get("segmentation") for f in fold_public]
+            cls_previews = [f.get("preview", {}).get("classification") for f in fold_public]
             aggregate_preview = {
                 "detection": aggregate_preview_dicts(det_previews),
                 "segmentation": aggregate_preview_dicts(seg_previews),
+                "classification": aggregate_preview_dicts(cls_previews),
             }
             created_at = fold_public[0].get("created_at")
             group_path = ""
@@ -315,6 +343,7 @@ class ExperimentIndex:
                 "models": newest_raw.get("models", []),
                 "has_detection": any(bool(f.get("has_detection")) for f in fold_public),
                 "has_segmentation": any(bool(f.get("has_segmentation")) for f in fold_public),
+                "has_classification": any(bool(f.get("has_classification")) for f in fold_public),
                 "has_detection_visuals": any(self.entries.get(f.get("id"), {}).get("has_detection_visuals") for f in fold_public),
                 "has_segmentation_visuals": any(self.entries.get(f.get("id"), {}).get("has_segmentation_visuals") for f in fold_public),
                 "preview": aggregate_preview,
@@ -335,6 +364,7 @@ class ExperimentIndex:
             "models": entry["models"],
             "has_detection": entry["has_detection"],
             "has_segmentation": entry["has_segmentation"],
+            "has_classification": entry.get("has_classification", False),
             "has_detection_visuals": entry["has_detection_visuals"],
             "has_segmentation_visuals": entry["has_segmentation_visuals"],
             "preview": entry.get("preview", {}),
@@ -488,6 +518,7 @@ def create_app(results_root: Path) -> FastAPI:
             fold_payloads: List[Dict] = []
             det_fold_previews: List[Optional[Dict]] = []
             seg_fold_previews: List[Optional[Dict]] = []
+            cls_fold_previews: List[Optional[Dict]] = []
             newest_created_at = None
             newest_entry: Optional[Dict] = None
 
@@ -505,6 +536,7 @@ def create_app(results_root: Path) -> FastAPI:
 
                 det_fold_previews.append((raw_entry.get("preview") or {}).get("detection"))
                 seg_fold_previews.append((raw_entry.get("preview") or {}).get("segmentation"))
+                cls_fold_previews.append((raw_entry.get("preview") or {}).get("classification"))
                 fold_payloads.append({
                     "fold": fold.get("fold"),
                     "exp_id": raw_id,
@@ -512,11 +544,13 @@ def create_app(results_root: Path) -> FastAPI:
                     "preview": raw_entry.get("preview") or {},
                     "has_detection": raw_entry.get("has_detection"),
                     "has_segmentation": raw_entry.get("has_segmentation"),
+                    "has_classification": raw_entry.get("has_classification"),
                 })
 
             fold_payloads.sort(key=lambda item: item.get("fold") or "")
             aggregate_detection = aggregate_preview_dicts(det_fold_previews)
             aggregate_segmentation = aggregate_preview_dicts(seg_fold_previews)
+            aggregate_classification = aggregate_preview_dicts(cls_fold_previews)
 
             experiment_name = (newest_entry or {}).get("name") if newest_entry else exp_id
             created_at = newest_created_at
@@ -533,6 +567,7 @@ def create_app(results_root: Path) -> FastAPI:
                 "dataset": None,
                 "detection": {"summary": aggregate_detection, "per_video": []},
                 "segmentation": {"summary": aggregate_segmentation, "per_video": []},
+                "classification": {"summary": aggregate_classification, "predictions": [], "artefacts": None},
                 "folds": fold_payloads,
             }
 
@@ -545,6 +580,7 @@ def create_app(results_root: Path) -> FastAPI:
         experiment_info = meta.get("experiment") or {}
         detection = gather_detection_metrics(exp_path) if (exp_path / "test" / "detection").exists() else None
         segmentation = gather_segmentation_metrics(exp_path) if (exp_path / "test" / "segmentation").exists() else None
+        classification = gather_classification_metrics(exp_path) if (exp_path / "classification").exists() else None
         return {
             "id": exp_id,
             "mode": "single",
@@ -557,6 +593,7 @@ def create_app(results_root: Path) -> FastAPI:
             "dataset": dataset_info,
             "detection": detection,
             "segmentation": segmentation,
+            "classification": classification,
         }
 
     @app.get("/api/experiments/{exp_id:path}/metrics")

@@ -422,7 +422,14 @@ class StrongSortTracker(TrackingModel):
             elif self.fallback_last_prediction and last_bbox_xyxy is not None:
                 x1, y1, x2, y2 = last_bbox_xyxy
                 bbox = (float(x1), float(y1), float(max(1.0, x2 - x1)), float(max(1.0, y2 - y1)))
-                preds.append(FramePrediction(frame_idx, bbox, None))
+                preds.append(
+                    FramePrediction(
+                        frame_index=frame_idx,
+                        bbox=bbox,
+                        score=None,
+                        is_fallback=True,
+                    )
+                )
 
             frame_idx += 1
 

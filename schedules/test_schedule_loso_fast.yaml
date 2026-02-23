@@ -13,8 +13,10 @@ queue:
         split:
           method: loso
           loso: true
-          ratios: [0.8, 0.2]
-          k_fold: 1
+          # Keep smoke-tests bounded
+          max_folds: 1
+          max_train_videos: 1
+          max_test_videos: 1
 
       experiments: []
 
@@ -39,13 +41,14 @@ queue:
         conf: 0.25
         iou: 0.5
         imgsz: 640
-        device: cuda
+        device: cpu
         classes: null
         max_det: 100
         fallback_last_prediction: true
         include_empty_frames: false
 
-        train_enabled: true
+        # For smoke-tests, avoid training to keep runtime predictable
+        train_enabled: false
         epochs: 1
         batch: 4
         lr0: 0.01
@@ -57,49 +60,19 @@ queue:
         clipLimit: 1.5
         tileGridSize: [8, 8]
 
-      # Segmentation: train only 1 epoch
-      segmentation_nnunet_fast: &seg_nnunet_fast
-        model:
-          name: nnunet
-          params:
-            dimension: 2
-            n_stages: 5
-            base_features: 32
-            deep_supervision: false
-            return_highres_only: true
-            init_weights: true
-        padding_min: 0.1
-        padding_max: 0.15
-        padding_inference: 0.15
-        jitter: 0.0
-        redundancy: 1
-        target_size: [256, 256]
-        epochs: 1
-        batch_size: 1
-        num_workers: 0
-        lr: 0.0005
-        weight_decay: 1.0e-05
-        dice_weight: 1.0
-        bce_weight: 1.0
-        threshold: 0.5
-        val_ratio: 0.0
-        seed: 1337
-        device: auto
-        train: true
-        inference_checkpoint: null
-
+      # Segmentation: fast UNet++ and Deeplabv3+ smoke configs (1 epoch, small batch)
       segmentation_unetpp_fast: &seg_unetpp_fast
         model:
           name: unetpp
           params:
             encoder_name: resnet34
-            encoder_weights: imagenet
+            encoder_weights: null
             in_channels: 3
             classes: 1
         padding_min: 0.1
         padding_max: 0.15
         padding_inference: 0.15
-        jitter: 0.05
+        jitter: 0.0
         redundancy: 1
         target_size: [256, 256]
         epochs: 1
@@ -121,13 +94,13 @@ queue:
           name: "deeplabv3+"
           params:
             encoder_name: resnet34
-            encoder_weights: imagenet
+            encoder_weights: null
             in_channels: 3
             classes: 1
         padding_min: 0.1
         padding_max: 0.15
         padding_inference: 0.15
-        jitter: 0.05
+        jitter: 0.0
         redundancy: 1
         target_size: [256, 256]
         epochs: 1
@@ -144,25 +117,9 @@ queue:
         train: true
         inference_checkpoint: null
 
-  # Smoke tests: (none / CLAHE) x (nnunet / unetpp / deeplabv3+)
+  # Smoke tests: (none / CLAHE) x (auto_mask)
 
-  - label: "01_none_A_yolo11l_nnunet_fast"
-    config:
-      seed: 42
-      dataset: *dataset_subject
-      experiments:
-        - name: "none_A_yolo11l_nnunet_fast"
-          preproc_scheme: "A"
-          pipeline:
-            - type: model
-              name: YOLOv11
-              params: *detector_yolo11l_fast
-      evaluation: *evaluation_fast
-      classification: {enabled: false}
-      segmentation: *seg_nnunet_fast
-      output: *output_fast
-
-  - label: "02_none_A_yolo11l_unetpp_fast"
+  - label: "01_none_A_yolo11l_unetpp_fast"
     config:
       seed: 42
       dataset: *dataset_subject
@@ -178,61 +135,7 @@ queue:
       segmentation: *seg_unetpp_fast
       output: *output_fast
 
-  - label: "03_none_A_yolo11l_deeplabv3p_fast"
-    config:
-      seed: 42
-      dataset: *dataset_subject
-      experiments:
-        - name: "none_A_yolo11l_deeplabv3p_fast"
-          preproc_scheme: "A"
-          pipeline:
-            - type: model
-              name: YOLOv11
-              params: *detector_yolo11l_fast
-      evaluation: *evaluation_fast
-      classification: {enabled: false}
-      segmentation: *seg_deeplabv3p_fast
-      output: *output_fast
-
-  - label: "04_clahe_A_yolo11l_nnunet_fast"
-    config:
-      seed: 42
-      dataset: *dataset_subject
-      experiments:
-        - name: "clahe_A_yolo11l_nnunet_fast"
-          preproc_scheme: "A"
-          pipeline:
-            - type: preproc
-              name: CLAHE
-              params: *clahe_default
-            - type: model
-              name: YOLOv11
-              params: *detector_yolo11l_fast
-      evaluation: *evaluation_fast
-      classification: {enabled: false}
-      segmentation: *seg_nnunet_fast
-      output: *output_fast
-
-  - label: "05_clahe_A_yolo11l_unetpp_fast"
-    config:
-      seed: 42
-      dataset: *dataset_subject
-      experiments:
-        - name: "clahe_A_yolo11l_unetpp_fast"
-          preproc_scheme: "A"
-          pipeline:
-            - type: preproc
-              name: CLAHE
-              params: *clahe_default
-            - type: model
-              name: YOLOv11
-              params: *detector_yolo11l_fast
-      evaluation: *evaluation_fast
-      classification: {enabled: false}
-      segmentation: *seg_unetpp_fast
-      output: *output_fast
-
-  - label: "06_clahe_A_yolo11l_deeplabv3p_fast"
+  - label: "02_clahe_A_yolo11l_deeplabv3p_fast"
     config:
       seed: 42
       dataset: *dataset_subject

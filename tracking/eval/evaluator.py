@@ -116,27 +116,34 @@ class BasicEvaluator:
                     continue
             # Build a quick lookup of predictions by frame (first prediction wins)
             pred_map: Dict[int, Tuple[float, float, float, float]] = {}
+            pred_obj_map: Dict[int, FramePrediction] = {}
             for p in preds:
-                pred_map.setdefault(int(p.frame_index), p.bbox)
-            for p in preds:
-                gt_boxes = frames_gt.get(p.frame_index, [])
-                if not gt_boxes:
-                    # no GT for this frame -> skip metrics row but still record NA (optional)
-                    per_frame_rows.append([p.frame_index, None, None])
-                    # still record center displacement magnitude
-                    cx, cy = p.center
-                    centers_mag.append((p.frame_index, float((cx ** 2 + cy ** 2) ** 0.5)))
+                key = int(p.frame_index)
+                pred_map.setdefault(key, p.bbox)
+                pred_obj_map.setdefault(key, p)
+            # Evaluate GT frames; missing predictions are counted as complete misses (IoU=0).
+            gt_frames_with_boxes = sorted([int(fi) for fi, boxes in frames_gt.items() if boxes])
+            for fi in gt_frames_with_boxes:
+                p = pred_obj_map.get(fi)
+                if p is None:
+                    # Fallback should already provide a bbox; if truly missing, skip CE/IoU rows.
+                    per_frame_rows.append([fi, None, None])
                     continue
-                # use first GT box for now
-                gtb = gt_boxes[0]
+                gtb = frames_gt.get(fi, [None])[0]
                 i = bbox_iou(p.bbox, gtb)
                 c = center_error(p.bbox, gtb)
                 ious.append(i)
                 ces.append(c)
-                per_frame_rows.append([p.frame_index, i, c])
-                # center displacement relative to origin (0,0) for prediction
+                per_frame_rows.append([fi, i, c])
                 cx, cy = p.center
-                centers_mag.append((p.frame_index, float((cx ** 2 + cy ** 2) ** 0.5)))
+                centers_mag.append((fi, float((cx ** 2 + cy ** 2) ** 0.5)))
+            # Predictions on frames without GT: keep for visualization/debug only.
+            for fi, p in pred_obj_map.items():
+                if fi in frames_gt:
+                    continue
+                per_frame_rows.append([fi, None, None])
+                cx, cy = p.center
+                centers_mag.append((fi, float((cx ** 2 + cy ** 2) ** 0.5)))
             # --- Success curve & AUC ---
             success_curve: List[Tuple[float, float]] = []  # (IoU threshold, success rate)
             success_auc = 0.0

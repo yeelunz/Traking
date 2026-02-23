@@ -53,7 +53,13 @@ def _load_annotations_for_videos(video_paths: Sequence[str]) -> Dict[str, Dict[s
 
 
 class PipelineRunner:
-    def __init__(self, config: Dict[str, Any], logger: Optional[Callable[[str], None]] = None, progress_cb: Optional[Callable[[str,int,int,Dict[str,Any]], None]] = None):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: Optional[Callable[[str], None]] = None,
+        progress_cb: Optional[Callable[[str,int,int,Dict[str,Any]], None]] = None,
+        detector_reuse_cache: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+    ):
         self.cfg = config
         self.seed = int(config.get("seed", 0))
         dataset_cfg = config.get("dataset", {})
@@ -64,6 +70,7 @@ class PipelineRunner:
             proj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         except Exception:
             proj_root = os.getcwd()
+        self._proj_root = proj_root
         res_root_cfg = out_cfg.get("results_root")
         if res_root_cfg:
             # If user provided a relative path, anchor it to project root to avoid cwd-dependent outputs.
@@ -71,9 +78,15 @@ class PipelineRunner:
         else:
             self.results_root = os.path.join(proj_root, "results")
         os.makedirs(self.results_root, exist_ok=True)
+        # Persistent detector cache: lives at {proj_root}/results/detector_cache.json
+        # This survives across multiple queue runs so already-trained detectors are reused.
+        _global_cache_dir = os.path.join(proj_root, "results")
+        os.makedirs(_global_cache_dir, exist_ok=True)
+        self._persistent_det_cache_file: str = os.path.join(_global_cache_dir, "detector_cache.json")
         self._logger = logger
         self._log_file: Optional[str] = None
         self._progress_cb = progress_cb
+        self._detector_reuse_cache = detector_reuse_cache if detector_reuse_cache is not None else {}
 
     # lightweight wrapper to emit progress events
     def _progress(self, stage: str, current: int, total: int, extra: Optional[Dict[str,Any]] = None):
@@ -88,6 +101,71 @@ class PipelineRunner:
         d = os.path.join(self.results_root, f"{ts}_{name}")
         os.makedirs(d, exist_ok=True)
         return d
+
+    # ------------------------------------------------------------------
+    # Persistent detector cache helpers
+    # ------------------------------------------------------------------
+    def _load_persistent_detector_cache(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Load the project-level persistent detector cache from disk.
+
+        Only entries whose checkpoint file still exists on disk are returned.
+        Returns an empty dict on any error.
+        """
+        try:
+            if not os.path.exists(self._persistent_det_cache_file):
+                return {}
+            with open(self._persistent_det_cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            detectors = data.get("detectors", {})
+            if not isinstance(detectors, dict):
+                return {}
+            valid: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for sig_key, model_map in detectors.items():
+                if not isinstance(model_map, dict):
+                    continue
+                valid_models: Dict[str, Dict[str, Any]] = {}
+                for model_name, entry in model_map.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    ckpt = entry.get("checkpoint")
+                    if ckpt and isinstance(ckpt, str) and os.path.exists(ckpt):
+                        valid_models[model_name] = entry
+                if valid_models:
+                    valid[sig_key] = valid_models
+            return valid
+        except Exception:
+            return {}
+
+    def _save_entry_to_persistent_cache(
+        self,
+        sig_key: str,
+        model_name: str,
+        entry: Dict[str, Any],
+    ) -> None:
+        """Append / update one detector entry in the project-level persistent cache.
+
+        Thread-safety note: this is intentionally best-effort (single-process use).
+        Errors are silently swallowed so the training pipeline is never interrupted.
+        """
+        try:
+            existing_data: Dict[str, Any] = {}
+            if os.path.exists(self._persistent_det_cache_file):
+                try:
+                    with open(self._persistent_det_cache_file, "r", encoding="utf-8") as f:
+                        existing_data = json.load(f)
+                except Exception:
+                    existing_data = {}
+            detectors = existing_data.get("detectors", {})
+            if not isinstance(detectors, dict):
+                detectors = {}
+            detectors.setdefault(sig_key, {})[model_name] = entry
+            existing_data["detectors"] = detectors
+            existing_data["version"] = 1
+            existing_data["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            with open(self._persistent_det_cache_file, "w", encoding="utf-8") as f:
+                json.dump(existing_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # Best-effort; do not break the main pipeline
 
     def _log(self, msg: str, to_console: bool = True):
         # keep file logging always; console logging can be suppressed when tqdm bars are active
@@ -251,7 +329,25 @@ class PipelineRunner:
 
         # orchestrate experiments (per fold if LOSO)
         folds_total = len(loso_folds)
-        detector_reuse_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        detector_reuse_cache: Dict[str, Dict[str, Dict[str, Any]]] = self._detector_reuse_cache
+
+        # --- Persistent detector cache: load from disk and merge into in-memory cache ---
+        # This allows cross-run reuse: detectors trained in *previous* runs (including
+        # separate program sessions and individual "Run" button clicks) are reused
+        # automatically without retraining.
+        _disk_cache = self._load_persistent_detector_cache()
+        if _disk_cache:
+            self._log(
+                f"[DetectorCache] Loaded {len(_disk_cache)} signature(s) from persistent cache: {self._persistent_det_cache_file}",
+                to_console=True,
+            )
+            for _sig_key, _model_map in _disk_cache.items():
+                if _sig_key not in detector_reuse_cache:
+                    detector_reuse_cache[_sig_key] = {}
+                for _model_name, _entry in _model_map.items():
+                    # In-memory cache takes priority (e.g. just-trained within same run)
+                    if _model_name not in detector_reuse_cache[_sig_key]:
+                        detector_reuse_cache[_sig_key][_model_name] = _entry
 
         def _detector_signature(
             exp_cfg: Dict[str, Any],
@@ -1144,11 +1240,22 @@ class PipelineRunner:
                                 )
                             best_ckpt = ret.get("best_ckpt") or ret.get("best_checkpoint") or ret.get("checkpoint")
                             if best_ckpt and os.path.exists(best_ckpt):
-                                detector_reuse_cache.setdefault(det_sig["key"], {})[model_name] = {
+                                cache_entry: Dict[str, Any] = {
                                     "checkpoint": best_ckpt,
                                     "signature": det_sig.get("payload"),
+                                    "trained_at": datetime.utcnow().isoformat() + "Z",
                                 }
+                                detector_reuse_cache.setdefault(det_sig["key"], {})[model_name] = cache_entry
                                 report["checkpoint"] = best_ckpt
+                                # Persist to disk so subsequent runs (and separate program
+                                # sessions) can also skip re-training this detector.
+                                self._save_entry_to_persistent_cache(
+                                    det_sig["key"], model_name, cache_entry
+                                )
+                                self._log(
+                                    f"[DetectorCache] Saved to persistent cache | sig={det_sig['key'][:16]}… | ckpt={best_ckpt}",
+                                    to_console=False,
+                                )
                     except Exception as e:
                         report["status"] = "train_failed"
                         report["error"] = {"type": type(e).__name__, "message": str(e)}

@@ -44,13 +44,14 @@ class LogDynamicRange(PreprocessingModule):
     def _proc_channel(self, ch: np.ndarray) -> np.ndarray:
         f = ch.astype(np.float32)
         if self.clip_p > 0 and self.clip_p < 100:
-            hi = np.percentile(f, self.clip_p)
+            hi = float(np.percentile(f, self.clip_p))
             if hi > 0:
                 f = np.clip(f, 0, hi)
-        # normalize to 0..1
-        mx = f.max() or 1.0
-        if mx > 0:
-            f = f / mx
+        # normalize to [0, 1]; use eps as zero-guard to avoid division-by-zero
+        mx = float(f.max())
+        if mx <= 0.0:
+            mx = self.eps
+        f = f / mx
         if self.method == 'log':
             f = np.log1p(f * (np.e - 1.0))  # log compression in [0,1]
         else:  # gamma

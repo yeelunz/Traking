@@ -354,10 +354,14 @@ class SegmentationWorkflow:
         if frame.ndim == 2:
             out = frame
             for p in preprocs:
+                if getattr(p, "train_only", False):
+                    continue
                 out = p.apply_to_frame(out)
             return out
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         for p in preprocs:
+            if getattr(p, "train_only", False):
+                continue
             rgb = p.apply_to_frame(rgb)
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
@@ -585,6 +589,11 @@ class SegmentationWorkflow:
             for batch in loader:
                 images = batch["image"].to(self.device)
                 masks = batch["mask"].to(self.device)
+                if images.shape[0] < 2 or images.shape[2] < 2 or images.shape[3] < 2:
+                    if not getattr(self, "_warned_tiny_batch", False):
+                        self.logger("[Segmentation] Skipping tiny batch (batch<2 or spatial<2) to avoid BatchNorm error.")
+                        self._warned_tiny_batch = True
+                    continue
                 optimiser.zero_grad(set_to_none=True)
                 logits = self.model(images)
                 loss_bce = F.binary_cross_entropy_with_logits(logits, masks)
@@ -767,12 +776,16 @@ class SegmentationWorkflow:
                 # or from bootstrap using the segmentation mask). We intentionally do NOT store
                 # padded/expanded ROI bboxes here to avoid expansion accumulating over time.
                 last_bbox_raw: Optional[tuple] = None
+                last_bbox_source: Optional[str] = None
                 for frame_idx in gt_frame_indices:
                     pred = pred_by_frame.get(int(frame_idx))
                     use_bbox_raw: Optional[tuple] = None
                     used_prev_bbox = False
                     forced_full_frame = False
+                    bbox_source = "detector"
+                    pad_fraction = float(self.cfg.padding_inference)
                     pred_bbox_raw: Optional[tuple] = None
+                    min_raw_wh = 2.0
                     if pred is not None:
                         try:
                             pred_bbox_raw = tuple(map(float, pred.bbox))
@@ -786,33 +799,70 @@ class SegmentationWorkflow:
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
                     frame_h, frame_w = frame.shape[:2]
 
-                    if pred_bbox_raw is not None:
-                        # Best case: detector bbox for this frame.
-                        use_bbox_raw = pred_bbox_raw
-                        last_bbox_raw = pred_bbox_raw
-                    elif last_bbox_raw is not None:
-                        # Strategy 1: detector bbox missing -> reuse previous bbox.
-                        # When reusing, first expand bbox by 15% per side (same logic as ROI padding)
-                        # to be more tolerant of motion and detector dropouts.
-                        use_bbox_raw = expand_bbox(last_bbox_raw, self.cfg.padding_inference, (frame_h, frame_w)).as_tuple()
+                    pred_bbox_valid = None
+                    if pred_bbox_raw is not None and pred_bbox_raw[2] >= min_raw_wh and pred_bbox_raw[3] >= min_raw_wh:
+                        pred_bbox_valid = pred_bbox_raw
+
+                    if pred_bbox_valid is not None:
+                        # Best case: detector bbox for this frame (non-tiny).
+                        use_bbox_raw = pred_bbox_valid
+                        last_bbox_raw = pred_bbox_valid
+                        last_bbox_source = "detector"
+                        bbox_source = "detector"
+                    elif last_bbox_raw is not None and last_bbox_raw[2] >= min_raw_wh and last_bbox_raw[3] >= min_raw_wh:
+                        # Strategy 1: detector bbox missing or tiny -> reuse previous bbox.
+                        # When reusing, expand by at least 15% per side to tolerate motion/dropouts,
+                        # but keep last_bbox_raw unexpanded to avoid growth across frames.
+                        pad_fraction = max(pad_fraction, 0.15)
+                        use_bbox_raw = last_bbox_raw
                         used_prev_bbox = True
-                        # Do NOT update last_bbox_raw here; keep it stable so expansions don't accumulate.
+                        bbox_source = "prev_segmentation" if last_bbox_source == "segmentation_bootstrap" else "prev_bbox"
                     else:
-                        # Strategy 0: no bbox yet -> full-frame segmentation.
+                        # Strategy 0: no bbox yet (or only tiny bbox) -> full-frame segmentation.
                         use_bbox_raw = (0.0, 0.0, float(frame_w), float(frame_h))
                         forced_full_frame = True
+                        bbox_source = "full_frame"
 
-                    work_pred = pred if pred is not None else FramePrediction(frame_index=int(frame_idx), bbox=use_bbox_raw, score=None)
+                    if pred is not None:
+                        work_pred = FramePrediction(
+                            frame_index=int(frame_idx),
+                            bbox=use_bbox_raw,
+                            score=pred.score,
+                            confidence=getattr(pred, "confidence", None),
+                            confidence_components=getattr(pred, "confidence_components", None),
+                            segmentation=getattr(pred, "segmentation", None),
+                            is_fallback=bool(getattr(pred, "is_fallback", False) or used_prev_bbox or forced_full_frame),
+                            bbox_source=bbox_source,
+                        )
+                    else:
+                        work_pred = FramePrediction(
+                            frame_index=int(frame_idx),
+                            bbox=use_bbox_raw,
+                            score=None,
+                            is_fallback=used_prev_bbox or forced_full_frame,
+                            bbox_source=bbox_source,
+                        )
                     work_predictions.append(work_pred)
-                    bbox = expand_bbox(use_bbox_raw, self.cfg.padding_inference, (frame_h, frame_w))
+                    bbox = expand_bbox(use_bbox_raw, pad_fraction, (frame_h, frame_w))
+                    if bbox.w < 2.0 or bbox.h < 2.0:
+                        # Expanded bbox still unusably small -> treat as detection failure and use full frame.
+                        bbox = BoundingBox(0.0, 0.0, float(frame_w), float(frame_h))
+                        forced_full_frame = True
                     roi = crop_with_bbox(frame, bbox)
                     if roi.size == 0:
-                        continue
+                        # If ROI collapses to empty, fall back to full-frame zeros to ensure metrics are recorded.
+                        roi = np.zeros((1, 1, 3), dtype=frame.dtype)
+                        full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
+                        computed_mask = False
+                    else:
+                        full_mask = None  # will be set below
+                        computed_mask = True
                     # ROI-scope preprocs are applied after cropping.
                     if self.roi_preprocs:
                         roi = self._apply_preprocs_frame(roi, self.roi_preprocs)
                     if self.using_medsam and self.model is not None and hasattr(self.model, "set_prompts"):
-                        prompt_box = self._project_bbox_to_roi(use_bbox, bbox, roi.shape[:2])
+                        prompt_box = self._project_bbox_to_roi(use_bbox_raw, bbox, roi.shape[:2])
                         if prompt_box is not None:
                             box_flat = prompt_box.reshape(-1, 4)[0]
                             cx = float((box_flat[0] + box_flat[2]) * 0.5)
@@ -868,6 +918,11 @@ class SegmentationWorkflow:
                         if roi.ndim == 2:
                             roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
                         orig_h, orig_w = roi.shape[:2]
+                        if orig_h < 2 or orig_w < 2:
+                            # Too small for BatchNorm; skip model and emit empty mask.
+                            full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                            mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
+                            computed_mask = False
                         if self.input_size:
                             roi_resized = cv2.resize(
                                 roi,
@@ -897,6 +952,12 @@ class SegmentationWorkflow:
                         mask_roi = fill_holes(mask_roi)
                         full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
 
+                    # If earlier we forced an empty ROI, ensure full_mask is defined
+                    if full_mask is None:
+                        full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
+                        computed_mask = False
+
                     stats = compute_mask_stats(full_mask)
 
                     # Strategy 2 (bootstrap): if we were forced to do full-frame segmentation and
@@ -909,43 +970,77 @@ class SegmentationWorkflow:
                             bx = by = bw = bh = 0.0
                         if bw > 0.0 and bh > 0.0:
                             last_bbox_raw = (bx, by, bw, bh)
+                            last_bbox_source = "segmentation_bootstrap"
                             # Also reflect the bootstrapped bbox in the per-frame prediction object.
                             try:
                                 work_pred.bbox = last_bbox_raw  # type: ignore[assignment]
+                                # This bbox itself is derived from the segmentation mask, but note that
+                                # the ROI used for THIS frame may still have been full-frame.
+                                if getattr(work_pred, "bbox_source", "") == "full_frame":
+                                    work_pred.bbox_source = "segmentation_bootstrap"  # type: ignore[assignment]
                             except Exception:
                                 pass
                     dice = None
                     iou = None
                     centroid_err = None
                     gt_mask = None
-                    if frame_idx in gt_by_frame:
+                    has_gt = frame_idx in gt_by_frame
+                    if has_gt:
                         gt_entry = gt_by_frame[frame_idx]
                         gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
                         if gt_mask is not None:
                             dice = dice_coefficient(full_mask, gt_mask)
                             iou = intersection_over_union(full_mask, gt_mask)
-                            accum["dice"].append(dice)
-                            accum["iou"].append(iou)
                             centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
+                            accum["dice"].append(float(dice))
+                            accum["iou"].append(float(iou))
                             if centroid_err is not None:
-                                accum["centroid"].append(centroid_err)
+                                accum["centroid"].append(float(centroid_err))
+                        else:
+                            # GT exists but cannot load mask -> treat as miss.
+                            dice = 0.0
+                            iou = 0.0
+                            centroid_err = None
+                            accum["dice"].append(0.0)
+                            accum["iou"].append(0.0)
+
+                    # If GT exists but mask computation failed (empty ROI, etc.), count as miss (0).
+                    if has_gt and (gt_mask is None or not computed_mask):
+                        if dice is None:
+                            dice = 0.0
+                            accum["dice"].append(0.0)
+                        if iou is None:
+                            iou = 0.0
+                            accum["iou"].append(0.0)
+                        # centroid_err stays None in this fallback
+
                     per_frame_metrics[frame_idx] = {
-                        "dice": float(dice) if frame_idx in gt_by_frame and gt_mask is not None else None,
-                        "iou": float(iou) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                        "dice": float(dice) if has_gt else None,
+                        "iou": float(iou) if has_gt else None,
                         "centroid": float(centroid_err) if centroid_err is not None else None,
                     }
                     mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
                     cv2.imwrite(mask_filename, full_mask)
                     mask_files[frame_idx] = mask_filename
-                    work_pred.segmentation = SegmentationData(
+                    _seg_data = SegmentationData(
                         mask_path=mask_filename,
                         stats=stats,
                         roi_bbox=bbox.as_tuple(),
                         centroid_error_px=centroid_err,
                     )
+                    work_pred.segmentation = _seg_data
+                    # Also write back to the ORIGINAL FramePrediction so that
+                    # downstream stages (classification) can read pred.segmentation.
+                    # In the GT-evaluation path, work_pred is a NEW object; without
+                    # this writeback the original pred in test_predictions stays None.
+                    orig_pred = pred_by_frame.get(frame_idx)
+                    if orig_pred is not None:
+                        orig_pred.segmentation = _seg_data
             else:
                 # Inference-only mode: only process frames where we have bbox predictions.
                 work_predictions = list(predictions)
+                last_bbox_raw: Optional[tuple] = None
+                last_bbox_source: Optional[str] = None
                 for pred in predictions:
                     frame_idx = int(pred.frame_index)
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -953,15 +1048,55 @@ class SegmentationWorkflow:
                     if not ok or frame is None:
                         continue
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
-                    bbox = expand_bbox(pred.bbox, self.cfg.padding_inference, frame.shape[:2])
+
+                    # Detection fallback: prefer current bbox; otherwise reuse last good bbox; otherwise full-frame.
+                    pad_fraction = float(self.cfg.padding_inference)
+                    forced_full_frame = False
+                    min_raw_wh = 2.0
+                    try:
+                        pred_bbox_raw = tuple(map(float, pred.bbox))
+                    except Exception:
+                        pred_bbox_raw = None
+                    use_bbox_raw = None
+                    bbox_source = "detector"
+                    if pred_bbox_raw is not None and pred_bbox_raw[2] >= min_raw_wh and pred_bbox_raw[3] >= min_raw_wh:
+                        use_bbox_raw = pred_bbox_raw
+                        last_bbox_source = "detector"
+                        bbox_source = "detector"
+                    elif last_bbox_raw is not None and last_bbox_raw[2] >= min_raw_wh and last_bbox_raw[3] >= min_raw_wh:
+                        pad_fraction = max(pad_fraction, 0.15)
+                        use_bbox_raw = last_bbox_raw
+                        bbox_source = "prev_segmentation" if last_bbox_source == "segmentation_bootstrap" else "prev_bbox"
+                    else:
+                        use_bbox_raw = (0.0, 0.0, float(frame.shape[1]), float(frame.shape[0]))
+                        forced_full_frame = True
+                        bbox_source = "full_frame"
+
+                    try:
+                        pred.bbox_source = bbox_source  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+                    bbox = expand_bbox(use_bbox_raw, pad_fraction, frame.shape[:2])
+                    if bbox.w < 2.0 or bbox.h < 2.0:
+                        bbox = BoundingBox(0.0, 0.0, float(frame.shape[1]), float(frame.shape[0]))
+                        forced_full_frame = True
+
                     roi = crop_with_bbox(frame, bbox)
                     if roi.size == 0:
-                        continue
+                        roi = np.zeros((1, 1, 3), dtype=frame.dtype)
+                        full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
+                        computed_mask = False
+                    else:
+                        full_mask = None
+                        computed_mask = True
+
                     # ROI-scope preprocs are applied after cropping.
                     if self.roi_preprocs:
                         roi = self._apply_preprocs_frame(roi, self.roi_preprocs)
                     if self.using_medsam and self.model is not None and hasattr(self.model, "set_prompts"):
-                        prompt_box = self._project_bbox_to_roi(pred.bbox, bbox, roi.shape[:2])
+                        prompt_box = self._project_bbox_to_roi(use_bbox_raw, bbox, roi.shape[:2])
                         if prompt_box is not None:
                             box_flat = prompt_box.reshape(-1, 4)[0]
                             cx = float((box_flat[0] + box_flat[2]) * 0.5)
@@ -987,94 +1122,121 @@ class SegmentationWorkflow:
                             else:
                                 self.model.set_prompts(None)
 
-                if self.using_auto_mask:
-                    start_time = time.perf_counter()
-                    auto_full = self._auto_mask_generate_full(frame, bbox)
-                    infer_elapsed = time.perf_counter() - start_time
-                    total_infer_time += infer_elapsed
-                    frame_counter += 1
-                    if auto_full is None:
-                        if not getattr(self, "_auto_mask_warning_emitted", False):
-                            self.logger("[Segmentation] Auto-mask generation failed for a frame; falling back to empty mask.")
-                            self._auto_mask_warning_emitted = True
-                        auto_full = np.zeros(frame.shape[:2], dtype=np.uint8)
-                    mask_roi = crop_with_bbox(auto_full, bbox)
-                    if mask_roi.size == 0:
-                        mask_roi = np.zeros(
-                            (
-                                int(max(1, round(bbox.h))),
-                                int(max(1, round(bbox.w))),
-                            ),
-                            dtype=np.uint8,
-                        )
+                    if self.using_auto_mask:
+                        start_time = time.perf_counter()
+                        auto_full = self._auto_mask_generate_full(frame, bbox)
+                        infer_elapsed = time.perf_counter() - start_time
+                        total_infer_time += infer_elapsed
+                        frame_counter += 1
+                        if auto_full is None:
+                            if not getattr(self, "_auto_mask_warning_emitted", False):
+                                self.logger("[Segmentation] Auto-mask generation failed for a frame; falling back to empty mask.")
+                                self._auto_mask_warning_emitted = True
+                            auto_full = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        mask_roi = crop_with_bbox(auto_full, bbox)
+                        if mask_roi.size == 0:
+                            mask_roi = np.zeros(
+                                (
+                                    int(max(1, round(bbox.h))),
+                                    int(max(1, round(bbox.w))),
+                                ),
+                                dtype=np.uint8,
+                            )
+                        else:
+                            if mask_roi.dtype != np.uint8:
+                                mask_roi = (mask_roi > 0).astype(np.uint8) * 255
+                        mask_roi = keep_largest_component(mask_roi)
+                        mask_roi = fill_holes(mask_roi)
+                        full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
                     else:
-                        if mask_roi.dtype != np.uint8:
-                            mask_roi = (mask_roi > 0).astype(np.uint8) * 255
-                    mask_roi = keep_largest_component(mask_roi)
-                    mask_roi = fill_holes(mask_roi)
-                    full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
-                else:
-                    if roi.ndim == 2:
-                        roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
-                    orig_h, orig_w = roi.shape[:2]
-                    if self.input_size:
-                        roi_resized = cv2.resize(
-                            roi,
-                            (self.input_size[1], self.input_size[0]),
-                            interpolation=cv2.INTER_LINEAR,
+                        if roi.ndim == 2:
+                            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+                        orig_h, orig_w = roi.shape[:2]
+                        if orig_h < 2 or orig_w < 2:
+                            full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                            mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
+                            computed_mask = False
+                        if self.input_size:
+                            roi_resized = cv2.resize(
+                                roi,
+                                (self.input_size[1], self.input_size[0]),
+                                interpolation=cv2.INTER_LINEAR,
+                            )
+                        else:
+                            roi_resized = roi
+                        roi_tensor = (
+                            torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
+                            .permute(2, 0, 1)
+                            .unsqueeze(0)
                         )
-                    else:
-                        roi_resized = roi
-                    roi_tensor = (
-                        torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
-                        .permute(2, 0, 1)
-                        .unsqueeze(0)
+                        roi_tensor = roi_tensor.to(self.device)
+                        start_time = time.perf_counter()
+                        logits = self._run_model_with_fallback(roi_tensor)
+                        probs = torch.sigmoid(logits)
+                        infer_elapsed = time.perf_counter() - start_time
+                        total_infer_time += infer_elapsed
+                        frame_counter += 1
+                        mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
+                        mask_roi = keep_largest_component(mask_roi)
+                        mask_roi = fill_holes(mask_roi)
+                        if self.input_size and (orig_h, orig_w) != self.input_size:
+                            mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                        mask_roi = keep_largest_component(mask_roi)
+                        mask_roi = fill_holes(mask_roi)
+                        full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
+
+                    if full_mask is None:
+                        full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
+                        computed_mask = False
+
+                    stats = compute_mask_stats(full_mask)
+
+                    # Bootstrap bbox from successful segmentation for later fallback.
+                    try:
+                        if getattr(stats, "area_px", 0.0) > 0.0:
+                            bx, by, bw, bh = tuple(map(float, stats.bbox))
+                            if bw > 0.0 and bh > 0.0:
+                                last_bbox_raw = (bx, by, bw, bh)
+                                last_bbox_source = "segmentation_bootstrap"
+                                try:
+                                    pred.bbox = last_bbox_raw  # type: ignore[assignment]
+                                    if getattr(pred, "bbox_source", "") == "full_frame":
+                                        pred.bbox_source = "segmentation_bootstrap"  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                    dice = None
+                    iou = None
+                    centroid_err = None
+                    gt_mask = None
+                    if frame_idx in gt_by_frame:
+                        gt_entry = gt_by_frame[frame_idx]
+                        gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
+                        if gt_mask is not None:
+                            dice = dice_coefficient(full_mask, gt_mask)
+                            iou = intersection_over_union(full_mask, gt_mask)
+                            accum["dice"].append(dice)
+                            accum["iou"].append(iou)
+                            centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
+                            if centroid_err is not None:
+                                accum["centroid"].append(centroid_err)
+                    per_frame_metrics[frame_idx] = {
+                        "dice": float(dice) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                        "iou": float(iou) if frame_idx in gt_by_frame and gt_mask is not None else None,
+                        "centroid": float(centroid_err) if centroid_err is not None else None,
+                    }
+                    mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
+                    cv2.imwrite(mask_filename, full_mask)
+                    mask_files[frame_idx] = mask_filename
+                    pred.segmentation = SegmentationData(
+                        mask_path=mask_filename,
+                        stats=stats,
+                        roi_bbox=bbox.as_tuple(),
+                        centroid_error_px=centroid_err,
                     )
-                    roi_tensor = roi_tensor.to(self.device)
-                    start_time = time.perf_counter()
-                    logits = self._run_model_with_fallback(roi_tensor)
-                    probs = torch.sigmoid(logits)
-                    infer_elapsed = time.perf_counter() - start_time
-                    total_infer_time += infer_elapsed
-                    frame_counter += 1
-                    mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
-                    mask_roi = keep_largest_component(mask_roi)
-                    mask_roi = fill_holes(mask_roi)
-                    if self.input_size and (orig_h, orig_w) != self.input_size:
-                        mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-                    mask_roi = keep_largest_component(mask_roi)
-                    mask_roi = fill_holes(mask_roi)
-                    full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
-                stats = compute_mask_stats(full_mask)
-                dice = None
-                iou = None
-                centroid_err = None
-                gt_mask = None
-                if frame_idx in gt_by_frame:
-                    gt_entry = gt_by_frame[frame_idx]
-                    gt_mask = self._load_mask_from_annotation(video_path, gt_entry.segmentation)
-                    if gt_mask is not None:
-                        dice = dice_coefficient(full_mask, gt_mask)
-                        iou = intersection_over_union(full_mask, gt_mask)
-                        accum["dice"].append(dice)
-                        accum["iou"].append(iou)
-                        centroid_err = centroid_distance(stats, gt_entry.segmentation.stats) if gt_entry.segmentation else None
-                        if centroid_err is not None:
-                            accum["centroid"].append(centroid_err)
-                per_frame_metrics[frame_idx] = {
-                    "dice": float(dice) if frame_idx in gt_by_frame and gt_mask is not None else None,
-                    "iou": float(iou) if frame_idx in gt_by_frame and gt_mask is not None else None,
-                    "centroid": float(centroid_err) if centroid_err is not None else None,
-                }
-                mask_filename = os.path.join(output_dir, f"frame_{frame_idx:06d}.png")
-                cv2.imwrite(mask_filename, full_mask)
-                mask_files[frame_idx] = mask_filename
-                pred.segmentation = SegmentationData(
-                    mask_path=mask_filename,
-                    stats=stats,
-                    roi_bbox=bbox.as_tuple(),
-                    centroid_error_px=centroid_err,
-                )
         finally:
             cap.release()
             if restore_training_state is not None and model_to_restore is not None:
@@ -1118,6 +1280,34 @@ class SegmentationWorkflow:
         try:
             with open(os.path.join(output_dir, "metrics_per_frame.json"), "w", encoding="utf-8") as f:
                 json.dump({str(k): v for k, v in per_frame_metrics.items()}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        # Save ROI/bbox trace for downstream visualization (e.g., annotate detection visualizations
+        # when bbox is derived from previous segmentation).
+        try:
+            trace: Dict[str, Any] = {}
+            for p in work_predictions:
+                key = str(int(getattr(p, "frame_index", -1)))
+                if key == "-1":
+                    continue
+                row: Dict[str, Any] = {
+                    "bbox": [float(x) for x in getattr(p, "bbox", (0.0, 0.0, 0.0, 0.0))],
+                    "bbox_source": str(getattr(p, "bbox_source", "detector")),
+                    "is_fallback": bool(getattr(p, "is_fallback", False)),
+                }
+                seg = getattr(p, "segmentation", None)
+                if seg is not None:
+                    roi_bbox = getattr(seg, "roi_bbox", None)
+                    if roi_bbox is not None:
+                        try:
+                            row["roi_bbox"] = [float(x) for x in roi_bbox]
+                        except Exception:
+                            pass
+                trace[key] = row
+            if trace:
+                with open(os.path.join(output_dir, "roi_trace.json"), "w", encoding="utf-8") as f:
+                    json.dump(trace, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
         return metrics_summary, accum
@@ -1384,7 +1574,14 @@ class SegmentationWorkflow:
             mask_path = mask_files.get(frame_idx)
             if not mask_path or not os.path.exists(mask_path):
                 continue
-            pred_mask_full = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            # Guard against zero-byte files: Ultralytics patches cv2.imread to use
+            # np.fromfile + imdecode; empty files produce an assertion failure.
+            if os.path.getsize(mask_path) == 0:
+                continue
+            try:
+                pred_mask_full = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                continue
             if pred_mask_full is None:
                 continue
             roi_pred_mask = crop_with_bbox(pred_mask_full, roi_bbox)
@@ -1512,7 +1709,14 @@ class SegmentationWorkflow:
             abs_path = os.path.join(self.dataset_root, mask_path)
         if not os.path.exists(abs_path):
             return None
-        mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        # Guard against zero-byte files: Ultralytics patches cv2.imread to use
+        # np.fromfile + imdecode; empty files produce an assertion failure.
+        if os.path.getsize(abs_path) == 0:
+            return None
+        try:
+            mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            return None
         if mask is None:
             return None
         mask_bin = (mask > 0).astype(np.uint8)

@@ -117,6 +117,8 @@ class YOLOv11Model(TrackingModel):
         import cv2
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         for p in self.preprocs:
+            if getattr(p, "train_only", False):
+                continue
             rgb = p.apply_to_frame(rgb)
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
@@ -147,6 +149,25 @@ class YOLOv11Model(TrackingModel):
         # Helpers
         def _apply_preprocs_np(frame_bgr: np.ndarray) -> np.ndarray:
             return self._apply_preprocs_np(frame_bgr)
+
+        def _apply_preprocs_np_with_bboxes(
+            frame_bgr: np.ndarray,
+            bboxes: List[tuple],
+        ) -> tuple[np.ndarray, List[tuple]]:
+            if not self.preprocs:
+                return frame_bgr, list(bboxes or [])
+            import cv2
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            out_bboxes: List[tuple] = list(bboxes or [])
+            for p in self.preprocs:
+                if hasattr(p, "apply_to_frame_and_bboxes"):
+                    rgb, out_bboxes = p.apply_to_frame_and_bboxes(rgb, out_bboxes)
+                elif hasattr(p, "apply_to_frame_and_bbox"):
+                    # fallback: apply to image only (bbox left unchanged)
+                    rgb = p.apply_to_frame(rgb)
+                else:
+                    rgb = p.apply_to_frame(rgb)
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), out_bboxes
 
         def _coco_to_yolo(bbox, w: int, h: int):
             # bbox: (x,y,w,h) in pixels -> YOLO normalized (xc,yc,w,h)
@@ -233,8 +254,9 @@ class YOLOv11Model(TrackingModel):
                 # Read frames
                 read = _iter_video_frames(vp, fids)
                 for (fi, frame) in read:
-                    # apply preproc and save image
-                    frame = _apply_preprocs_np(frame)
+                    # apply preproc and save image (+ update bboxes if needed)
+                    bboxes = frames.get(fi) or []
+                    frame, bboxes = _apply_preprocs_np_with_bboxes(frame, list(bboxes))
                     h, w = frame.shape[:2]
                     stem = f"{os.path.splitext(os.path.basename(vp))[0]}_f{int(fi):06d}"
                     img_path = os.path.join(img_dir, stem + ".jpg")
@@ -244,7 +266,6 @@ class YOLOv11Model(TrackingModel):
                         continue
                     # labels
                     lbl_path = os.path.join(lbl_dir, stem + ".txt")
-                    bboxes = frames.get(fi) or []
                     lines = []
                     for b in (bboxes or []):
                         yb = _coco_to_yolo(b, w, h)
@@ -417,7 +438,14 @@ class YOLOv11Model(TrackingModel):
                 except Exception:
                     bbox_added = False
                 if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
-                    preds.append(FramePrediction(int(fidx), last_bbox, None))
+                    preds.append(
+                        FramePrediction(
+                            frame_index=int(fidx),
+                            bbox=last_bbox,
+                            score=None,
+                            is_fallback=True,
+                        )
+                    )
             frames_buf.clear()
             idx_buf.clear()
         while True:
@@ -487,7 +515,14 @@ class YOLOv11Model(TrackingModel):
                 except Exception:
                     bbox_added = False
                 if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
-                    preds.append(FramePrediction(int(fidx), last_bbox, None))
+                    preds.append(
+                        FramePrediction(
+                            frame_index=int(fidx),
+                            bbox=last_bbox,
+                            score=None,
+                            is_fallback=True,
+                        )
+                    )
             buf_frames.clear(); buf_indices.clear()
         for idx in sorted(set(int(i) for i in frame_indices)):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))

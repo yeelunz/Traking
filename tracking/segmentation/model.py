@@ -3,6 +3,7 @@ from __future__ import annotations
 from .models.common import load_json_file as _load_json_file
 from .models.common import resolve_path as _resolve_path
 from .models.medsam import MedSAMSegmenter
+from .models.mednext import MedNeXtSegmenter
 from .models.nnunet import (
     NnUNetSegmenter,
     _NNUNET_IMPORT_ERROR,
@@ -28,6 +29,7 @@ __all__ = [
     "TorchvisionFCNSegmenter",
     "NnUNetSegmenter",
     "MedSAMSegmenter",
+    "MedNeXtSegmenter",
     "_build_smp_model",
     "_resolve_path",
     "_load_json_file",

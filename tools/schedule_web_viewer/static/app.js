@@ -8,12 +8,16 @@ const state = {
   searchTerm: '',
   current: null,
   currentView: { mode: 'single', expId: null, label: '' },
+  assetExpId: null,
   detectionChart: null,
   segmentationChart: null,
+  classificationChart: null,
   groupDetectionChart: null,
   groupSegmentationChart: null,
+  groupClassificationChart: null,
   losoDetectionChart: null,
   losoSegmentationChart: null,
+  losoClassificationChart: null,
   detectionCategory: 'detection_visualizations',
   segmentationCategory: 'segmentation_overlays',
   groupChartSelections: {},
@@ -26,6 +30,7 @@ const DETECTION_SUMMARY_FIELDS = [
   { label: 'SR@0.5', key: 'success_rate_50', percent: true },
   { label: 'SR@0.75', key: 'success_rate_75', percent: true },
   { label: 'AUROC', key: 'success_auc' },
+  { label: 'ROI Fallback', key: 'roi_fallback_rate', percent: true },
   { label: 'FPS', key: 'fps' },
   { label: 'Drift Rate', key: 'drift_rate' }
 ];
@@ -35,6 +40,15 @@ const SEGMENTATION_SUMMARY_FIELDS = [
   { label: 'IoU', key: 'iou_mean', std: 'iou_std', percent: true },
   { label: 'Centroid (pix)', key: 'centroid_mean', std: 'centroid_std' },
   { label: 'FPS', key: 'fps_mean', std: 'fps_std' }
+];
+
+const CLASSIFICATION_SUMMARY_FIELDS = [
+  { label: 'Accuracy', key: 'accuracy', percent: true },
+  { label: 'Balanced Acc', key: 'balanced_accuracy', percent: true },
+  { label: 'Precision', key: 'precision_positive', percent: true },
+  { label: 'Recall', key: 'recall_positive', percent: true },
+  { label: 'F1', key: 'f1_positive', percent: true },
+  { label: 'ROC AUC', key: 'roc_auc' }
 ];
 
 const SUMMARY_COLORS = ['#6aa5ff', '#f8c146', '#66dfc5', '#ff8ba7', '#bd93f9', '#94f7c5'];
@@ -385,6 +399,7 @@ function hideLosoOverview() {
   if (table) table.innerHTML = '';
   renderGroupSummaryChart('loso-detection-chart', [], 'detection', DETECTION_SUMMARY_FIELDS, 'losoDetectionChart');
   renderGroupSummaryChart('loso-segmentation-chart', [], 'segmentation', SEGMENTATION_SUMMARY_FIELDS, 'losoSegmentationChart');
+  renderGroupSummaryChart('loso-classification-chart', [], 'classification', CLASSIFICATION_SUMMARY_FIELDS, 'losoClassificationChart');
 }
 
 function showLosoOverview() {
@@ -408,9 +423,13 @@ function renderLosoFoldTable(folds) {
     { label: 'Det IoU', format: (f) => formatPercentWithStd(foldPreviewMetric(f, 'detection', 'iou_mean'), foldPreviewMetric(f, 'detection', 'iou_std')) },
     { label: 'Det Center Err', format: (f) => formatWithStd(foldPreviewMetric(f, 'detection', 'ce_mean'), foldPreviewMetric(f, 'detection', 'ce_std')) },
     { label: 'Det SR@0.5', format: (f) => formatPercent(foldPreviewMetric(f, 'detection', 'success_rate_50')) },
+    { label: 'Det ROI Fallback', format: (f) => formatPercent(foldPreviewMetric(f, 'detection', 'roi_fallback_rate')) },
     { label: 'Seg Dice', format: (f) => formatPercentWithStd(foldPreviewMetric(f, 'segmentation', 'dice_mean'), foldPreviewMetric(f, 'segmentation', 'dice_std')) },
     { label: 'Seg IoU', format: (f) => formatPercentWithStd(foldPreviewMetric(f, 'segmentation', 'iou_mean'), foldPreviewMetric(f, 'segmentation', 'iou_std')) },
-    { label: 'Seg Centroid', format: (f) => formatWithStd(foldPreviewMetric(f, 'segmentation', 'centroid_mean'), foldPreviewMetric(f, 'segmentation', 'centroid_std')) }
+    { label: 'Seg Centroid', format: (f) => formatWithStd(foldPreviewMetric(f, 'segmentation', 'centroid_mean'), foldPreviewMetric(f, 'segmentation', 'centroid_std')) },
+    { label: 'Cls Acc', format: (f) => formatPercent(foldPreviewMetric(f, 'classification', 'accuracy')) },
+    { label: 'Cls F1', format: (f) => formatPercent(foldPreviewMetric(f, 'classification', 'f1_positive')) },
+    { label: 'Cls AUC', format: (f) => formatNumber(foldPreviewMetric(f, 'classification', 'roc_auc'), 4) }
   ];
   const thead = '<tr>' + columns.map((c) => `<th>${c.label}</th>`).join('') + '</tr>';
   const tbody = folds
@@ -498,10 +517,12 @@ function updateLosoCharts(expId, folds) {
     name: f.fold || f.exp_id,
     preview: f.preview || {},
     has_detection: !!f.has_detection,
-    has_segmentation: !!f.has_segmentation
+    has_segmentation: !!f.has_segmentation,
+    has_classification: !!f.has_classification
   }));
   renderGroupSummaryChart('loso-detection-chart', foldAsExperiments, 'detection', DETECTION_SUMMARY_FIELDS, 'losoDetectionChart');
   renderGroupSummaryChart('loso-segmentation-chart', foldAsExperiments, 'segmentation', SEGMENTATION_SUMMARY_FIELDS, 'losoSegmentationChart');
+  renderGroupSummaryChart('loso-classification-chart', foldAsExperiments, 'classification', CLASSIFICATION_SUMMARY_FIELDS, 'losoClassificationChart');
 }
 
 function renderLosoChartControls(expId, folds) {
@@ -654,9 +675,11 @@ function updateGroupCharts(group) {
   const selected = getSelectedGroupExperiments(group);
   const detectionExperiments = selected.filter((exp) => exp.has_detection);
   const segmentationExperiments = selected.filter((exp) => exp.has_segmentation);
+  const classificationExperiments = selected.filter((exp) => exp.has_classification);
   renderGroupSummaryChart('group-detection-chart', detectionExperiments, 'detection', DETECTION_SUMMARY_FIELDS, 'groupDetectionChart');
   renderGroupSummaryChart('group-segmentation-chart', segmentationExperiments, 'segmentation', SEGMENTATION_SUMMARY_FIELDS, 'groupSegmentationChart');
-  if (!detectionExperiments.length && !segmentationExperiments.length) {
+  renderGroupSummaryChart('group-classification-chart', classificationExperiments, 'classification', CLASSIFICATION_SUMMARY_FIELDS, 'groupClassificationChart');
+  if (!detectionExperiments.length && !segmentationExperiments.length && !classificationExperiments.length) {
     wrapper.classList.add('hidden');
   } else {
     wrapper.classList.remove('hidden');
@@ -684,6 +707,7 @@ function renderGroupOverview() {
     }
     renderGroupSummaryChart('group-detection-chart', [], 'detection', DETECTION_SUMMARY_FIELDS, 'groupDetectionChart');
     renderGroupSummaryChart('group-segmentation-chart', [], 'segmentation', SEGMENTATION_SUMMARY_FIELDS, 'groupSegmentationChart');
+    renderGroupSummaryChart('group-classification-chart', [], 'classification', CLASSIFICATION_SUMMARY_FIELDS, 'groupClassificationChart');
     if (title) title.textContent = '批次比較';
     if (subtitle) subtitle.textContent = '';
     return;
@@ -705,6 +729,8 @@ function renderGroupOverview() {
           <div class="compare-metric"><label>Det SR@0.5</label><span>${formatPercent(previewMetric(exp, 'detection', 'success_rate_50'))}</span></div>
           <div class="compare-metric"><label>Seg Dice</label><span>${formatPercent(previewMetric(exp, 'segmentation', 'dice_mean'))}</span></div>
           <div class="compare-metric"><label>Seg IoU</label><span>${formatPercent(previewMetric(exp, 'segmentation', 'iou_mean'))}</span></div>
+          <div class="compare-metric"><label>Cls Acc</label><span>${formatPercent(previewMetric(exp, 'classification', 'accuracy'))}</span></div>
+          <div class="compare-metric"><label>Cls F1</label><span>${formatPercent(previewMetric(exp, 'classification', 'f1_positive'))}</span></div>
         </div>`;
       card.addEventListener('click', () => selectExperiment(exp.id));
       if (state.current && state.current.id === exp.id) {
@@ -758,6 +784,21 @@ function renderGroupOverview() {
         label: 'Seg FPS',
         key: 'seg_fps',
         format: (exp) => formatWithStd(previewMetric(exp, 'segmentation', 'fps_mean'), previewMetric(exp, 'segmentation', 'fps_std'))
+      },
+      {
+        label: 'Cls Acc',
+        key: 'cls_acc',
+        format: (exp) => formatPercent(previewMetric(exp, 'classification', 'accuracy'))
+      },
+      {
+        label: 'Cls F1',
+        key: 'cls_f1',
+        format: (exp) => formatPercent(previewMetric(exp, 'classification', 'f1_positive'))
+      },
+      {
+        label: 'Cls AUC',
+        key: 'cls_auc',
+        format: (exp) => formatNumber(previewMetric(exp, 'classification', 'roc_auc'), 4)
       }
     ];
     const thead = '<tr>' + columns.map((c) => `<th>${c.label}</th>`).join('') + '</tr>';
@@ -789,6 +830,7 @@ function buildCards(metrics) {
   cards.innerHTML = '';
   const detection = metrics.detection?.summary;
   const segmentation = metrics.segmentation?.summary;
+  const classification = metrics.classification?.summary;
   const entries = [];
   if (detection) {
     entries.push({ label: 'Detection IoU', value: formatPercentWithStd(detection.iou_mean, detection.iou_std) });
@@ -797,6 +839,13 @@ function buildCards(metrics) {
   if (segmentation) {
     entries.push({ label: 'Seg Dice', value: formatPercentWithStd(segmentation.dice_mean, segmentation.dice_std) });
     entries.push({ label: 'Seg FPS', value: formatWithStd(segmentation.fps_mean, segmentation.fps_std) });
+  }
+  if (classification) {
+    entries.push({ label: 'Cls Accuracy', value: formatPercent(classification.accuracy) });
+    entries.push({ label: 'Cls F1', value: formatPercent(classification.f1_positive) });
+    if (classification.roc_auc !== undefined && classification.roc_auc !== null) {
+      entries.push({ label: 'Cls ROC AUC', value: formatNumber(classification.roc_auc, 4) });
+    }
   }
   entries.forEach((item) => {
     const div = document.createElement('div');
@@ -820,12 +869,9 @@ function clearPerVideoTablesAndCharts() {
   state.segmentationChart = buildChart('segmentation-chart', state.segmentationChart, [], []);
 }
 
-async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
-  document.getElementById('exp-name').textContent = payload.experiment?.name || viewLabel || expIdForAssets || '';
-  document.getElementById('exp-path').textContent = payload.experiment?.output_dir || '';
-  buildCards(payload);
-  renderSummaryTable('detection-summary-table', payload.detection?.summary, DETECTION_SUMMARY_FIELDS);
-  renderSummaryTable('segmentation-summary-table', payload.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS);
+async function renderDetailSections(payload, expIdForAssets) {
+  // Keep track of which experiment id owns the currently displayed visuals.
+  state.assetExpId = expIdForAssets || null;
 
   const detectionRows = payload.detection?.per_video || [];
   const segmentationRows = payload.segmentation?.per_video || [];
@@ -834,7 +880,8 @@ async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
     { label: 'Video', format: (row) => row.video },
     { label: 'IoU (μ ± σ)', format: (row) => formatPercentWithStd(row.metrics?.iou_mean, row.metrics?.iou_std) },
     { label: 'Center Err (px)', format: (row) => formatWithStd(row.metrics?.ce_mean, row.metrics?.ce_std) },
-    { label: 'SR@0.5', format: (row) => formatPercent(row.metrics?.success_rate_50) }
+    { label: 'SR@0.5', format: (row) => formatPercent(row.metrics?.success_rate_50) },
+    { label: 'ROI Fallback', format: (row) => formatPercent(row.metrics?.roi_fallback_rate) }
   ]);
 
   buildTable('segmentation-table', segmentationRows, [
@@ -876,6 +923,184 @@ async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
   await loadGallery('segmentation-gallery', expIdForAssets, state.segmentationCategory);
   renderVisualTabs('detection-gallery', 'detectionCategory');
   renderVisualTabs('segmentation-gallery', 'segmentationCategory');
+}
+
+async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
+  document.getElementById('exp-name').textContent = payload.experiment?.name || viewLabel || expIdForAssets || '';
+  document.getElementById('exp-path').textContent = payload.experiment?.output_dir || '';
+  buildCards(payload);
+  renderSummaryTable('detection-summary-table', payload.detection?.summary, DETECTION_SUMMARY_FIELDS);
+  renderSummaryTable('segmentation-summary-table', payload.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS);
+  renderClassificationSection(payload.classification);
+  await renderDetailSections(payload, expIdForAssets);
+}
+
+function renderClassificationSection(classification) {
+  const section = document.getElementById('classification-section');
+  if (!section) return;
+  const summary = classification?.summary;
+  const predictions = classification?.predictions || [];
+
+  if (!summary) {
+    section.classList.add('hidden');
+    // Destroy any lingering chart
+    if (state.classificationChart && state.classificationChart.destroy) {
+      state.classificationChart.destroy();
+      state.classificationChart = null;
+    }
+    return;
+  }
+  section.classList.remove('hidden');
+
+  // Summary table
+  renderSummaryTable('classification-summary-table', summary, CLASSIFICATION_SUMMARY_FIELDS);
+
+  // Confusion matrix
+  renderConfusionMatrix('confusion-matrix', summary);
+
+  // Predictions table
+  renderPredictionsTable('classification-predictions-table', predictions);
+
+  // Probability distribution chart
+  state.classificationChart = buildClassificationProbChart(
+    'classification-chart',
+    state.classificationChart,
+    predictions
+  );
+}
+
+function renderConfusionMatrix(containerId, summary) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const tp = summary.tp ?? 0;
+  const fp = summary.fp ?? 0;
+  const fn = summary.fn ?? 0;
+  const tn = summary.tn ?? 0;
+  const total = tp + fp + fn + tn || 1;
+  container.innerHTML = `
+    <table class="cm-table">
+      <thead>
+        <tr><th></th><th>預測 Positive</th><th>預測 Negative</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th>實際 Positive</th>
+          <td class="cm-tp">${tp} <small>(${(tp / total * 100).toFixed(1)}%)</small></td>
+          <td class="cm-fn">${fn} <small>(${(fn / total * 100).toFixed(1)}%)</small></td>
+        </tr>
+        <tr>
+          <th>實際 Negative</th>
+          <td class="cm-fp">${fp} <small>(${(fp / total * 100).toFixed(1)}%)</small></td>
+          <td class="cm-tn">${tn} <small>(${(tn / total * 100).toFixed(1)}%)</small></td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
+function renderPredictionsTable(tableId, predictions) {
+  const table = document.getElementById(tableId);
+  if (!table) return;
+  if (!predictions || predictions.length === 0) {
+    table.innerHTML = '<tr><td>無預測資料</td></tr>';
+    return;
+  }
+  // Group predictions by subject
+  const bySubject = new Map();
+  predictions.forEach((p) => {
+    const sid = p.subject_id || p.entity_id;
+    if (!bySubject.has(sid)) {
+      bySubject.set(sid, { subject_id: sid, label_true: p.label_true, preds: [] });
+    }
+    bySubject.get(sid).preds.push(p);
+  });
+  const subjects = Array.from(bySubject.values());
+  subjects.sort((a, b) => (a.subject_id || '').localeCompare(b.subject_id || ''));
+  const header = '<tr><th>Subject</th><th>True Label</th><th>Pred Label</th><th>Prob (Positive)</th><th>Correct</th></tr>';
+  const rows = subjects.map((s) => {
+    // For each subject use majority vote or first prediction
+    const majorityPred = s.preds.length === 1
+      ? s.preds[0].label_pred
+      : (() => {
+          const counts = {};
+          s.preds.forEach((p) => { counts[p.label_pred] = (counts[p.label_pred] || 0) + 1; });
+          return Number(Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]);
+        })();
+    const avgProb = s.preds.reduce((sum, p) => sum + (p.prob_positive || 0), 0) / s.preds.length;
+    const correct = majorityPred === s.label_true;
+    const labelMap = { 0: '健康 (0)', 1: '患病 (1)' };
+    return `<tr class="${correct ? 'pred-correct' : 'pred-wrong'}">
+      <td>${s.subject_id}</td>
+      <td>${labelMap[s.label_true] ?? s.label_true}</td>
+      <td>${labelMap[majorityPred] ?? majorityPred}</td>
+      <td>${(avgProb * 100).toFixed(1)}%</td>
+      <td>${correct ? '✓' : '✗'}</td>
+    </tr>`;
+  }).join('');
+  table.innerHTML = header + rows;
+}
+
+function buildClassificationProbChart(canvasId, chartRef, predictions) {
+  const canvas = document.getElementById(canvasId);
+  if (chartRef && chartRef.destroy) {
+    chartRef.destroy();
+  }
+  if (!predictions || predictions.length === 0) return null;
+
+  // Group by subject and compute avg probability
+  const bySubject = new Map();
+  predictions.forEach((p) => {
+    const sid = p.subject_id || p.entity_id;
+    if (!bySubject.has(sid)) {
+      bySubject.set(sid, { subject_id: sid, label_true: p.label_true, probs: [] });
+    }
+    bySubject.get(sid).probs.push(p.prob_positive || 0);
+  });
+  const subjects = Array.from(bySubject.values()).sort((a, b) =>
+    (a.subject_id || '').localeCompare(b.subject_id || '')
+  );
+  const labels = subjects.map((s) => s.subject_id);
+  const probs = subjects.map((s) => {
+    const avg = s.probs.reduce((a, b) => a + b, 0) / s.probs.length;
+    return avg * 100;
+  });
+  const colors = subjects.map((s) => s.label_true === 1 ? '#ff6b6b' : '#51cf66');
+
+  return new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'P(Positive) %',
+        data: probs,
+        backgroundColor: colors,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `P(Positive): ${ctx.parsed.y.toFixed(1)}%`,
+            afterLabel: (ctx) => `True: ${subjects[ctx.dataIndex].label_true === 1 ? '患病' : '健康'}`
+          }
+        },
+        annotation: undefined,
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          max: 100,
+          ticks: { callback: (v) => `${v}%` },
+          title: { display: true, text: '預測機率 (%)' }
+        },
+        x: {
+          title: { display: true, text: 'Subject' }
+        }
+      }
+    }
+  });
 }
 
 function buildTable(el, rows, columns) {
@@ -1075,10 +1300,21 @@ function renderVisualTabs(galleryId, categoryStateKey) {
   tabsContainer.querySelectorAll('button').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.category === state[categoryStateKey]);
     btn.addEventListener('click', async () => {
+      // In LOSO aggregate mode we don't have per-fold assets; visuals are only
+      // available when a concrete experiment (single or fold) is selected.
+      if (state.currentView?.mode === 'aggregate') {
+        return;
+      }
+
       state[categoryStateKey] = btn.dataset.category;
       tabsContainer.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      await loadGallery(galleryId, state.current.id, state[categoryStateKey]);
+
+      const expIdForAssets = state.assetExpId || state.currentView?.expId || state.current?.id;
+      if (!expIdForAssets) {
+        return;
+      }
+      await loadGallery(galleryId, expIdForAssets, state[categoryStateKey]);
     });
   });
 }
@@ -1247,7 +1483,10 @@ async function selectExperiment(expId) {
           state.currentView = { mode: 'fold', expId: foldId, label: '' };
           const foldParams = new URLSearchParams({ exp_id: foldId });
           const foldRes = await fetchJSON(`/api/experiments/metrics?${foldParams.toString()}`);
-          await renderExperimentPayload(foldRes, foldId, `${foldRes.experiment?.name || expId}`);
+          // Keep aggregate summary visible; only update per-video tables/charts + visuals for this fold.
+          await renderDetailSections(foldRes, foldId);
+          const subtitle = document.getElementById('loso-subtitle');
+          if (subtitle) subtitle.textContent = `${res.folds.length} folds | 目前檢視：${row.querySelector('td')?.textContent || foldId}`;
         });
       });
     }

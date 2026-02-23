@@ -1219,6 +1219,7 @@ class MixFormerV2Tracker(TrackingModel):
 
                     output_bbox: Optional[Tuple[float, float, float, float]] = None
                     output_score: Optional[float] = None
+                    used_fallback = False
 
                     if has_valid_bbox and (score_val is None or score_val >= self.min_confidence):
                         output_bbox = result.bbox
@@ -1227,6 +1228,7 @@ class MixFormerV2Tracker(TrackingModel):
                     elif self.fallback_last_prediction and _is_valid_bbox(last_bbox):
                         output_bbox = last_bbox
                         output_score = score_val if score_val is not None else 0.0
+                        used_fallback = True
 
                     if output_bbox is not None:
                         state = confidence_estimator.evaluate(
@@ -1238,11 +1240,12 @@ class MixFormerV2Tracker(TrackingModel):
                         )
                         preds.append(
                             FramePrediction(
-                                frame_idx,
-                                output_bbox,
-                                output_score,
+                                frame_index=frame_idx,
+                                bbox=output_bbox,
+                                score=output_score,
                                 confidence=state.confidence,
                                 confidence_components=dict(state.raw_components),
+                                is_fallback=used_fallback,
                             )
                         )
                 frame_idx += 1

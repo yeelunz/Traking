@@ -19,8 +19,14 @@ def load_coco_vid(json_path: str) -> Dict[str, Any]:
             # fallback: assume consecutive
             fi = img.get("id", 0) - 1
         img_to_frame[img["id"]] = fi
-    frames.setdefault(fi, [])
-    frame_annotations.setdefault(fi, [])
+        # make sure mapping has entries for this frame
+        frames.setdefault(fi, [])
+        frame_annotations.setdefault(fi, [])
+    # if there were no images, ensure variables exist
+    if data.get("images") is None or not data.get("images"):
+        fi = 0
+        frames.setdefault(fi, [])
+        frame_annotations.setdefault(fi, [])
     for ann in data.get("annotations", []):
         img_id = ann.get("image_id")
         bbox = ann.get("bbox")

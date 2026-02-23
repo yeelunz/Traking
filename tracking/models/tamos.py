@@ -932,7 +932,14 @@ class TaMOsTracker(TrackingModel):
                         last_bbox = bbox_tuple
                     elif self.fallback_last_prediction and last_bbox is not None:
                         fallback_score = score_val if score_val is not None else 0.0
-                        preds.append(FramePrediction(frame_idx, last_bbox, fallback_score))
+                        preds.append(
+                            FramePrediction(
+                                frame_index=frame_idx,
+                                bbox=last_bbox,
+                                score=fallback_score,
+                                is_fallback=True,
+                            )
+                        )
 
                 frame_idx += 1
         finally:
