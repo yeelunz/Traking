@@ -231,10 +231,11 @@ def run_subject_classification(
     logger: Callable[[str], None],
     *,
     split_method: str = "video_level",
-) -> None:
+    cached_classifier_path: Optional[str] = None,
+) -> Optional[Dict[str, float]]:
     if not config.get("enabled", False):
         logger("[Classification] Stage disabled via config.")
-        return
+        return None
 
     feature_cfg = config.get("feature_extractor", {"name": "basic", "params": {}})
     feature_name = feature_cfg.get("name", "basic")
@@ -253,7 +254,12 @@ def run_subject_classification(
     legacy_level = config.pop("target_level", None)
     if legacy_level is not None:
         logger("[Classification] 'target_level' is deprecated; using dataset split method instead.")
-    level = "subject" if str(split_method).lower() == "subject_level" else "video"
+    _explicit_level = str(config.get("level") or "").strip().lower()
+    if _explicit_level in {"video", "subject"}:
+        level = _explicit_level
+        logger(f"[Classification] Target level overridden by config: {level}")
+    else:
+        level = "subject" if str(split_method).lower() == "subject_level" else "video"
     logger(f"[Classification] Target level: {level}")
 
     seg_cfg = config.get("segmentation", {}) or {}
@@ -359,16 +365,34 @@ def run_subject_classification(
     X_train = vectoriser.transform(train_features[e] for e in train_entities)
     y_train = np.asarray([labels[train_owner[e]] for e in train_entities], dtype=np.int64)
 
-    logger(f"[Classification] Training classifier on {len(train_entities)} entities")
-    train_info = classifier.fit(X_train, y_train)
-
     model_dir = os.path.join(results_dir, "classification")
     os.makedirs(model_dir, exist_ok=True)
     model_path = os.path.join(model_dir, "classifier.pkl")
-    try:
-        classifier.save(model_path)
-    except Exception:
-        logger("[Classification] Warning: classifier save skipped (not implemented)")
+    train_info: Optional[Dict] = None
+
+    if cached_classifier_path and os.path.exists(cached_classifier_path):
+        logger(f"[Classification] Cache hit – loading classifier from: {cached_classifier_path}")
+        try:
+            classifier.load(cached_classifier_path)
+            # Copy to current experiment's dir so artifacts are self-contained
+            if os.path.abspath(cached_classifier_path) != os.path.abspath(model_path):
+                import shutil
+                shutil.copy2(cached_classifier_path, model_path)
+        except Exception as _load_err:
+            logger(f"[Classification] Cache load failed ({_load_err}); falling back to training.")
+            logger(f"[Classification] Training classifier on {len(train_entities)} entities")
+            train_info = classifier.fit(X_train, y_train)
+            try:
+                classifier.save(model_path)
+            except Exception:
+                logger("[Classification] Warning: classifier save skipped (not implemented)")
+    else:
+        logger(f"[Classification] Training classifier on {len(train_entities)} entities")
+        train_info = classifier.fit(X_train, y_train)
+        try:
+            classifier.save(model_path)
+        except Exception:
+            logger("[Classification] Warning: classifier save skipped (not implemented)")
 
     # Determine model predictions for test subjects
     source_model = config.get("source_model")
@@ -464,3 +488,6 @@ def run_subject_classification(
         seg_metrics_path = os.path.join(seg_results_root, "metrics_summary.json")
         with open(seg_metrics_path, "w", encoding="utf-8") as f:
             json.dump(seg_metrics_by_model, f, ensure_ascii=False, indent=2)
+
+    return metrics
+

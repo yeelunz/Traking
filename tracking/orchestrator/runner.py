@@ -83,6 +83,8 @@ class PipelineRunner:
         _global_cache_dir = os.path.join(proj_root, "results")
         os.makedirs(_global_cache_dir, exist_ok=True)
         self._persistent_det_cache_file: str = os.path.join(_global_cache_dir, "detector_cache.json")
+        self._persistent_seg_cache_file: str = os.path.join(_global_cache_dir, "segmentation_cache.json")
+        self._persistent_clf_cache_file: str = os.path.join(_global_cache_dir, "classification_cache.json")
         self._logger = logger
         self._log_file: Optional[str] = None
         self._progress_cb = progress_cb
@@ -163,6 +165,69 @@ class PipelineRunner:
             existing_data["version"] = 1
             existing_data["updated_at"] = datetime.utcnow().isoformat() + "Z"
             with open(self._persistent_det_cache_file, "w", encoding="utf-8") as f:
+                json.dump(existing_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # Best-effort; do not break the main pipeline
+
+    # ------------------------------------------------------------------
+    # Generic stage cache helpers (segmentation / classification)
+    # Schema: {"version": 1, "entries": {<sig_key>: {<model_key>: {"checkpoint": <path>}}}}
+    # ------------------------------------------------------------------
+    def _load_persistent_stage_cache(self, cache_file: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Load a generic persistent cache keyed by SHA-256 signature.
+
+        Only entries whose "checkpoint" file still exists on disk are returned.
+        Returns an empty dict on any error.
+        """
+        try:
+            if not os.path.exists(cache_file):
+                return {}
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = data.get("entries", {})
+            if not isinstance(entries, dict):
+                return {}
+            valid: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for sig_key, model_map in entries.items():
+                if not isinstance(model_map, dict):
+                    continue
+                valid_models: Dict[str, Dict[str, Any]] = {}
+                for model_key, entry in model_map.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    ckpt = entry.get("checkpoint")
+                    if ckpt and isinstance(ckpt, str) and os.path.exists(ckpt):
+                        valid_models[model_key] = entry
+                if valid_models:
+                    valid[sig_key] = valid_models
+            return valid
+        except Exception:
+            return {}
+
+    def _save_to_stage_cache(
+        self,
+        cache_file: str,
+        sig_key: str,
+        model_key: str,
+        entry: Dict[str, Any],
+    ) -> None:
+        """Append / update one entry in a generic persistent stage cache file."""
+        try:
+            existing_data: Dict[str, Any] = {}
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        existing_data = json.load(f)
+                except Exception:
+                    existing_data = {}
+            entries = existing_data.get("entries", {})
+            if not isinstance(entries, dict):
+                entries = {}
+            entries.setdefault(sig_key, {})[model_key] = entry
+            existing_data["entries"] = entries
+            existing_data["version"] = 1
+            existing_data["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(existing_data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass  # Best-effort; do not break the main pipeline
@@ -349,6 +414,20 @@ class PipelineRunner:
                     if _model_name not in detector_reuse_cache[_sig_key]:
                         detector_reuse_cache[_sig_key][_model_name] = _entry
 
+        # --- Load persistent caches for segmentation and classification ---
+        _seg_disk_cache = self._load_persistent_stage_cache(self._persistent_seg_cache_file)
+        if _seg_disk_cache:
+            self._log(
+                f"[SegCache] Loaded {len(_seg_disk_cache)} signature(s) from persistent cache: {self._persistent_seg_cache_file}",
+                to_console=True,
+            )
+        _clf_disk_cache = self._load_persistent_stage_cache(self._persistent_clf_cache_file)
+        if _clf_disk_cache:
+            self._log(
+                f"[ClfCache] Loaded {len(_clf_disk_cache)} signature(s) from persistent cache: {self._persistent_clf_cache_file}",
+                to_console=True,
+            )
+
         def _detector_signature(
             exp_cfg: Dict[str, Any],
             scheme_key: str,
@@ -391,6 +470,56 @@ class PipelineRunner:
             sig_raw = json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
             sig_key = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()
             return {"key": sig_key, "payload": signature_payload}
+
+        def _segmentation_signature(
+            seg_cfg: Dict[str, Any],
+            model_name: str,
+            global_preprocs: List[Any],
+            roi_preprocs: List[Any],
+            train_paths: List[str],
+            seg_seed: Any,
+            preproc_scheme: str,
+            subject_id: Optional[str],
+            fold_index: int,
+        ) -> Dict[str, Any]:
+            def _preproc_desc(p: Any) -> str:
+                return type(p).__name__
+            payload = {
+                "seg_config": seg_cfg,
+                "model_name": model_name,
+                "preproc_scheme": preproc_scheme,
+                "global_preprocs": [_preproc_desc(p) for p in (global_preprocs or [])],
+                "roi_preprocs": [_preproc_desc(p) for p in (roi_preprocs or [])],
+                "dataset_root": self.dataset_root,
+                "train_videos": sorted(train_paths),
+                "seed": int(seg_seed) if seg_seed is not None else 0,
+                "subject": subject_id,
+                "fold": fold_index + 1,
+            }
+            sig_raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            return {"key": hashlib.sha256(sig_raw.encode("utf-8")).hexdigest(), "payload": payload}
+
+        def _classification_signature(
+            clf_cfg: Dict[str, Any],
+            train_paths: List[str],
+            seg_model_name_hint: str,
+            subject_id: Optional[str],
+            fold_index: int,
+        ) -> Dict[str, Any]:
+            payload = {
+                "feature_extractor": clf_cfg.get("feature_extractor", {}),
+                "classifier": clf_cfg.get("classifier", {}),
+                "label_file": clf_cfg.get("label_file"),
+                "seg_enabled": bool((clf_cfg.get("segmentation") or {}).get("enabled", True)),
+                "seg_model_name": seg_model_name_hint,
+                "dataset_root": self.dataset_root,
+                "train_videos": sorted(train_paths),
+                "subject": subject_id,
+                "fold": fold_index + 1,
+            }
+            sig_raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            return {"key": hashlib.sha256(sig_raw.encode("utf-8")).hexdigest(), "payload": payload}
+
         for fold_idx, fold_data in enumerate(loso_folds):
             train_ds = fold_data["train"]
             test_ds = fold_data["test"]
@@ -1311,7 +1440,31 @@ class PipelineRunner:
             inference_ckpt = getattr(seg_workflow, "inference_checkpoint", None)
             seg_summary_path: Optional[str] = None
 
-            if train_enabled:
+            # --- Segmentation persistent cache check ---
+            _seg_sig = _segmentation_signature(
+                seg_cfg, seg_workflow.model_name,
+                getattr(seg_workflow, "preprocs", []),
+                getattr(seg_workflow, "roi_preprocs", []),
+                annotated_train_paths, seg_seed, scheme, subject, fold_idx,
+            )
+            _seg_sig_key = _seg_sig["key"]
+            _seg_cached_entry = (_seg_disk_cache.get(_seg_sig_key) or {}).get(seg_workflow.model_name)
+            _seg_cached_ckpt: Optional[str] = (
+                _seg_cached_entry.get("checkpoint")
+                if isinstance(_seg_cached_entry, dict) else None
+            )
+
+            if _seg_cached_ckpt and os.path.exists(_seg_cached_ckpt):
+                self._log(
+                    f"[SegCache] Cache hit for model={seg_workflow.model_name} – loading from: {_seg_cached_ckpt}"
+                )
+                _record_stage_skip(
+                    "segmentation_train", "segmentation", "cache hit",
+                    {"model": seg_workflow.model_name, "cached_checkpoint": _seg_cached_ckpt},
+                )
+                seg_workflow.load_checkpoint(_seg_cached_ckpt)
+                seg_workflow.best_checkpoint = _seg_cached_ckpt
+            elif train_enabled:
                 if annotated_train_paths:
                     with stage_scope(
                         "segmentation_train",
@@ -1357,6 +1510,16 @@ class PipelineRunner:
                         best_ckpt = getattr(seg_workflow, "best_checkpoint", None)
                         if best_ckpt:
                             stage_entry.setdefault("artifacts", {})["best_checkpoint"] = best_ckpt
+                            self._save_to_stage_cache(
+                                self._persistent_seg_cache_file, _seg_sig_key,
+                                seg_workflow.model_name,
+                                {"checkpoint": best_ckpt, "model_name": seg_workflow.model_name},
+                            )
+                            self._log(f"[SegCache] Saved checkpoint to persistent cache: {best_ckpt}")
+                            # also update in-memory so later folds in same run can reuse
+                            _seg_disk_cache.setdefault(_seg_sig_key, {})[seg_workflow.model_name] = {
+                                "checkpoint": best_ckpt
+                            }
                         _dump_meta()
                 else:
                     self._log("[Segmentation] Warning: no annotated training videos found; skipping training phase.")
@@ -1633,7 +1796,31 @@ class PipelineRunner:
                     {"config": clf_cfg},
                 ) as stage_entry:
                     try:
-                        run_subject_classification(
+                        # --- Classification persistent cache ---
+                        _clf_train_paths: List[str] = []
+                        try:
+                            _clf_train_paths = sorted({
+                                train_ds[i]["video_path"]
+                                for i in range(len(train_ds))
+                                if isinstance(train_ds[i], dict) and "video_path" in train_ds[i]
+                            })
+                        except Exception:
+                            pass
+                        _clf_seg_model_hint = getattr(seg_workflow, "model_name", "unknown")
+                        _clf_sig = _classification_signature(
+                            clf_cfg, _clf_train_paths, _clf_seg_model_hint, subject, fold_idx,
+                        )
+                        _clf_sig_key = _clf_sig["key"]
+                        _clf_model_key = (
+                            f"{(clf_cfg.get('feature_extractor') or {}).get('name', 'fe')}"
+                            f"_{(clf_cfg.get('classifier') or {}).get('name', 'clf')}"
+                        )
+                        _clf_cached_entry = (_clf_disk_cache.get(_clf_sig_key) or {}).get(_clf_model_key)
+                        _clf_cached_ckpt: Optional[str] = (
+                            _clf_cached_entry.get("checkpoint")
+                            if isinstance(_clf_cached_entry, dict) else None
+                        )
+                        _clf_result = run_subject_classification(
                             clf_cfg,
                             self.dataset_root,
                             train_ds,
@@ -1641,7 +1828,21 @@ class PipelineRunner:
                             out_dir,
                             self._log,
                             split_method=method,
+                            cached_classifier_path=_clf_cached_ckpt,
                         )
+                        if isinstance(_clf_result, dict):
+                            stage_entry["metrics"] = _clf_result
+                        # Save newly produced classifier to cache
+                        _clf_produced_pkl = os.path.join(out_dir, "classification", "classifier.pkl")
+                        if os.path.exists(_clf_produced_pkl):
+                            self._save_to_stage_cache(
+                                self._persistent_clf_cache_file, _clf_sig_key, _clf_model_key,
+                                {"checkpoint": _clf_produced_pkl, "model_key": _clf_model_key},
+                            )
+                            self._log(f"[ClfCache] Saved classifier to persistent cache: {_clf_produced_pkl}")
+                            _clf_disk_cache.setdefault(_clf_sig_key, {})[_clf_model_key] = {
+                                "checkpoint": _clf_produced_pkl
+                            }
                     except Exception as _e_cls:
                         stage_entry["status"] = "failed"
                         stage_entry["error"] = {"type": type(_e_cls).__name__, "message": str(_e_cls)}
@@ -1670,6 +1871,15 @@ class PipelineRunner:
                 if seg_summary_path:
                     seg_artifacts["summary_path"] = seg_summary_path
                 seg_artifacts["predictions_root"] = predictions_root
+
+            # Classification metrics: read from classification/summary.json produced by engine
+            _clf_summary_path = os.path.join(out_dir, "classification", "summary.json")
+            if os.path.exists(_clf_summary_path):
+                try:
+                    with open(_clf_summary_path, "r", encoding="utf-8") as f:
+                        metrics_section["classification"] = json.load(f)
+                except Exception:
+                    pass
 
             meta["runtime"]["finished_at"] = datetime.utcnow().isoformat() + "Z"
             meta["runtime"]["duration_sec"] = max(0.0, time.perf_counter() - experiment_start)

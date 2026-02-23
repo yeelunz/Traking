@@ -111,6 +111,33 @@ def _summarise_segmentation(metrics: Optional[Dict[str, Dict[str, Dict[str, Any]
     return {key: (sum(vals) / len(vals) if vals else None) for key, vals in values.items()}
 
 
+def _summarise_classification(clf_metrics: Optional[Dict[str, Any]], exp_path: Optional[Path] = None) -> Dict[str, Optional[float]]:
+    """Extract classification summary from metadata dict or classification/summary.json file.
+
+    Tries ``clf_metrics`` (from metadata.json) first, then falls back to reading
+    ``<exp_path>/classification/summary.json`` directly (for older experiment dirs).
+    """
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(clf_metrics, dict) and clf_metrics:
+        data = clf_metrics
+    elif exp_path is not None:
+        summary_file = exp_path / "classification" / "summary.json"
+        if summary_file.is_file():
+            try:
+                data = json.loads(summary_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    if not isinstance(data, dict) or not data:
+        return {}
+    return {
+        "accuracy": data.get("accuracy"),
+        "f1": data.get("f1") if data.get("f1") is not None else data.get("f1_positive"),
+        "precision": data.get("precision") if data.get("precision") is not None else data.get("precision_positive"),
+        "recall": data.get("recall") if data.get("recall") is not None else data.get("recall_positive"),
+        "balanced_accuracy": data.get("balanced_accuracy"),
+    }
+
+
 def _overall_stage_status(stages: Sequence[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
     summary: List[Dict[str, Any]] = []
     has_failed = False
@@ -171,6 +198,10 @@ def _collect_experiments(results_root: Path) -> List[Dict[str, Any]]:
         stage_status, stage_details = _overall_stage_status(stages)
         det_summary = _summarise_detection(metrics_root.get("detection")) if isinstance(metrics_root, dict) else {}
         seg_summary = _summarise_segmentation(metrics_root.get("segmentation")) if isinstance(metrics_root, dict) else {}
+        clf_summary = _summarise_classification(
+            metrics_root.get("classification") if isinstance(metrics_root, dict) else None,
+            exp_path=entry,
+        )
         started = _parse_iso8601(runtime.get("started_at")) if isinstance(runtime, dict) else None
         finished = _parse_iso8601(runtime.get("finished_at")) if isinstance(runtime, dict) else None
         duration = runtime.get("duration_sec") if isinstance(runtime, dict) else None
@@ -193,6 +224,7 @@ def _collect_experiments(results_root: Path) -> List[Dict[str, Any]]:
             "metrics": {
                 "detection": det_summary,
                 "segmentation": seg_summary,
+                "classification": clf_summary,
             },
         }
         records.append(record)
@@ -214,6 +246,14 @@ def _sort_records(records: List[Dict[str, Any]], key_name: str, descending: bool
             metrics = rec.get("metrics", {}).get("segmentation", {})
             val = metrics.get("dice_mean")
             return float(val) if isinstance(val, (int, float)) else -1.0
+        if key_name == "clf_acc":
+            metrics = rec.get("metrics", {}).get("classification", {})
+            val = metrics.get("accuracy")
+            return float(val) if isinstance(val, (int, float)) else -1.0
+        if key_name == "clf_f1":
+            metrics = rec.get("metrics", {}).get("classification", {})
+            val = metrics.get("f1")
+            return float(val) if isinstance(val, (int, float)) else -1.0
         return rec.get("relative_path")
 
     records.sort(key=sort_key, reverse=descending)
@@ -229,6 +269,10 @@ def _print_table(records: Sequence[Dict[str, Any]]) -> None:
         Column("Det FPS", 8, lambda r: _format_float(r.get("metrics", {}).get("detection", {}).get("fps"))),
         Column("Seg Dice", 9, lambda r: _format_float(r.get("metrics", {}).get("segmentation", {}).get("dice_mean"))),
         Column("Seg FPS", 8, lambda r: _format_float(r.get("metrics", {}).get("segmentation", {}).get("fps_mean"))),
+        Column("Clf Acc", 8, lambda r: _format_percent(r.get("metrics", {}).get("classification", {}).get("accuracy"))),
+        Column("Clf F1", 7, lambda r: _format_float(r.get("metrics", {}).get("classification", {}).get("f1"))),
+        Column("Clf Prec", 8, lambda r: _format_float(r.get("metrics", {}).get("classification", {}).get("precision"))),
+        Column("Clf Rec", 8, lambda r: _format_float(r.get("metrics", {}).get("classification", {}).get("recall"))),
         Column("Videos", 11, lambda r: _format_ratio(
             r.get("dataset", {}).get("train_videos"),
             r.get("dataset", {}).get("test_videos"),
@@ -301,6 +345,10 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
         <th data-key=\"metrics.detection.fps\">Det FPS</th>
         <th data-key=\"metrics.segmentation.dice_mean\">Seg Dice</th>
         <th data-key=\"metrics.segmentation.fps_mean\">Seg FPS</th>
+        <th data-key=\"metrics.classification.accuracy\">Clf Acc (%)</th>
+        <th data-key=\"metrics.classification.f1\">Clf F1</th>
+        <th data-key=\"metrics.classification.precision\">Clf Prec</th>
+        <th data-key=\"metrics.classification.recall\">Clf Rec</th>
         <th data-key=\"dataset.train_videos\">Train Videos</th>
         <th data-key=\"dataset.test_videos\">Test Videos</th>
         <th data-key=\"relative_path\">Folder</th>
@@ -341,6 +389,10 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
         const detFps = formatFloat(valueByKey(row, 'metrics.detection.fps'));
         const segDice = formatFloat(valueByKey(row, 'metrics.segmentation.dice_mean'));
         const segFps = formatFloat(valueByKey(row, 'metrics.segmentation.fps_mean'));
+        const clfAcc = formatPercent(valueByKey(row, 'metrics.classification.accuracy'));
+        const clfF1 = formatFloat(valueByKey(row, 'metrics.classification.f1'));
+        const clfPrec = formatFloat(valueByKey(row, 'metrics.classification.precision'));
+        const clfRec = formatFloat(valueByKey(row, 'metrics.classification.recall'));
         const cells = [
           started,
           row.name || '-',
@@ -350,6 +402,10 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
           detFps,
           segDice,
           segFps,
+          clfAcc,
+          clfF1,
+          clfPrec,
+          clfRec,
           valueByKey(row, 'dataset.train_videos') ?? '-',
           valueByKey(row, 'dataset.test_videos') ?? '-',
           row.relative_path || '-',
@@ -394,7 +450,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarise tracking experiments using metadata.json outputs.")
     parser.add_argument("--results-root", type=Path, default=Path("results"), help="Directory containing experiment runs")
     parser.add_argument("--status", choices=["OK", "FAILED", "PARTIAL"], nargs="*", help="Filter by overall status")
-    parser.add_argument("--sort", choices=["start", "duration", "det@50", "seg_dice"], default="start", help="Column to sort by")
+    parser.add_argument("--sort", choices=["start", "duration", "det@50", "seg_dice", "clf_acc", "clf_f1"], default="start", help="Column to sort by")
     parser.add_argument("--descending", action="store_true", help="Sort in descending order")
     parser.add_argument("--limit", type=int, default=0, help="Limit the number of rows displayed")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of a text table")

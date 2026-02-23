@@ -185,6 +185,7 @@ queue:
           enabled: false      # classification no longer requires seg masks
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_only_dt: &clf_motion_only_dt
         enabled: true
@@ -200,6 +201,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_only_svm: &clf_motion_only_svm
         enabled: true
@@ -216,6 +218,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_only_lgbm: &clf_motion_only_lgbm
         enabled: true
@@ -231,6 +234,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_texture_rf: &clf_motion_texture_rf
         enabled: true
@@ -246,6 +250,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_texture_dt: &clf_motion_texture_dt
         enabled: true
@@ -261,6 +266,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_texture_svm: &clf_motion_texture_svm
         enabled: true
@@ -277,6 +283,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
       clf_motion_texture_lgbm: &clf_motion_texture_lgbm
         enabled: true
@@ -292,6 +299,7 @@ queue:
           enabled: false
           params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        level: video
 
   # ═════════════════════════════════════════════════════════════
   # MedNeXt × 8 分類組合  (01–08)

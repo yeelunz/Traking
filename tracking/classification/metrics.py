@@ -62,4 +62,8 @@ def summarise_classification(
             metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
         except Exception:
             metrics["roc_auc"] = 0.0
+    # Friendly short-key aliases
+    metrics["precision"] = metrics["precision_positive"]
+    metrics["recall"] = metrics["recall_positive"]
+    metrics["f1"] = metrics["f1_positive"]
     return metrics
