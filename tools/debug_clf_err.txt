@@ -1,0 +1,18 @@
+Cannot import official MultiRocket from libs: No module named 'numba'
+Traceback (most recent call last):
+  File "C:\Users\User\Desktop\code\Traking\tools\debug_clf_replay.py", line 245, in main
+    result = run_subject_classification(
+        clf_cfg,
+    ...<5 lines>...
+        split_method=method,
+    )
+  File "C:\Users\User\Desktop\code\Traking\tracking\classification\engine.py", line 238, in run_subject_classification
+    return _run_subject_classification_impl(
+        config, dataset_root, train_dataset, test_predictions, results_dir, logger,
+        split_method=split_method, cached_classifier_path=cached_classifier_path,
+    )
+  File "C:\Users\User\Desktop\code\Traking\tracking\classification\engine.py", line 433, in _run_subject_classification_impl
+    raise RuntimeError(
+        "Segmentation predictions missing for {} frame(s). Check segmentation stage outputs.".format(missing_masks)
+    )
+RuntimeError: Segmentation predictions missing for 19 frame(s). Check segmentation stage outputs.

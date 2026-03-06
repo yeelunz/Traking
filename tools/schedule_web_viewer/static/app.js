@@ -1445,6 +1445,111 @@ async function loadGallery(galleryId, expId, category) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Voting / modality analysis
+// ---------------------------------------------------------------------------
+
+const MODAL_DISPLAY = {
+  doppler:   'Doppler',
+  grasp:     'Grasp / G-R',
+  relax:     'Relax / R-G',
+  rest:      'Rest / R1',
+  rest_post: 'Rest post / R2',
+};
+const MODAL_SHORT = {
+  doppler: 'D', grasp: 'G', relax: 'Rel', rest: 'R', rest_post: 'Rp',
+};
+
+function renderVotingSection(data) {
+  const section = document.getElementById('voting-section');
+  if (!section) return;
+  if (!data || !data.per_modality || !data.per_modality.length) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+
+  // Hint: which subjects were tested
+  const subjects = new Set();
+  (data.five_voting?.details || []).forEach((d) => subjects.add(d.subject_id));
+  const hint = document.getElementById('voting-subjects-hint');
+  if (hint) hint.textContent = `測試受試者：${[...subjects].sort().join('、')}`;
+
+  // ── Per-modality accuracy table ──
+  const modTable = document.getElementById('voting-modality-table');
+  if (modTable) {
+    const maxAcc = Math.max(0.001, ...data.per_modality.map((m) => m.accuracy ?? 0));
+    const thead = '<tr><th>模態</th><th>正確 / 總數</th><th>準確率</th></tr>';
+    const tbody = data.per_modality.map((m) => {
+      const acc = m.accuracy !== null && m.accuracy !== undefined ? m.accuracy : null;
+      const pct = acc !== null ? `${(acc * 100).toFixed(0)}%` : '—';
+      const barW = acc !== null ? Math.round((acc / maxAcc) * 72) : 0;
+      const barHtml = `<div class="voting-bar-cell"><span>${pct}</span><div class="voting-bar" style="width:${barW}px"></div></div>`;
+      return `<tr>
+        <td>${MODAL_DISPLAY[m.modality] || m.modality}</td>
+        <td style="color:#9ea6c6">${m.correct} / ${m.total}</td>
+        <td>${barHtml}</td>
+      </tr>`;
+    }).join('');
+    modTable.innerHTML = thead + tbody;
+  }
+
+  // ── 5-voting result ──
+  const fiveEl = document.getElementById('voting-five-result');
+  if (fiveEl && data.five_voting) {
+    const fv = data.five_voting;
+    const pct = fv.accuracy !== null ? `${(fv.accuracy * 100).toFixed(0)}%` : '—';
+    const statColor = fv.accuracy === 1 ? '#22c55e' : fv.accuracy === 0 ? '#ef4444' : '#f59e0b';
+    const detailRows = (fv.details || []).map((d) => {
+      const icon = d.correct ? '✅' : '❌';
+      const trueLabel = d.true_label === 1 ? '病患' : '正常';
+      const voteLabel = d.vote === 1 ? '病患' : '正常';
+      return `<tr>
+        <td>${d.subject_id}</td>
+        <td>${trueLabel}</td>
+        <td style="color:#9ea6c6">${d.votes_for_positive} / ${d.total_votes}</td>
+        <td>${voteLabel}</td>
+        <td>${icon}</td>
+      </tr>`;
+    }).join('');
+    fiveEl.innerHTML =
+      `<p class="voting-stat" style="color:${statColor}">${pct}
+        <small>(${fv.correct} / ${fv.total} subjects)</small>
+      </p>
+      <table class="voting-subject-table">
+        <thead><tr><th>Subject</th><th>真實</th><th>正票 / 總票</th><th>投票結果</th><th></th></tr></thead>
+        <tbody>${detailRows}</tbody>
+      </table>`;
+  }
+
+  // ── C(5,3) combos table ──
+  const combosTable = document.getElementById('voting-combos-table');
+  if (combosTable && data.top_combos) {
+    const maxComboAcc = Math.max(0.001, ...data.top_combos.map((c) => c.accuracy ?? 0));
+    const thead = '<tr><th></th><th>組合</th><th>準確率</th><th>正確 / 總數</th><th>各受試者詳情</th></tr>';
+    const tbody = data.top_combos.map((c, idx) => {
+      const rank = idx + 1;
+      const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : 'rank-other';
+      const badge = `<span class="rank-badge ${rankClass}">${rank}</span>`;
+      const combo = c.modalities.map((m) => MODAL_SHORT[m] || m).join(' + ');
+      const acc = c.accuracy !== null ? `${(c.accuracy * 100).toFixed(0)}%` : '—';
+      const detail = (c.details || []).map((d) => {
+        const icon = d.correct ? '✅' : '❌';
+        return `<span style="margin-right:0.6rem;white-space:nowrap">${d.subject_id}: ${d.votes_for_positive}/${d.total_votes} ${icon}</span>`;
+      }).join('');
+      const rowCls = c.accuracy === maxComboAcc ? 'top-rank' : c.accuracy !== null && c.accuracy < 0.6 ? 'mid-rank' : '';
+      return `<tr class="${rowCls}">
+        <td style="width:2.2rem;padding-right:0.25rem">${badge}</td>
+        <td style="font-weight:${rank <= 3 ? 600 : 400}">${combo}</td>
+        <td>${acc}</td>
+        <td style="color:#9ea6c6">${c.correct} / ${c.total}</td>
+        <td style="font-size:0.82rem;color:#7e86a8">${detail}</td>
+      </tr>`;
+    }).join('');
+    combosTable.innerHTML = thead + tbody;
+  }
+}
+
 async function selectExperiment(expId) {
   const target = state.experiments.find((exp) => exp.id === expId);
   if (!target) {
@@ -1457,6 +1562,10 @@ async function selectExperiment(expId) {
   hideWelcome();
   resetFoldControls();
   hideLosoOverview();
+
+  // Clear voting section while loading
+  const votingSection = document.getElementById('voting-section');
+  if (votingSection) votingSection.classList.add('hidden');
 
   const params = new URLSearchParams({ exp_id: expId });
   const res = await fetchJSON(`/api/experiments/metrics?${params.toString()}`);
@@ -1492,6 +1601,18 @@ async function selectExperiment(expId) {
     }
   } else {
     await renderExperimentPayload(res, expId, `${res.experiment?.name || expId}`);
+
+    // Fetch and render voting analysis for single (non-aggregate) experiments
+    if (target.has_classification) {
+      try {
+        const votingParams2 = new URLSearchParams({ exp_id: expId });
+        const votingRes = await fetchJSON(`/api/experiments/voting?${votingParams2.toString()}`);
+        renderVotingSection(votingRes);
+      } catch (e) {
+        console.warn('Voting analysis unavailable:', e);
+        if (votingSection) votingSection.classList.add('hidden');
+      }
+    }
   }
 
   renderGroupOverview();

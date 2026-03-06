@@ -1,13 +1,12 @@
 queue:
-  # Common defaults
+  # base config derived from mednext_loso_schemeA_aug_fliponly_logdr.yaml
   - label: "00_defs"
     config:
       seed: 42
-      dataset: &dataset_subject
-        root: "C:\\Users\\User\\Desktop\\超音波檔案-20251126T083302Z-1-001"
+      dataset: &dataset_merged
+        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged"
         split:
-          method: loso
-          loso: true
+          method: subject_level   # simple train/test split
           ratios: [0.8, 0.2]
           k_fold: 1
       experiments: []
@@ -25,7 +24,7 @@ queue:
       output: &output_defaults
         results_root: results
 
-      # ROI detector: yolov11l pretrained, always re-train 30 epochs
+      # ROI detector (same as original)
       detector: &detector_yolo11l
         weights: models/detection/yolo11l.pt
         conf: 0.05
@@ -44,12 +43,17 @@ queue:
         include_empty_frames: false
         force_cpu_if_no_cuda: true
 
-      # CLAHE default
+      # preproc definitions
+      log_dr_default: &log_dr_default
+        method: log
+        clip_percentile: 99.5
+        eps: 1.0e-6
+        per_channel: true
+
       clahe_default: &clahe_default
         clipLimit: 1.5
         tileGridSize: [8, 8]
 
-      # AUGMENT (flip only)
       augment_fliponly: &augment_fliponly
         hflip_prob: 0.5
         vflip_prob: 0.0
@@ -60,7 +64,7 @@ queue:
         noise_std: 0.0
         seed: 1337
 
-      # Segmentation configs
+      # segmentation anchors (4 models)
       segmentation_mednext: &seg_mednext
         model:
           name: mednext
@@ -177,15 +181,119 @@ queue:
         train: true
         inference_checkpoint: null
 
-  # CLAHE + AUGMENT(flip only) (scheme A), YOLOv11 ROI
-  - label: "01_claheA_aug_flip_yolo11l_mednext"
+  # experiments: two preprocessing orders × four seg models
+  - label: "01_clahe_then_logdr_mednext"
     config:
       seed: 42
-      dataset: *dataset_subject
+      dataset: *dataset_merged
       experiments:
-        - name: "claheA_aug_flip_yolo11l_mednext"
+        - name: "clahe_logdrA_aug_flip_yolo11l_mednext"
           preproc_scheme: "A"
           pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
+            - type: preproc
+              name: AUGMENT
+              params: *augment_fliponly
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "02_clahe_then_logdr_nnunet"
+    config:
+      seed: 42
+      dataset: *dataset_merged
+      experiments:
+        - name: "clahe_logdrA_aug_flip_yolo11l_nnunet"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
+            - type: preproc
+              name: AUGMENT
+              params: *augment_fliponly
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "03_clahe_then_logdr_unetpp"
+    config:
+      seed: 42
+      dataset: *dataset_merged
+      experiments:
+        - name: "clahe_logdrA_aug_flip_yolo11l_unetpp"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
+            - type: preproc
+              name: AUGMENT
+              params: *augment_fliponly
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "04_clahe_then_logdr_deeplabv3p"
+    config:
+      seed: 42
+      dataset: *dataset_merged
+      experiments:
+        - name: "clahe_logdrA_aug_flip_yolo11l_deeplabv3p"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
+            - type: preproc
+              name: AUGMENT
+              params: *augment_fliponly
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: {enabled: false}
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  # the reverse order pipeline logdr→clahe
+  - label: "05_logdr_then_clahe_mednext"
+    config:
+      seed: 42
+      dataset: *dataset_merged
+      experiments:
+        - name: "logdr_claheA_aug_flip_yolo11l_mednext"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
             - type: preproc
               name: CLAHE
               params: *clahe_default
@@ -200,14 +308,17 @@ queue:
       segmentation: *seg_mednext
       output: *output_defaults
 
-  - label: "02_claheA_aug_flip_yolo11l_nnunet"
+  - label: "06_logdr_then_clahe_nnunet"
     config:
       seed: 42
-      dataset: *dataset_subject
+      dataset: *dataset_merged
       experiments:
-        - name: "claheA_aug_flip_yolo11l_nnunet"
+        - name: "logdr_claheA_aug_flip_yolo11l_nnunet"
           preproc_scheme: "A"
           pipeline:
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
             - type: preproc
               name: CLAHE
               params: *clahe_default
@@ -222,14 +333,17 @@ queue:
       segmentation: *seg_nnunet
       output: *output_defaults
 
-  - label: "03_claheA_aug_flip_yolo11l_unetpp"
+  - label: "07_logdr_then_clahe_unetpp"
     config:
       seed: 42
-      dataset: *dataset_subject
+      dataset: *dataset_merged
       experiments:
-        - name: "claheA_aug_flip_yolo11l_unetpp"
+        - name: "logdr_claheA_aug_flip_yolo11l_unetpp"
           preproc_scheme: "A"
           pipeline:
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
             - type: preproc
               name: CLAHE
               params: *clahe_default
@@ -244,14 +358,17 @@ queue:
       segmentation: *seg_unetpp
       output: *output_defaults
 
-  - label: "04_claheA_aug_flip_yolo11l_deeplabv3p"
+  - label: "08_logdr_then_clahe_deeplabv3p"
     config:
       seed: 42
-      dataset: *dataset_subject
+      dataset: *dataset_merged
       experiments:
-        - name: "claheA_aug_flip_yolo11l_deeplabv3p"
+        - name: "logdr_claheA_aug_flip_yolo11l_deeplabv3p"
           preproc_scheme: "A"
           pipeline:
+            - type: preproc
+              name: LOG_DR
+              params: *log_dr_default
             - type: preproc
               name: CLAHE
               params: *clahe_default

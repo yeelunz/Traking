@@ -1,0 +1,155 @@
+Result dir: results/2026-03-06_15-10-16_schedule_4exp/2026-03-06_15-10-16_mednext_clahe_global_mts_rf
+Dataset root: C:\Users\User\Desktop\code\Traking\dataset\merged
+Classification config: {
+  "enabled": true,
+  "feature_extractor": {
+    "name": "motion_texture_static",
+    "params": {
+      "kalman_process_noise": 0.01,
+      "kalman_measurement_noise": 0.1,
+      "resnet_device": "auto",
+      "aggregate_stats": [
+        "mean",
+        "std",
+        "min",
+        "max"
+      ]
+    }
+  },
+  "classifier": {
+    "name": "random_forest",
+    "params": {
+      "n_estimators": 200,
+      "max_depth": null,
+      "min_samples_leaf": 1,
+      "class_weight": "balanced",
+      "random_state": 42,
+      "n_jobs": -1
+    }
+  },
+  "segmentation": {
+    "enabled": true,
+    "params": {}
+  },
+  "label_file": "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt",
+  "level": "video"
+}
+
+Loading predictions from: results/2026-03-06_15-10-16_schedule_4exp/2026-03-06_15-10-16_mednext_clahe_global_mts_rf\test\detection\predictions_by_video
+Models found in predictions: ['YOLOv11']
+  YOLOv11: 10 test videos
+    D.avi: 10 frames
+    doppler.avi: 7 frames
+    G-R.avi: 20 frames
+    Grasp.avi: 16 frames
+    R-G.avi: 19 frames
+    R1.avi: 19 frames
+    R2.avi: 20 frames
+    Relax.avi: 16 frames
+    Rest.avi: 16 frames
+    Rest post.avi: 16 frames
+
+Train preview (5): ['n004\\D.avi', 'n004\\G-R.avi', 'n004\\R-G.avi', 'n004\\R1.avi', 'n004\\R2.avi']
+Total dataset videos: 56
+Annotated videos: 56
+
+Split config: {'method': 'subject_level', 'loso': False, 'ratios': [0.8, 0.2], 'k_fold': 1}
+Train videos: 46, Test videos: 10
+
+============================================================
+Running classification...
+============================================================
+[Classification] Target level overridden by config: video
+[Classification] Target level: video
+[Classification] Loaded 11 subject labels from C:\Users\User\Desktop\code\Traking\dataset\merged\ann.txt
+[Segmentation] Epoch 1/20 loss=0.3267
+[Segmentation] Epoch 2/20 loss=0.2273
+[Segmentation] Epoch 3/20 loss=0.2198
+[Segmentation] Epoch 4/20 loss=0.2071
+[Segmentation] Epoch 5/20 loss=0.1997
+[Segmentation] Epoch 6/20 loss=0.1946
+[Segmentation] Epoch 7/20 loss=0.1891
+[Segmentation] Epoch 8/20 loss=0.1805
+[Segmentation] Epoch 9/20 loss=0.1751
+[Segmentation] Epoch 10/20 loss=0.1679
+[Segmentation] Epoch 11/20 loss=0.1576
+[Segmentation] Epoch 12/20 loss=0.1527
+[Segmentation] Epoch 13/20 loss=0.1457
+[Segmentation] Epoch 14/20 loss=0.1363
+[Segmentation] Epoch 15/20 loss=0.1345
+[Segmentation] Epoch 16/20 loss=0.1234
+[Segmentation] Epoch 17/20 loss=0.1179
+[Segmentation] Epoch 18/20 loss=0.1118
+[Segmentation] Epoch 19/20 loss=0.1043
+[Segmentation] Epoch 20/20 loss=0.1011
+[Segmentation] Training summary: train_loss=0.1011
+[Segmentation] Loaded checkpoint: C:\Users\User\Desktop\code\Traking\results\2026-03-06_15-10-16_schedule_4exp\2026-03-06_15-10-16_mednext_clahe_global_mts_rf\_debug_clf\train_full\segmentation\classification\segmentation_last.pt
+[Classification] Prepared GT segmentation trajectories for 46 train videos
+[Segmentation] Summary metrics | seg_model=unetpp det_model=YOLOv11: dice_mean=0.2170, dice_std=0.2299, iou_mean=0.1429, iou_std=0.1656, centroid_mean=66.1878, centroid_std=45.4521, fps_mean=122.0436, fps_std=19.5286
+[Classification] Video D: extracted 7 sample(s)
+[Classification] Video G-R: extracted 16 sample(s)
+[Classification] Video R-G: extracted 16 sample(s)
+[Classification] Video R1: extracted 17 sample(s)
+[Classification] Video R2: extracted 16 sample(s)
+[Classification] Video Grasp: extracted 20 sample(s)
+[Classification] Video Relax: extracted 20 sample(s)
+[Classification] Video Rest post: extracted 20 sample(s)
+[Classification] Video Rest: extracted 20 sample(s)
+[Classification] Video doppler: extracted 10 sample(s)
+[Classification] Video Grasp: extracted 13 sample(s)
+[Classification] Video Relax: extracted 13 sample(s)
+[Classification] Video Rest post: extracted 13 sample(s)
+[Classification] Video Rest: extracted 12 sample(s)
+[Classification] Video doppler: extracted 7 sample(s)
+[Classification] Video D: extracted 7 sample(s)
+[Classification] Video G-R: extracted 13 sample(s)
+[Classification] Video R-G: extracted 13 sample(s)
+[Classification] Video R1: extracted 13 sample(s)
+[Classification] Video R2: extracted 13 sample(s)
+[Classification] Video D: extracted 7 sample(s)
+[Classification] Video G-R: extracted 16 sample(s)
+[Classification] Video R-G: extracted 16 sample(s)
+[Classification] Video R1: extracted 16 sample(s)
+[Classification] Video R2: extracted 16 sample(s)
+[Classification] Video D: extracted 6 sample(s)
+[Classification] Video G-R: extracted 14 sample(s)
+[Classification] Video R-G: extracted 14 sample(s)
+[Classification] Video R1: extracted 14 sample(s)
+[Classification] Video R2: extracted 14 sample(s)
+[Classification] Video _2: extracted 1 sample(s)
+[Classification] Video D: extracted 10 sample(s)
+[Classification] Video G-R: extracted 20 sample(s)
+[Classification] Video R-G: extracted 20 sample(s)
+[Classification] Video R1: extracted 20 sample(s)
+[Classification] Video R2: extracted 19 sample(s)
+[Classification] Video Grasp: extracted 20 sample(s)
+[Classification] Video Relax: extracted 19 sample(s)
+[Classification] Video Rest post: extracted 20 sample(s)
+[Classification] Video Rest: extracted 16 sample(s)
+[Classification] Video doppler: extracted 10 sample(s)
+[Classification] Video Grasp: extracted 16 sample(s)
+[Classification] Video Relax: extracted 16 sample(s)
+[Classification] Video Rest post: extracted 16 sample(s)
+[Classification] Video Rest: extracted 16 sample(s)
+[Classification] Video doppler: extracted 7 sample(s)
+[PCA_FIT_DEBUG] X.shape=(46, 1024), target_dim=64, X.dtype=float64
+[Classification] X_train shape=(11, 128), n_entities=11, n_feat_keys=128
+[Classification] Training classifier on 11 entities
+[Classification] source_model not specified, defaulting to YOLOv11
+[Classification] TRACEBACK:
+Traceback (most recent call last):
+  File "C:\Users\User\Desktop\code\Traking\tracking\classification\engine.py", line 238, in run_subject_classification
+    return _run_subject_classification_impl(
+        config, dataset_root, train_dataset, test_predictions, results_dir, logger,
+        split_method=split_method, cached_classifier_path=cached_classifier_path,
+    )
+  File "C:\Users\User\Desktop\code\Traking\tracking\classification\engine.py", line 433, in _run_subject_classification_impl
+    raise RuntimeError(
+        "Segmentation predictions missing for {} frame(s). Check segmentation stage outputs.".format(missing_masks)
+    )
+RuntimeError: Segmentation predictions missing for 19 frame(s). Check segmentation stage outputs.
+
+
+[ERROR] Classification FAILED: Segmentation predictions missing for 19 frame(s). Check segmentation stage outputs.
+
+Full traceback:

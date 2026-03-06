@@ -557,6 +557,189 @@ table td {
   color: #f8c146;
 }
 
+/* ── Voting / Modality Analysis ── */
+#voting-section {
+  margin-top: 2rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #1f2330;
+}
+
+.voting-section-header {
+  margin-bottom: 1rem;
+}
+
+.voting-section-header h3 {
+  margin: 0 0 0.2rem;
+}
+
+.voting-section-header p {
+  margin: 0;
+  font-size: 0.83rem;
+  color: #6e7594;
+}
+
+.voting-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (max-width: 900px) {
+  .voting-two-col { grid-template-columns: 1fr; }
+}
+
+.voting-card {
+  background: #141823;
+  border: 1px solid #21283a;
+  border-radius: 10px;
+  padding: 1rem 1.1rem 1.1rem;
+}
+
+.voting-card-title {
+  margin: 0 0 0.65rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #9ea6c6;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.voting-stat {
+  font-size: 2.2rem;
+  font-weight: 700;
+  line-height: 1;
+  margin: 0 0 0.5rem;
+}
+
+.voting-stat small {
+  font-size: 0.88rem;
+  font-weight: 400;
+  color: #7e86a8;
+  margin-left: 0.35rem;
+}
+
+.voting-modality-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  margin-top: 0;
+}
+
+.voting-modality-table th {
+  background: #0f1218;
+  color: #7e86a8;
+  padding: 0.3rem 0.5rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.voting-modality-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid #1a1f2d;
+  vertical-align: middle;
+}
+
+.voting-bar-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.voting-bar {
+  flex-shrink: 0;
+  height: 8px;
+  border-radius: 4px;
+  background: #4e8cff;
+  min-width: 2px;
+}
+
+.voting-subject-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 0.6rem;
+}
+
+.voting-subject-table th {
+  background: #0f1218;
+  color: #7e86a8;
+  padding: 0.3rem 0.45rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.voting-subject-table td {
+  padding: 0.32rem 0.45rem;
+  border-bottom: 1px solid #1a1f2d;
+}
+
+.voting-combos-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.65rem;
+  margin-bottom: 0.65rem;
+}
+
+.voting-combos-header h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.voting-combos-hint {
+  font-size: 0.78rem;
+  color: #6e7594;
+}
+
+.voting-combos-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  margin-top: 0;
+  margin-bottom: 2rem;
+}
+
+.voting-combos-table th {
+  background: #0f1218;
+  color: #7e86a8;
+  padding: 0.38rem 0.6rem;
+  font-weight: 500;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.voting-combos-table td {
+  padding: 0.38rem 0.6rem;
+  border-bottom: 1px solid #1a1f2d;
+  vertical-align: middle;
+}
+
+.voting-combos-table tr.top-rank {
+  background: rgba(63, 140, 255, 0.05);
+}
+
+.voting-combos-table tr.mid-rank {
+  opacity: 0.82;
+}
+
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  border-radius: 50%;
+  font-size: 0.72rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.rank-1 { background: rgba(250, 204, 21, 0.18); color: #facc15; }
+.rank-2 { background: rgba(203, 213, 225, 0.15); color: #cbd5e1; }
+.rank-3 { background: rgba(234, 138, 8, 0.15);  color: #e09d30; }
+.rank-other { background: rgba(255,255,255,0.05); color: #555e7a; }
+
 /* Predictions table */
 #classification-predictions-table {
   margin-top: 0.5rem;

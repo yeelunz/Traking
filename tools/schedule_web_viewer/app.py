@@ -3,16 +3,147 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
+from itertools import combinations
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import re
 from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively replace NaN / ±Inf floats with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Voting / modality analysis
+# ---------------------------------------------------------------------------
+
+# Maps raw entity_id strings (from predictions.json) → canonical modality name.
+# Sick subjects use long English names; normal subjects use short codes.
+_MODAL_MAP: Dict[str, str] = {
+    # sick subject naming
+    "doppler":   "doppler",
+    "Grasp":     "grasp",
+    "Relax":     "relax",
+    "Rest":      "rest",
+    "Rest post": "rest_post",
+    # normal subject naming
+    "D":   "doppler",
+    "G-R": "grasp",
+    "R-G": "relax",
+    "R1":  "rest",
+    "R2":  "rest_post",
+}
+
+_MODALITIES: List[str] = ["doppler", "grasp", "relax", "rest", "rest_post"]
+
+
+def _compute_voting_analysis(predictions: List[Dict]) -> Dict:
+    """Compute per-modality accuracy and voting analysis from predictions.json entries.
+
+    Each entry: {entity_id, subject_id, label_true, label_pred, prob_positive}.
+    Returns a dict with keys: modalities, per_modality, five_voting, top_combos.
+    """
+    # Group by subject_id → {canonical_modality: {pred, true, prob}}
+    subjects: Dict[str, Dict[str, Dict]] = {}
+    for item in predictions:
+        entity_id = item.get("entity_id", "")
+        subject_id = item.get("subject_id", "")
+        canonical = _MODAL_MAP.get(str(entity_id))
+        if canonical is None:
+            continue
+        if subject_id not in subjects:
+            subjects[subject_id] = {}
+        subjects[subject_id][canonical] = {
+            "pred": item.get("label_pred"),
+            "true": item.get("label_true"),
+            "prob": item.get("prob_positive"),
+        }
+
+    if not subjects:
+        return {"modalities": _MODALITIES, "per_modality": [], "five_voting": None, "top_combos": []}
+
+    # Per-modality accuracy
+    per_modality: List[Dict] = []
+    for m in _MODALITIES:
+        correct = 0
+        total = 0
+        for subj_data in subjects.values():
+            if m not in subj_data:
+                continue
+            total += 1
+            if subj_data[m]["pred"] == subj_data[m]["true"]:
+                correct += 1
+        per_modality.append({
+            "modality": m,
+            "correct": correct,
+            "total": total,
+            "accuracy": correct / total if total > 0 else None,
+        })
+
+    def _vote_result(mod_list: List[str]) -> Dict:
+        """Majority vote across selected modalities for each subject."""
+        correct = 0
+        total = 0
+        details: List[Dict] = []
+        for subj_id, subj_data in sorted(subjects.items()):
+            avail = [m for m in mod_list if m in subj_data]
+            if not avail:
+                continue
+            # All modalities for a given subject share the same true label
+            true_label = subj_data[avail[0]]["true"]
+            votes_pos = sum(subj_data[m]["pred"] for m in avail if subj_data[m]["pred"] is not None)
+            vote = 1 if votes_pos > len(avail) / 2 else 0
+            is_correct = (vote == true_label)
+            if is_correct:
+                correct += 1
+            total += 1
+            details.append({
+                "subject_id": subj_id,
+                "true_label": true_label,
+                "vote": vote,
+                "votes_for_positive": int(votes_pos),
+                "total_votes": len(avail),
+                "correct": is_correct,
+            })
+        return {
+            "correct": correct,
+            "total": total,
+            "accuracy": correct / total if total > 0 else None,
+            "details": details,
+        }
+
+    five_voting = _vote_result(_MODALITIES)
+    five_voting["modalities"] = _MODALITIES
+
+    top_combos: List[Dict] = []
+    for combo in combinations(_MODALITIES, 3):
+        result = _vote_result(list(combo))
+        result["modalities"] = list(combo)
+        top_combos.append(result)
+    top_combos.sort(key=lambda x: (x["accuracy"] or 0, x["correct"]), reverse=True)
+
+    return {
+        "modalities": _MODALITIES,
+        "per_modality": per_modality,
+        "five_voting": five_voting,
+        "top_combos": top_combos,
+    }
+
 
 
 def load_json(path: Path) -> Optional[Dict]:
@@ -504,7 +635,10 @@ def create_app(results_root: Path) -> FastAPI:
 
     @app.get("/api/experiments")
     def list_experiments():
-        return {"experiments": index.list_entries(), "root": str(index.root)}
+        return Response(
+            content=json.dumps(_sanitize({"experiments": index.list_entries(), "root": str(index.root)})),
+            media_type="application/json",
+        )
 
     @app.post("/api/experiments/refresh")
     def refresh_index():
@@ -598,11 +732,17 @@ def create_app(results_root: Path) -> FastAPI:
 
     @app.get("/api/experiments/{exp_id:path}/metrics")
     def experiment_metrics_path(exp_id: str):
-        return _experiment_payload(exp_id)
+        return Response(
+            content=json.dumps(_sanitize(_experiment_payload(exp_id))),
+            media_type="application/json",
+        )
 
     @app.get("/api/experiments/metrics")
     def experiment_metrics_query(exp_id: str = Query(..., description="Relative experiment id")):
-        return _experiment_payload(exp_id)
+        return Response(
+            content=json.dumps(_sanitize(_experiment_payload(exp_id))),
+            media_type="application/json",
+        )
 
     @app.get("/api/experiments/{exp_id:path}/visuals")
     def experiment_visuals_path(
@@ -787,6 +927,28 @@ def create_app(results_root: Path) -> FastAPI:
             raise HTTPException(status_code=400, detail="Unknown category")
 
         return {"items": items}
+
+    def _experiment_voting(exp_id: str):
+        try:
+            exp_path = index.get_path(exp_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        pred_file = exp_path / "classification" / "predictions.json"
+        if not pred_file.exists():
+            raise HTTPException(status_code=404, detail="predictions.json not found")
+        preds = load_json(pred_file) or []
+        return Response(
+            content=json.dumps(_sanitize(_compute_voting_analysis(preds))),
+            media_type="application/json",
+        )
+
+    @app.get("/api/experiments/{exp_id:path}/voting")
+    def experiment_voting_path(exp_id: str):
+        return _experiment_voting(exp_id)
+
+    @app.get("/api/experiments/voting")
+    def experiment_voting_query(exp_id: str = Query(..., description="Relative experiment id")):
+        return _experiment_voting(exp_id)
 
     @app.get("/media")
     def media(exp_id: str = Query(...), resource: str = Query(...)):

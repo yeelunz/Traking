@@ -1,0 +1,888 @@
+queue:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 00  共用錨點定義 (不執行任何實驗)
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 資料：dataset/merged（含患病 001–005 與正常 n001–n007）
+  # 分割策略：LOSO（Leave-One-Subject-Out）、subject level
+  # 前處理：CLAHE（無 LOG_DR）
+  # 偵測器：YOLOv11l
+  # 分割模型：DeepLabV3+, MedNeXt, nnUNet, UNet++
+  # 分類：video level
+  #   表格特徵 (motion_texture_static) → RF / XGBoost / LightGBM / TabPFN v2
+  #   時序特徵 (time_series)           → MultiRocket / PatchTST / TimeMachine
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "00_defs"
+    config:
+      seed: 42
+
+      dataset: &dataset_subject
+        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged"
+        split:
+          method: loso
+          loso: true
+          ratios: [0.8, 0.2]
+          k_fold: 1
+
+      experiments: []
+
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+
+      output: &output_defaults
+        results_root: results
+
+      # ── ROI 偵測器 ───────────────────────────────────────────────────────────
+      detector: &detector_yolo11l
+        weights: models/detection/yolo11l.pt
+        conf: 0.05
+        iou: 0.5
+        imgsz: 640
+        device: cuda
+        classes: null
+        max_det: 100
+        fallback_last_prediction: true
+        train_enabled: true
+        epochs: 30
+        batch: 8
+        lr0: 0.01
+        patience: 50
+        workers: 0
+        include_empty_frames: false
+        force_cpu_if_no_cuda: true
+
+      # ── 前處理：CLAHE only ──────────────────────────────────────────────────
+      clahe_default: &clahe_default
+        clipLimit: 1.5
+        tileGridSize: [8, 8]
+
+      # ── 分割模型 ──────────────────────────────────────────────────────────────
+      segmentation_deeplabv3p: &seg_deeplabv3p
+        model:
+          name: "deeplabv3+"
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 8
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_mednext: &seg_mednext
+        model:
+          name: mednext
+          params:
+            in_channels: 3
+            classes: 1
+            model_id: "B"
+            kernel_size: 3
+            deep_supervision: false
+            dim: "2d"
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_nnunet: &seg_nnunet
+        model:
+          name: nnunet
+          params:
+            dimension: 2
+            n_stages: 5
+            base_features: 32
+            deep_supervision: false
+            return_highres_only: true
+            init_weights: true
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      segmentation_unetpp: &seg_unetpp
+        model:
+          name: unetpp
+          params:
+            encoder_name: resnet34
+            encoder_weights: imagenet
+            in_channels: 3
+            classes: 1
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 8
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      # ── 分類標籤路徑 ───────────────────────────────────────────────────────────
+      label_file_merged: &label_file
+        "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+
+      # ── 特徵提取器：表格式（Motion + Texture + CTS Static）────────────────────
+      fe_mts: &fe_mts
+        name: motion_texture_static
+        params:
+          kalman_process_noise: 0.01
+          kalman_measurement_noise: 0.1
+          texture_patch_size: 96
+          aggregate_stats: ["mean", "std", "min", "max"]
+
+      # ── 特徵提取器：時序式（10 vars × 128 timesteps）──────────────────────────
+      fe_ts: &fe_ts
+        name: time_series
+        params:
+          frame_w: 640.0
+          frame_h: 480.0
+
+      # ════════════════════════════════════════════════════════════════════════
+      #  分類設定錨點
+      #  表格式 (motion_texture_static) × 4 分類器 = 4 組
+      #  時序式 (time_series)           × 3 分類器 = 3 組
+      # ════════════════════════════════════════════════════════════════════════
+
+      # ─ Random Forest ─────────────────────────────────────────────────────────
+      clf_mts_rf: &clf_mts_rf
+        enabled: true
+        feature_extractor: *fe_mts
+        classifier:
+          name: random_forest
+          params:
+            n_estimators: 200
+            max_depth: null
+            min_samples_leaf: 1
+            class_weight: balanced
+            random_state: 42
+            n_jobs: -1
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+      # ─ XGBoost ──────────────────────────────────────────────────────────────
+      clf_mts_xgb: &clf_mts_xgb
+        enabled: true
+        feature_extractor: *fe_mts
+        classifier:
+          name: xgboost
+          params:
+            n_estimators: 200
+            max_depth: 4
+            learning_rate: 0.05
+            subsample: 0.8
+            colsample_bytree: 0.8
+            gamma: 0.0
+            reg_lambda: 1.0
+            reg_alpha: 0.0
+            random_state: 42
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+      # ─ LightGBM ─────────────────────────────────────────────────────────────
+      clf_mts_lgbm: &clf_mts_lgbm
+        enabled: true
+        feature_extractor: *fe_mts
+        classifier:
+          name: lightgbm
+          params:
+            n_estimators: 200
+            learning_rate: 0.05
+            num_leaves: 31
+            max_depth: -1
+            subsample: 0.8
+            colsample_bytree: 0.8
+            class_weight: balanced
+            random_state: 42
+            n_jobs: -1
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+      # ─ TabPFN v2 ─────────────────────────────────────────────────────────────
+      clf_mts_tabpfn: &clf_mts_tabpfn
+        enabled: true
+        feature_extractor: *fe_mts
+        classifier:
+          name: tabpfn_v2
+          params:
+            n_ensemble_configurations: 32
+            device: cpu
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+      # ─ MultiRocket ───────────────────────────────────────────────────────────
+      clf_ts_multirocket: &clf_ts_multirocket
+        enabled: true
+        feature_extractor: *fe_ts
+        classifier:
+          name: multirocket
+          params:
+            n_kernels: 6250
+            ridge_alpha: 1.0e-3
+            seed: 42
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+      # ─ PatchTST ──────────────────────────────────────────────────────────────
+      clf_ts_patchtst: &clf_ts_patchtst
+        enabled: true
+        feature_extractor: *fe_ts
+        classifier:
+          name: patchtst
+          params:
+            patch_len: 16
+            stride: 8
+            d_model: 32
+            ridge_alpha: 1.0e-3
+            seed: 42
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+      # ─ TimeMachine ───────────────────────────────────────────────────────────
+      clf_ts_timemachine: &clf_ts_timemachine
+        enabled: true
+        feature_extractor: *fe_ts
+        classifier:
+          name: timemachine
+          params:
+            n_mambas: 4
+            d_state: 16
+            ridge_alpha: 1.0e-3
+            seed: 42
+        segmentation:
+          enabled: true
+          params: {}
+        label_file: *label_file
+        level: video
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  DeepLabV3+  ×  7 分類器  (01–07)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - label: "01_deeplabv3p_mts_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_mts_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_rf
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "02_deeplabv3p_mts_xgb"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_mts_xgb"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_xgb
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "03_deeplabv3p_mts_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_mts_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_lgbm
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "04_deeplabv3p_mts_tabpfn"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_mts_tabpfn"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_tabpfn
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "05_deeplabv3p_ts_multirocket"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_ts_multirocket"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_multirocket
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "06_deeplabv3p_ts_patchtst"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_ts_patchtst"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_patchtst
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+  - label: "07_deeplabv3p_ts_timemachine"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "deeplabv3p_ts_timemachine"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_timemachine
+      segmentation: *seg_deeplabv3p
+      output: *output_defaults
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  MedNeXt  ×  7 分類器  (08–14)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - label: "08_mednext_mts_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_mts_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_rf
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "09_mednext_mts_xgb"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_mts_xgb"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_xgb
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "10_mednext_mts_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_mts_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_lgbm
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "11_mednext_mts_tabpfn"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_mts_tabpfn"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_tabpfn
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "12_mednext_ts_multirocket"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_ts_multirocket"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_multirocket
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "13_mednext_ts_patchtst"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_ts_patchtst"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_patchtst
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  - label: "14_mednext_ts_timemachine"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "mednext_ts_timemachine"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_timemachine
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  nnUNet  ×  7 分類器  (15–21)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - label: "15_nnunet_mts_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_mts_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_rf
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "16_nnunet_mts_xgb"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_mts_xgb"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_xgb
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "17_nnunet_mts_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_mts_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_lgbm
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "18_nnunet_mts_tabpfn"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_mts_tabpfn"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_tabpfn
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "19_nnunet_ts_multirocket"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_ts_multirocket"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_multirocket
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "20_nnunet_ts_patchtst"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_ts_patchtst"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_patchtst
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+  - label: "21_nnunet_ts_timemachine"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "nnunet_ts_timemachine"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_timemachine
+      segmentation: *seg_nnunet
+      output: *output_defaults
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  UNet++  ×  7 分類器  (22–28)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - label: "22_unetpp_mts_rf"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_mts_rf"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_rf
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "23_unetpp_mts_xgb"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_mts_xgb"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_xgb
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "24_unetpp_mts_lgbm"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_mts_lgbm"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_lgbm
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "25_unetpp_mts_tabpfn"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_mts_tabpfn"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_tabpfn
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "26_unetpp_ts_multirocket"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_ts_multirocket"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_multirocket
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "27_unetpp_ts_patchtst"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_ts_patchtst"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_patchtst
+      segmentation: *seg_unetpp
+      output: *output_defaults
+
+  - label: "28_unetpp_ts_timemachine"
+    config:
+      seed: 42
+      dataset: *dataset_subject
+      experiments:
+        - name: "unetpp_ts_timemachine"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_default
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_ts_timemachine
+      segmentation: *seg_unetpp
+      output: *output_defaults

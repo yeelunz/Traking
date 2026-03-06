@@ -1606,7 +1606,12 @@ class PipelineRunner:
                                 continue
 
                             img_path = os.path.join(det_vis_dir, fname)
-                            img = cv2.imread(img_path)
+                            if not os.path.isfile(img_path) or os.path.getsize(img_path) == 0:
+                                continue
+                            try:
+                                img = cv2.imread(img_path)
+                            except Exception:
+                                continue
                             if img is None:
                                 continue
 
@@ -1844,9 +1849,11 @@ class PipelineRunner:
                                 "checkpoint": _clf_produced_pkl
                             }
                     except Exception as _e_cls:
+                        import traceback as _tb
                         stage_entry["status"] = "failed"
-                        stage_entry["error"] = {"type": type(_e_cls).__name__, "message": str(_e_cls)}
-                        self._log(f"[Classification] Error: {_e_cls}")
+                        _tb_str = _tb.format_exc()
+                        stage_entry["error"] = {"type": type(_e_cls).__name__, "message": str(_e_cls), "traceback": _tb_str}
+                        self._log(f"[Classification] Error: {_e_cls}\n{_tb_str}")
                     finally:
                         _dump_meta()
             else:

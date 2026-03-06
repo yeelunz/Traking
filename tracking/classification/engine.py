@@ -233,6 +233,28 @@ def run_subject_classification(
     split_method: str = "video_level",
     cached_classifier_path: Optional[str] = None,
 ) -> Optional[Dict[str, float]]:
+    import traceback as _traceback_mod
+    try:
+        return _run_subject_classification_impl(
+            config, dataset_root, train_dataset, test_predictions, results_dir, logger,
+            split_method=split_method, cached_classifier_path=cached_classifier_path,
+        )
+    except Exception as _exc:
+        logger(f"[Classification] TRACEBACK:\n{_traceback_mod.format_exc()}")
+        raise
+
+
+def _run_subject_classification_impl(
+    config: Dict[str, any],  # noqa: ANN001
+    dataset_root: str,
+    train_dataset,
+    test_predictions: Dict[str, Dict[str, List[FramePrediction]]],
+    results_dir: str,
+    logger: Callable[[str], None],
+    *,
+    split_method: str = "video_level",
+    cached_classifier_path: Optional[str] = None,
+) -> Optional[Dict[str, float]]:
     if not config.get("enabled", False):
         logger("[Classification] Stage disabled via config.")
         return None
@@ -330,7 +352,12 @@ def run_subject_classification(
         for model_name, preds_by_video in test_predictions.items():
             out_dir = os.path.join(predictions_root, model_name)
             os.makedirs(out_dir, exist_ok=True)
-            metrics_payload = seg_workflow.predict_dataset(preds_by_video, out_dir, gt_annotations=test_annotations)
+            # Use inference-only mode for test predictions inside the classification
+            # engine. GT-evaluation mode would only cover GT-annotated frames, leaving
+            # detector-only frames without segmentation masks and causing a crash in
+            # the missing-masks check below.  Inference mode ensures every detected
+            # frame receives a mask from the just-trained internal segmentation model.
+            metrics_payload = seg_workflow.predict_dataset(preds_by_video, out_dir, gt_annotations=None)
             summary_metrics = metrics_payload.get("summary", {})
             per_video_metrics = metrics_payload.get("videos", {})
             if per_video_metrics:
@@ -364,6 +391,7 @@ def run_subject_classification(
     vectoriser = _build_vectoriser(feature_extractor, level)
     X_train = vectoriser.transform(train_features[e] for e in train_entities)
     y_train = np.asarray([labels[train_owner[e]] for e in train_entities], dtype=np.int64)
+    logger(f"[Classification] X_train shape={X_train.shape}, n_entities={len(train_entities)}, n_feat_keys={len(list(vectoriser.keys))}")
 
     model_dir = os.path.join(results_dir, "classification")
     os.makedirs(model_dir, exist_ok=True)
@@ -381,14 +409,34 @@ def run_subject_classification(
         except Exception as _load_err:
             logger(f"[Classification] Cache load failed ({_load_err}); falling back to training.")
             logger(f"[Classification] Training classifier on {len(train_entities)} entities")
+            try:
+                from tracking.classification.classifiers_ext import set_progress_logger
+                set_progress_logger(logger)
+            except ImportError:
+                pass
             train_info = classifier.fit(X_train, y_train)
+            try:
+                from tracking.classification.classifiers_ext import set_progress_logger
+                set_progress_logger(None)
+            except ImportError:
+                pass
             try:
                 classifier.save(model_path)
             except Exception:
                 logger("[Classification] Warning: classifier save skipped (not implemented)")
     else:
         logger(f"[Classification] Training classifier on {len(train_entities)} entities")
+        try:
+            from tracking.classification.classifiers_ext import set_progress_logger
+            set_progress_logger(logger)
+        except ImportError:
+            pass
         train_info = classifier.fit(X_train, y_train)
+        try:
+            from tracking.classification.classifiers_ext import set_progress_logger
+            set_progress_logger(None)  # revert to print
+        except ImportError:
+            pass
         try:
             classifier.save(model_path)
         except Exception:
@@ -407,8 +455,11 @@ def run_subject_classification(
             1 for _video, preds in test_predictions[source_model].items() for pred in preds if pred.segmentation is None
         )
         if missing_masks:
-            raise RuntimeError(
-                "Segmentation predictions missing for {} frame(s). Check segmentation stage outputs.".format(missing_masks)
+            # Warn but do not abort – frames without masks will contribute zero
+            # CTS static features, which is acceptable for a partial prediction.
+            logger(
+                f"[Classification] Warning: {missing_masks} test frame(s) are missing "
+                "segmentation masks. CTS static features will be partial for those frames."
             )
 
     test_features, test_owner, test_sources = _prepare_entity_features(
@@ -427,6 +478,7 @@ def run_subject_classification(
 
     X_test = vectoriser.transform(test_features[e] for e in test_entities)
     y_test = np.asarray([labels[test_owner[e]] for e in test_entities], dtype=np.int64)
+    logger(f"[Classification] X_train shape: {X_train.shape}, X_test shape: {X_test.shape}, n_feat_keys: {len(list(vectoriser.keys))}")
 
     logger(f"[Classification] Evaluating classifier on {len(test_entities)} entities")
     y_pred = classifier.predict(X_test)

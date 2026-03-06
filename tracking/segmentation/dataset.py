@@ -322,7 +322,16 @@ class SegmentationCropDataset(Dataset):
                 alt_path = os.path.join(video_dir, mask_file)
                 if os.path.exists(alt_path):
                     abs_path = alt_path
-        mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        if not os.path.isfile(abs_path):
+            return None
+        # Guard against zero-byte files: Ultralytics patches cv2.imread to use
+        # np.fromfile + imdecode; empty files produce an assertion failure.
+        if os.path.getsize(abs_path) == 0:
+            return None
+        try:
+            mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            return None
         if mask is None:
             return None
         # ensure binary mask and fill interior holes to avoid ring-shaped annotations

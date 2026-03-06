@@ -181,6 +181,29 @@
             </div>
             <table id="classification-predictions-table"></table>
           </section>
+
+          <!-- Voting / Modality Analysis Section -->
+          <section id="voting-section" class="hidden">
+            <div class="voting-section-header">
+              <h3>模態投票分析</h3>
+              <p id="voting-subjects-hint"></p>
+            </div>
+            <div class="voting-two-col">
+              <div class="voting-card">
+                <p class="voting-card-title">各模態分類準確率</p>
+                <table id="voting-modality-table" class="voting-modality-table"></table>
+              </div>
+              <div class="voting-card">
+                <p class="voting-card-title">5-voting（全模態多數決）</p>
+                <div id="voting-five-result"></div>
+              </div>
+            </div>
+            <div class="voting-combos-header">
+              <h4>3-模態組合排行</h4>
+              <span class="voting-combos-hint">C(5,3) = 10 種組合，多數決投票</span>
+            </div>
+            <table id="voting-combos-table" class="voting-combos-table"></table>
+          </section>
           <div class="grid">
             <div>
               <div class="chart-header">
@@ -230,6 +253,6 @@
         </section>
       </main>
     </div>
-    <script src="/assets/app.js?v=20260106a"></script>
+    <script src="/assets/app.js?v=20260307b"></script>
   </body>
 </html>

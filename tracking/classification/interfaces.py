@@ -10,7 +10,11 @@ class TrajectoryFeatureExtractor(Protocol):
 
     name: str
 
-    def extract_video(self, samples: Sequence[FramePrediction]) -> Dict[str, float]:
+    def extract_video(
+        self,
+        samples: Sequence[FramePrediction],
+        video_path: str | None = None,
+    ) -> Dict[str, float]:
         """Compute features for a single video trajectory."""
 
     def aggregate_subject(self, video_features: Sequence[Dict[str, float]]) -> Dict[str, float]:
