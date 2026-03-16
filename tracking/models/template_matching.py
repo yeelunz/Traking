@@ -74,6 +74,9 @@ class TemplateMatching(TrackingModel):
 
     def _apply_preprocs(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Apply preproc chain on an RGB frame then return BGR for downstream."""
+        if frame_bgr is not None and frame_bgr.ndim == 3:
+            _g = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            frame_bgr = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not self.preprocs:
             return frame_bgr
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)

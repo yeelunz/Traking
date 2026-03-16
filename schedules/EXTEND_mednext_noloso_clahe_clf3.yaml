@@ -3,24 +3,24 @@ queue:
   # 00  共用錨點定義 (不執行任何實驗)
   # ═══════════════════════════════════════════════════════════════════════════
   # 資料：dataset/merged（含患病 001–005 與正常 n001–n007）
-  # 分割策略：LOSO（Leave-One-Subject-Out）
+  # 分割策略：Non-LOSO（subject_level 8:2 隨機分割）
   # 前處理：Global CLAHE（無 LOG_DR）
   # 偵測器：YOLOv11l
   # 分割模型：MedNeXt-B
   # 分類：video level
-  #   表格特徵 (motion_texture_static) → Random Forest
+  #   表格特徵 (motion_texture_static) → Random Forest / TabPFN v2
   #   時序特徵 (time_series, 18ch×128) → MultiRocket / PatchTST
   # ═══════════════════════════════════════════════════════════════════════════
   - label: "00_defs"
     config:
       seed: 42
 
-      # ── 資料集：LOSO ──────────────────────────────────────────────────────────
-      dataset: &dataset_merged_loso
-        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged"
+      # ── 資料集：Non-LOSO（subject_level 隨機 8:2 分割）──────────────────────────
+      dataset: &dataset_merged_noloso
+        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend"
         split:
-          method: loso
-          loso: true
+          method: subject_level
+          loso: false
           ratios: [0.8, 0.2]
           k_fold: 1
 
@@ -40,9 +40,9 @@ queue:
       output: &output_defaults
         results_root: results
 
-      # ── ROI 偵測器：YOLOv11l ─────────────────────────────────────────────────
+      # ── ROI 偵測器：YOLOv11l ─────────────────────────────────────────────────────────────────
       detector: &detector_yolo11l
-        weights: models/detection/yolo11l.pt
+        weights: models/detection/yolo26l.pt
         conf: 0.05
         iou: 0.5
         imgsz: 640
@@ -97,7 +97,7 @@ queue:
 
       # ── 標籤檔 ────────────────────────────────────────────────────────────────
       label_file: &label_file
-        "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
+        "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend\\ann.txt"
 
       # ── 特徵提取器：表格式（Motion 31D + CTS Static 35D + ResNet Texture PCA 66D）
       fe_mts: &fe_mts
@@ -168,7 +168,19 @@ queue:
           enabled: true   # masks provided by main pipeline seg stage (e.g. MedNeXt)
         label_file: *label_file
         level: video
-
+      # ─ TabPFN v2（motion_texture_static → 132D）──────────────────────────────
+      clf_mts_tabpfn: &clf_mts_tabpfn
+        enabled: true
+        feature_extractor: *fe_mts
+        classifier:
+          name: tabpfn_v2
+          params:
+            n_ensemble_configurations: 32
+            device: cpu
+        segmentation:
+          enabled: true   # masks provided by main pipeline seg stage (e.g. MedNeXt)
+        label_file: *label_file
+        level: video
 
   # ═══════════════════════════════════════════════════════════════════════════
   #  MedNeXt × Random Forest  (01)
@@ -176,7 +188,7 @@ queue:
   - label: "01_mednext_mts_rf"
     config:
       seed: 42
-      dataset: *dataset_merged_loso
+      dataset: *dataset_merged_noloso
       experiments:
         - name: "mednext_clahe_global_mts_rf"
           preproc_scheme: "A"
@@ -198,7 +210,7 @@ queue:
   - label: "02_mednext_ts_multirocket"
     config:
       seed: 42
-      dataset: *dataset_merged_loso
+      dataset: *dataset_merged_noloso
       experiments:
         - name: "mednext_clahe_global_ts_multirocket"
           preproc_scheme: "A"
@@ -220,7 +232,7 @@ queue:
   - label: "03_mednext_ts_patchtst"
     config:
       seed: 42
-      dataset: *dataset_merged_loso
+      dataset: *dataset_merged_noloso
       experiments:
         - name: "mednext_clahe_global_ts_patchtst"
           preproc_scheme: "A"
@@ -233,5 +245,27 @@ queue:
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
       classification: *clf_ts_patchtst
+      segmentation: *seg_mednext
+      output: *output_defaults
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  MedNeXt × TabPFN v2  (04)
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "04_mednext_mts_tabpfn"
+    config:
+      seed: 42
+      dataset: *dataset_merged_noloso
+      experiments:
+        - name: "mednext_clahe_global_mts_tabpfn"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_global
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_mts_tabpfn
       segmentation: *seg_mednext
       output: *output_defaults

@@ -31,10 +31,17 @@ from .canvas import MaskCanvas
 from .data import SegmentationProject
 
 
-def _ensure_labels_file(video_path: str) -> List[str]:
-    root = os.path.dirname(video_path)
-    labels_path = os.path.join(root, "labels.txt")
-    if not os.path.exists(labels_path):
+def _ensure_labels_file(video_path: str, dataset_root: Optional[str] = None) -> List[str]:
+    """Look for labels.txt in the video's own directory, then fall back to dataset_root."""
+    video_dir = Path(video_path).parent
+    labels_path = video_dir / "labels.txt"
+    if not labels_path.exists() and dataset_root:
+        root_labels = Path(dataset_root) / "labels.txt"
+        if root_labels.exists():
+            with open(root_labels, "r", encoding="utf-8") as f:
+                categories = [line.strip() for line in f if line.strip()]
+            return categories or ["median_nerve"]
+    if not labels_path.exists():
         with open(labels_path, "w", encoding="utf-8") as f:
             f.write("median_nerve\n")
     with open(labels_path, "r", encoding="utf-8") as f:
@@ -277,8 +284,25 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.status_label.setText(f"資料夾已載入：{folder}")
 
     def _list_video_files(self, folder: Path) -> List[Path]:
+        """Collect video files from folder.
+
+        Supports both flat layouts (videos directly in folder) and
+        the 'merged' dataset layout where each subject has its own subfolder.
+        Direct files are listed first; videos found one level deep in
+        subdirectories come after, each subfolder sorted alphabetically.
+        """
         allow = {".mp4", ".avi", ".mov", ".mkv", ".mpg", ".mpeg", ".wmv"}
-        return sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in allow])
+        direct = sorted(
+            [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in allow]
+        )
+        # Scan one level of subdirectories (merged / subject-level layout)
+        nested: List[Path] = []
+        for sub in sorted(folder.iterdir()):
+            if sub.is_dir() and not sub.name.startswith(".") and not sub.name.startswith("_"):
+                nested.extend(
+                    sorted(p for p in sub.iterdir() if p.is_file() and p.suffix.lower() in allow)
+                )
+        return direct + nested
 
     def _count_project_frames(self, project: SegmentationProject) -> int:
         return sum(1 for ann_map in project.annotations_by_frame.values() if ann_map)
@@ -298,6 +322,12 @@ class SegmentAnnotatorWindow(QMainWindow):
     def _refresh_video_count(self, video_path: Path, project: Optional[SegmentationProject] = None) -> None:
         if project is not None:
             count = self._count_project_frames(project)
+            # If in-memory load yielded 0 (e.g. mask files relocated), fall back to the
+            # JSON image list so the display count doesn't suddenly become 0.
+            if count == 0:
+                json_count = self._annotation_count_from_json(video_path)
+                if json_count > 0:
+                    count = json_count
         else:
             count = self._annotation_count_from_json(video_path)
         self.video_annotation_counts[video_path] = int(count)
@@ -307,17 +337,38 @@ class SegmentAnnotatorWindow(QMainWindow):
         previous_scroll = scroll_bar.value()
         self.list_videos.blockSignals(True)
         self.list_videos.clear()
+
+        last_subject: Optional[str] = None
         for idx, path in enumerate(self.video_paths):
             count = self.video_annotation_counts.get(path, 0)
-            label = f"{path.name}（{count} 幀）"
+            in_subdir = self.dataset_root and path.parent != self.dataset_root
+            subject = path.parent.name if in_subdir else None
+
+            # Insert a non-selectable group header when the subject changes
+            if subject and subject != last_subject:
+                header = QListWidgetItem(f"▶ {subject}")
+                header.setData(Qt.ItemDataRole.UserRole, -1)  # sentinel: not a video entry
+                header.setFlags(Qt.ItemFlag.NoItemFlags)       # not selectable / not enabled
+                self.list_videos.addItem(header)
+                last_subject = subject
+
+            if in_subdir:
+                display_name = path.name
+            else:
+                display_name = path.name
+            label = f"  {display_name}（{count} 幀）" if subject else f"{display_name}（{count} 幀）"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, idx)
             self.list_videos.addItem(item)
+
+        # Re-select the current video by scanning for the matching UserRole
         target_index = self.current_video_index if 0 <= self.current_video_index < len(self.video_paths) else (0 if self.video_paths else -1)
-        target_item: Optional[QListWidgetItem] = None
-        if target_index >= 0 and target_index < self.list_videos.count():
-            target_item = self.list_videos.item(target_index)
-            self.list_videos.setCurrentItem(target_item, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        if target_index >= 0:
+            for row in range(self.list_videos.count()):
+                it = self.list_videos.item(row)
+                if it is not None and it.data(Qt.ItemDataRole.UserRole) == target_index:
+                    self.list_videos.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                    break
         self.list_videos.blockSignals(False)
         scroll_bar.setValue(min(previous_scroll, scroll_bar.maximum()))
 
@@ -327,13 +378,18 @@ class SegmentAnnotatorWindow(QMainWindow):
         if index == self.current_video_index and self.project is not None:
             return
         self.current_video_index = index
+        # Highlight the correct item using UserRole (header items shift row numbers)
         self.list_videos.blockSignals(True)
-        self.list_videos.setCurrentRow(index)
+        for row in range(self.list_videos.count()):
+            it = self.list_videos.item(row)
+            if it is not None and it.data(Qt.ItemDataRole.UserRole) == index:
+                self.list_videos.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                break
         self.list_videos.blockSignals(False)
         self.load_video_path(self.video_paths[index])
 
     def load_video_path(self, path: Path):
-        categories = _ensure_labels_file(str(path))
+        categories = _ensure_labels_file(str(path), str(self.dataset_root) if self.dataset_root else None)
         if self.project:
             self.project.close()
         if self.canvas:
@@ -371,20 +427,26 @@ class SegmentAnnotatorWindow(QMainWindow):
         self.status_label.setText(f"影片已載入：{path.name}")
 
     def on_select_video_row(self, row: int):
-        if row < 0 or row >= len(self.video_paths):
+        if row < 0:
             return
-        if row == self.current_video_index:
+        item = self.list_videos.item(row)
+        if item is None:
             return
-        self.load_video_at(row)
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(idx, int) or idx < 0:
+            return  # header item
+        if idx >= len(self.video_paths):
+            return
+        if idx == self.current_video_index:
+            return
+        self.load_video_at(idx)
 
     def on_video_item_clicked(self, item: QListWidgetItem):
         if item is None:
             return
         idx = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(idx, int):
-            idx = self.list_videos.row(item)
-        if idx < 0:
-            return
+        if not isinstance(idx, int) or idx < 0:
+            return  # header / group separator item
         if idx != self.current_video_index or self.project is None:
             self.load_video_at(idx)
 
@@ -571,7 +633,8 @@ class SegmentAnnotatorWindow(QMainWindow):
     def auto_save(self) -> None:
         if self.project is None:
             return
-        target_root = self.dataset_root or self.project.video_path.parent
+        # Always save next to the video so merged-dataset subject folders stay self-contained.
+        target_root = self.project.video_path.parent
         try:
             path = self.project.export_dataset(str(target_root))
         except Exception as exc:  # noqa: BLE001

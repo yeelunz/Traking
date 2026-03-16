@@ -28,7 +28,7 @@ def dice_coefficient(pred: np.ndarray, target: np.ndarray, eps: float = 1e-6) ->
     union = float(pred_bin.sum() + target_bin.sum())
     if union == 0:
         return 1.0
-    return (2.0 * intersection + eps) / (union + eps)
+    return 2.0 * intersection / (union + eps)
 
 
 def intersection_over_union(pred: np.ndarray, target: np.ndarray, eps: float = 1e-6) -> float:
@@ -38,10 +38,13 @@ def intersection_over_union(pred: np.ndarray, target: np.ndarray, eps: float = 1
     union = float(((pred_bin + target_bin) > 0).sum())
     if union == 0:
         return 1.0
-    return (intersection + eps) / (union + eps)
+    return intersection / (union + eps)
 
 
-def centroid_distance(pred_stats: MaskStats, gt_stats: MaskStats) -> float:
+def centroid_distance(pred_stats: MaskStats, gt_stats: MaskStats) -> "float | None":
+    """Euclidean centroid distance, or None if either mask has zero area."""
+    if pred_stats.area_px <= 0 or gt_stats.area_px <= 0:
+        return None
     px = pred_stats.centroid[0] - gt_stats.centroid[0]
     py = pred_stats.centroid[1] - gt_stats.centroid[1]
     return float((px ** 2 + py ** 2) ** 0.5)
@@ -51,9 +54,13 @@ def summarise_metrics(accumulator: Dict[str, list]) -> Dict[str, float]:
     summary = {}
     for key, values in accumulator.items():
         if not values:
-            summary[key] = 0.0
+            # NaN signals "no data" so downstream won't confuse with actual 0.0.
+            summary[f"{key}_mean"] = float("nan")
+            summary[f"{key}_std"] = float("nan")
+            summary[f"{key}_count"] = 0
             continue
         arr = np.asarray(values, dtype=np.float32)
-        summary[f"{key}_mean"] = float(arr.mean())
-        summary[f"{key}_std"] = float(arr.std())
+        summary[f"{key}_mean"] = float(np.nanmean(arr))
+        summary[f"{key}_std"] = float(np.nanstd(arr))
+        summary[f"{key}_count"] = len(values)
     return summary

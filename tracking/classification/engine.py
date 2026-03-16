@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -18,7 +17,6 @@ from .feature_vector import FeatureVectoriser
 from .metrics import summarise_classification
 from . import feature_extractors as _load_feature_extractors  # noqa: F401
 from . import classifiers as _load_classifiers  # noqa: F401
-from ..segmentation import SegmentationWorkflow
 from ..segmentation.dataset import attach_ground_truth_segmentation
 from ..utils.annotations import load_coco_vid
 
@@ -179,12 +177,17 @@ def _prepare_entity_features(
 
         for video_path, samples in videos.items():
             video_id = os.path.splitext(os.path.basename(video_path))[0]
+            subject = _subject_from_video_path(video_path, dataset_root)
+            # Use subject/video_id as the unique entity key to avoid collision when
+            # multiple subjects share the same video filename (e.g. 001/Grasp.avi
+            # and 004/Grasp.avi both mapping to entity_id "Grasp").
+            unique_eid = f"{subject}/{video_id}"
             vf = feature_extractor.extract_video(samples, video_path=video_path)
             all_video_feats_flat.append(vf)
-            entity_ids.append(video_id)
-            owners[video_id] = _subject_from_video_path(video_path, dataset_root)
-            sources[video_id] = [video_path]
-            logger(f"[Classification] Video {video_id}: extracted {len(samples)} sample(s)")
+            entity_ids.append(unique_eid)
+            owners[unique_eid] = subject
+            sources[unique_eid] = [video_path]
+            logger(f"[Classification] Video {video_id} (subject={subject}): extracted {len(samples)} sample(s)")
 
         if has_finalize and all_video_feats_flat:
             all_video_feats_flat = list(feature_extractor.finalize_batch(all_video_feats_flat, fit=fit_batch))
@@ -222,6 +225,161 @@ def _filter_entities(
     return kept
 
 
+def _find_youden_threshold(
+    y_true: np.ndarray,
+    proba_positive: np.ndarray,
+) -> Tuple[float, float]:
+    """Find optimal decision threshold using Youden's Index.
+
+    J(t) = Sensitivity(t) + Specificity(t) - 1 = TPR(t) + TNR(t) - 1
+
+    Scanns all midpoint candidates between unique probabilities.
+
+    Returns
+    -------
+    threshold : float
+        Optimal decision threshold in [0, 1].
+    j_score : float
+        Youden's J statistic at the optimal threshold.
+    """
+    y_true = np.asarray(y_true, dtype=int)
+    proba = np.asarray(proba_positive, dtype=float)
+
+    unique_labels = np.unique(y_true)
+    if len(unique_labels) != 2:
+        return 0.5, 0.0  # degenerate: need exactly two classes
+    neg_label, pos_label = int(unique_labels[0]), int(unique_labels[1])
+
+    pos_total = int(np.sum(y_true == pos_label))
+    neg_total = int(np.sum(y_true == neg_label))
+    if pos_total == 0 or neg_total == 0:
+        return 0.5, 0.0  # degenerate case
+
+    unique_probs = np.unique(proba)
+    if len(unique_probs) > 1:
+        midpoints = (unique_probs[:-1] + unique_probs[1:]) / 2.0
+        candidates = np.concatenate([[0.0, 0.5], unique_probs, midpoints])
+    else:
+        candidates = np.array([0.0, 0.5, float(unique_probs[0])])
+    candidates = np.clip(np.sort(np.unique(candidates)), 0.0, 1.0)
+
+    best_j = -2.0
+    best_t = 0.5
+
+    for t in candidates:
+        y_hat = (proba >= t).astype(int)
+        tp = int(np.sum((y_hat == 1) & (y_true == pos_label)))
+        tn = int(np.sum((y_hat == 0) & (y_true == neg_label)))
+        sensitivity = tp / pos_total
+        specificity = tn / neg_total
+        j = sensitivity + specificity - 1.0
+        if j > best_j or (j == best_j and abs(t - 0.5) < abs(best_t - 0.5)):
+            best_j = j
+            best_t = float(t)
+
+    return best_t, best_j
+
+
+def _loo_calib_probabilities(
+    train_entities: Sequence[str],
+    train_features: Dict[str, Dict[str, float]],
+    entity_to_subject: Dict[str, str],
+    labels: Dict[str, int],
+    vectoriser,
+    classifier_cls,
+    classifier_cfg: Dict,
+    logger: Callable[[str], None],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute out-of-sample probabilities for Youden calibration via
+    leave-one-subject-out on the training set.
+
+    For every unique training subject we:
+      1. Train a temporary classifier on all other training subjects.
+      2. Predict probabilities for the left-out subject's entities.
+
+    This guarantees that every prediction is truly out-of-sample regardless
+    of how few subjects are available (works with as few as 2 training
+    subjects total), and that both class labels appear in the combined
+    probability array.
+
+    Returns
+    -------
+    y_loo : np.ndarray  (N,)  true labels
+    p_loo : np.ndarray  (N,)  predicted prob_positive
+    """
+    entities = list(train_entities)
+    subjects = sorted({entity_to_subject[e] for e in entities if entity_to_subject.get(e) in labels})
+
+    if len(subjects) < 2:
+        return np.array([], dtype=int), np.array([], dtype=float)
+
+    y_loo: List[int] = []
+    p_loo: List[float] = []
+
+    # For iterative deep-learning classifiers (e.g. PatchTST, TimeMachine) the
+    # LOO fold training can be very slow with the full epoch budget.  Cap
+    # training at a lighter setting so calibration remains feasible.
+    # Detect by checking (1) user-supplied params, or (2) the class DEFAULT_CONFIG.
+    _base_params: Dict = dict(classifier_cfg.get("params") or {})
+    _default_cfg: Dict = getattr(classifier_cls, "DEFAULT_CONFIG", {}) or {}
+    _effective_epochs   = int(_base_params.get("epochs",   _default_cfg.get("epochs",   0)))
+    _effective_patience = int(_base_params.get("patience", _default_cfg.get("patience", 0)))
+    if _effective_epochs > 0:
+        _loo_max_epochs = min(_effective_epochs, 25)
+        _loo_patience   = min(_effective_patience, 8) if _effective_patience > 0 else 5
+        _loo_params: Dict = {**_default_cfg, **_base_params, "epochs": _loo_max_epochs, "patience": _loo_patience}
+    else:
+        _loo_params = _base_params
+
+    logger(
+        f"[Classification] Youden LOO calibration: {len(subjects)} folds"
+        + (
+            f" (epochs capped at {_loo_params.get('epochs')}, patience={_loo_params.get('patience')})"
+            if _effective_epochs > 0
+            else ""
+        )
+    )
+
+    for _fold_idx, held_out in enumerate(subjects, 1):
+        fit_ents = [e for e in entities if entity_to_subject.get(e) != held_out]
+        val_ents = [e for e in entities if entity_to_subject.get(e) == held_out]
+
+        if not fit_ents or not val_ents:
+            logger(f"[Classification] LOO fold {_fold_idx}/{len(subjects)}: skip {held_out} (empty split)")
+            continue
+
+        # Ensure at least 2 distinct labels in fit set so classifier can learn
+        fit_labels_set = {labels[entity_to_subject[e]] for e in fit_ents}
+        if len(fit_labels_set) < 2:
+            logger(f"[Classification] LOO fold {_fold_idx}/{len(subjects)}: skip {held_out} (single-class fit set)")
+            continue
+
+        logger(f"[Classification] LOO fold {_fold_idx}/{len(subjects)}: held-out={held_out}, fit_n={len(fit_ents)}, val_n={len(val_ents)}")
+        X_fit = vectoriser.transform(train_features[e] for e in fit_ents)
+        y_fit = np.asarray([labels[entity_to_subject[e]] for e in fit_ents], dtype=np.int64)
+        X_val = vectoriser.transform(train_features[e] for e in val_ents)
+        y_val_true = [labels[entity_to_subject[e]] for e in val_ents]
+
+        try:
+            clf = classifier_cls(_loo_params if _loo_params else None)
+            clf.fit(X_fit, y_fit)
+            prob_mat = clf.predict_proba(X_val)
+            classes_ = getattr(clf, "classes_", None)
+            if classes_ is None and hasattr(clf, "_model"):
+                classes_ = getattr(getattr(clf, "_model"), "classes_", None)
+            if classes_ is not None and 1 in classes_:
+                pos_idx = int(np.where(classes_ == 1)[0][0])
+            else:
+                pos_idx = 1 if prob_mat.shape[1] > 1 else 0
+            y_loo.extend(y_val_true)
+            p_loo.extend(prob_mat[:, pos_idx].tolist())
+        except Exception as _e:
+            logger(f"[Classification] LOO calib: skip subject {held_out} ({_e})")
+            continue
+
+    return np.asarray(y_loo, dtype=int), np.asarray(p_loo, dtype=float)
+
+
 def run_subject_classification(
     config: Dict[str, any],  # noqa: ANN001
     dataset_root: str,
@@ -232,12 +390,14 @@ def run_subject_classification(
     *,
     split_method: str = "video_level",
     cached_classifier_path: Optional[str] = None,
+    cached_seg_path: Optional[str] = None,  # deprecated – kept for API compatibility; no longer used
 ) -> Optional[Dict[str, float]]:
     import traceback as _traceback_mod
     try:
         return _run_subject_classification_impl(
             config, dataset_root, train_dataset, test_predictions, results_dir, logger,
-            split_method=split_method, cached_classifier_path=cached_classifier_path,
+            split_method=split_method,
+            cached_classifier_path=cached_classifier_path,
         )
     except Exception as _exc:
         logger(f"[Classification] TRACEBACK:\n{_traceback_mod.format_exc()}")
@@ -273,7 +433,7 @@ def _run_subject_classification_impl(
         raise KeyError(f"Unknown classifier: {classifier_name}")
     classifier = classifier_cls(classifier_cfg.get("params"))
 
-    legacy_level = config.pop("target_level", None)
+    legacy_level = config.get("target_level", None)
     if legacy_level is not None:
         logger("[Classification] 'target_level' is deprecated; using dataset split method instead.")
     _explicit_level = str(config.get("level") or "").strip().lower()
@@ -303,77 +463,107 @@ def _run_subject_classification_impl(
         if video_path:
             train_video_paths.append(video_path)
     train_annotations = _load_annotations_for_videos(train_video_paths)
-    annotated_train_paths = list(train_annotations.keys())
 
-    seg_results_root = os.path.join(results_dir, "test", "segmentation")
-    seg_train_root = os.path.join(results_dir, "train_full", "segmentation", "classification")
-    seg_workflow: Optional[SegmentationWorkflow] = None
-    seg_metrics_by_model: Dict[str, Dict[str, Dict[str, float]]] = {}
-    if seg_enabled:
-        os.makedirs(seg_results_root, exist_ok=True)
-        os.makedirs(seg_train_root, exist_ok=True)
-        seg_params = seg_cfg.get("params")
-        seg_workflow = SegmentationWorkflow(seg_params, dataset_root, seg_train_root, logger)
-        seg_seed = int(seg_cfg.get("seed", 0))
-        val_ratio = float(seg_cfg.get("val_ratio", 0.0))
-        train_targets = annotated_train_paths[:]
-        val_videos: Optional[Sequence[str]] = None
-        if val_ratio > 0.0 and len(train_targets) > 1:
-            val_count = max(1, int(len(train_targets) * val_ratio))
-            rng = random.Random(seg_seed)
-            shuffled = train_targets[:]
-            rng.shuffle(shuffled)
-            val_videos = shuffled[:val_count]
-            train_targets = shuffled[val_count:] or shuffled
-        if train_targets:
-            seg_train_info = seg_workflow.train(train_targets, val_videos, seed=seg_seed)
-            if seg_train_info:
-                logger("[Segmentation] Training summary: " + ", ".join(f"{k}={v:.4f}" for k, v in seg_train_info.items()))
-            seg_workflow.load_checkpoint()
-        else:
-            logger("[Segmentation] No annotated training videos found; skipping segmentation training.")
-            seg_workflow = None
-    else:
+    # The classification stage does NOT train its own segmentation model.
+    # Segmentation masks on test_predictions are produced by the main pipeline's
+    # segmentation stage (e.g. MedNeXt) and should be used as-is.
+    if not seg_enabled:
         logger("[Classification] Segmentation stage disabled via config; using existing trajectories only.")
+    else:
+        logger("[Classification] Segmentation masks from the main pipeline will be used for feature extraction (no internal seg model).")
 
     train_videos: Dict[str, List[FramePrediction]] = {}
     for video_path, annotation in train_annotations.items():
-        samples = attach_ground_truth_segmentation(annotation, dataset_root)
+        samples = attach_ground_truth_segmentation(annotation, dataset_root, video_path=video_path)
         if samples:
             train_videos[video_path] = samples
     logger(f"[Classification] Prepared GT segmentation trajectories for {len(train_videos)} train videos")
 
-    test_video_paths: List[str] = sorted({vp for model_map in test_predictions.values() for vp in model_map.keys()})
-    test_annotations = _load_annotations_for_videos(test_video_paths)
-    if seg_workflow is not None:
-        seg_model_name = getattr(seg_workflow, "model_name", "segmentation_model")
-        predictions_root = os.path.join(seg_results_root, "predictions", seg_model_name)
-        os.makedirs(predictions_root, exist_ok=True)
-        for model_name, preds_by_video in test_predictions.items():
-            out_dir = os.path.join(predictions_root, model_name)
-            os.makedirs(out_dir, exist_ok=True)
-            # Use inference-only mode for test predictions inside the classification
-            # engine. GT-evaluation mode would only cover GT-annotated frames, leaving
-            # detector-only frames without segmentation masks and causing a crash in
-            # the missing-masks check below.  Inference mode ensures every detected
-            # frame receives a mask from the just-trained internal segmentation model.
-            metrics_payload = seg_workflow.predict_dataset(preds_by_video, out_dir, gt_annotations=None)
-            summary_metrics = metrics_payload.get("summary", {})
-            per_video_metrics = metrics_payload.get("videos", {})
-            if per_video_metrics:
-                try:
-                    with open(os.path.join(out_dir, "metrics_per_video.json"), "w", encoding="utf-8") as f:
-                        json.dump(per_video_metrics, f, ensure_ascii=False, indent=2)
-                except Exception:
-                    pass
-            seg_metrics_by_model.setdefault(seg_model_name, {})[model_name] = summary_metrics
-            if summary_metrics:
-                summary_text = ", ".join(f"{k}={v:.4f}" for k, v in summary_metrics.items())
-            else:
-                summary_text = "no metrics"
-            logger(
-                f"[Segmentation] Summary metrics | seg_model={seg_model_name} det_model={model_name}: {summary_text}"
+    # ── GT trajectory smoothing ──────────────────────────────────────────
+    # Ground-truth bboxes are clean (no tracking noise), so we skip the
+    # Hampel outlier-removal stage.  However, bidirectional Savitzky-Golay
+    # smoothing is still mandatory to guarantee C2-continuous centroid
+    # trajectories, which in turn yields physically plausible velocity and
+    # acceleration features that are consistent with those produced for
+    # detector-output test trajectories.
+    try:
+        from .trajectory_filter import filter_detections as _filter_detections_gt
+        _gt_traj_cfg = dict((config.get("trajectory_filter", {}) or {}).get("traj_params", {}) or {})
+        # GT mode uses lightweight S-G parameters to remove only annotation jitter —
+        # lower polyorder and smaller window preserve the biomechanical envelope more
+        # faithfully than the standard inference-path parameters (sg_window=11, polyorder=2).
+        # These defaults can be overridden via config["trajectory_filter"]["gt_traj_params"].
+        _gt_traj_override = dict(
+            (config.get("trajectory_filter", {}) or {}).get("gt_traj_params", {}) or {}
+        )
+        _GT_SG_WINDOW_DEFAULT = 7   # lighter than inference (11)
+        _GT_SG_POLYORDER_DEFAULT = 1  # lighter than inference (2)
+        _gt_traj_cfg.setdefault("sg_window", _GT_SG_WINDOW_DEFAULT)
+        _gt_traj_cfg.setdefault("sg_polyorder", _GT_SG_POLYORDER_DEFAULT)
+        # Allow explicit gt_traj_params in config to override even the above defaults
+        _gt_traj_cfg.update(_gt_traj_override)
+        _gt_bbox_strategy = str(
+            (config.get("trajectory_filter", {}) or {}).get("bbox_strategy", "independent")
+        )
+        _gt_bbox_params = dict(
+            (config.get("trajectory_filter", {}) or {}).get("bbox_params", {}) or {}
+        )
+        _gt_filtered_videos: Dict[str, List[FramePrediction]] = {}
+        _gt_smoothed_count = 0
+        for _gt_vp, _gt_preds in train_videos.items():
+            if len(_gt_preds) < 2:
+                _gt_filtered_videos[_gt_vp] = _gt_preds
+                continue
+            _gt_fi = np.array([p.frame_index for p in _gt_preds], dtype=np.int64)
+            _gt_bb = np.array([list(p.bbox) for p in _gt_preds], dtype=np.float64)
+            _gt_cx = _gt_bb[:, 0] + _gt_bb[:, 2] / 2.0
+            _gt_cy = _gt_bb[:, 1] + _gt_bb[:, 3] / 2.0
+            _gt_w = _gt_bb[:, 2].copy()
+            _gt_h = _gt_bb[:, 3].copy()
+            _gt_sc = np.array(
+                # GT predictions: default to 1.0 (ground-truth is fully reliable)
+                [float(p.score if p.score is not None else 1.0) for p in _gt_preds],
+                dtype=np.float64,
             )
+            _gt_result = _filter_detections_gt(
+                _gt_fi, _gt_cx, _gt_cy, _gt_w, _gt_h, _gt_sc,
+                bbox_strategy=_gt_bbox_strategy,
+                bbox_params=_gt_bbox_params,
+                traj_params=_gt_traj_cfg,
+                skip_hampel=True,  # GT mode: bypass Hampel, force S-G only
+            )
+            # Rebuild FramePrediction list with smoothed bboxes.
+            # Use a dict lookup keyed by frame_index so we handle duplicates/reordering.
+            _gt_fi_result = _gt_result["frame_indices"]
+            _gt_fi_map = {int(fi): idx for idx, fi in enumerate(_gt_fi_result)}
+            _gt_new_preds: list = []
+            for _gi, _gp in enumerate(_gt_preds):
+                _gk = _gt_fi_map.get(int(_gp.frame_index))
+                if _gk is None:
+                    # Frame was removed during filtering (e.g. dedup); keep original.
+                    _gt_new_preds.append(_gp)
+                    continue
+                _ncx = float(_gt_result["cx"][_gk])
+                _ncy = float(_gt_result["cy"][_gk])
+                _nw = float(_gt_result["widths"][_gk])
+                _nh = float(_gt_result["heights"][_gk])
+                _nx = _ncx - _nw / 2.0
+                _ny = _ncy - _nh / 2.0
+                _gt_new_preds.append(FramePrediction(
+                    frame_index=_gp.frame_index,
+                    bbox=(_nx, _ny, _nw, _nh),
+                    score=_gp.score,
+                    segmentation=getattr(_gp, "segmentation", None),
+                ))
+            _gt_filtered_videos[_gt_vp] = _gt_new_preds
+            _gt_smoothed_count += 1
+        train_videos = _gt_filtered_videos
+        logger(
+            f"[Classification] GT trajectory smoothing applied (skip_hampel=True, S-G only) "
+            f"to {_gt_smoothed_count} train videos"
+        )
+    except Exception as _gt_err:
+        logger(f"[Classification] WARNING: GT trajectory smoothing failed ({_gt_err}); using raw GT bboxes")
 
     train_features, train_owner, train_sources = _prepare_entity_features(
         feature_extractor,
@@ -392,6 +582,51 @@ def _run_subject_classification_impl(
     X_train = vectoriser.transform(train_features[e] for e in train_entities)
     y_train = np.asarray([labels[train_owner[e]] for e in train_entities], dtype=np.int64)
     logger(f"[Classification] X_train shape={X_train.shape}, n_entities={len(train_entities)}, n_feat_keys={len(list(vectoriser.keys))}")
+
+    # ── Threshold calibration via Youden's Index ─────────────────────────────
+    threshold_cfg = config.get("threshold", {}) or {}
+    threshold_method = str(threshold_cfg.get("method", "youden")).lower()
+
+    decision_threshold: float = float(threshold_cfg.get("value", 0.5)) if threshold_method == "fixed" else 0.5
+    youden_j_val: Optional[float] = None
+    n_loo_predictions: int = 0  # number of out-of-sample predictions used for Youden calibration
+
+    if threshold_method == "youden":
+        # Use leave-one-subject-out on the training set to get out-of-sample
+        # probabilities for every training entity.  This works robustly even
+        # when only 2–3 subjects per class are available (common in LOSO).
+        try:
+            from tracking.classification.classifiers_ext import set_progress_logger  # noqa: PLC0415
+            set_progress_logger(None)
+        except ImportError:
+            pass
+        y_loo, p_loo = _loo_calib_probabilities(
+            train_entities, train_features, train_owner, labels,
+            vectoriser, classifier_cls, classifier_cfg, logger,
+        )
+        try:
+            from tracking.classification.classifiers_ext import set_progress_logger  # noqa: PLC0415
+            set_progress_logger(logger)
+        except ImportError:
+            pass
+
+        n_unique_labels = len(set(y_loo.tolist())) if len(y_loo) else 0
+        if n_unique_labels >= 2:
+            decision_threshold, youden_j_val = _find_youden_threshold(y_loo, p_loo)
+            n_loo_predictions = int(len(y_loo))
+            logger(
+                f"[Classification] Youden (LOO) threshold = {decision_threshold:.4f} "
+                f"(J = {youden_j_val:.4f}, n_loo_predictions = {len(y_loo)})"
+            )
+        else:
+            logger(
+                f"[Classification] Youden LOO calibration degenerate "
+                f"(n_loo={len(y_loo)}, unique_labels={n_unique_labels}); using 0.5"
+            )
+
+    if threshold_method == "fixed":
+        logger(f"[Classification] Using fixed threshold: {decision_threshold:.4f}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     model_dir = os.path.join(results_dir, "classification")
     os.makedirs(model_dir, exist_ok=True)
@@ -450,7 +685,7 @@ def _run_subject_classification_impl(
     if not source_model or source_model not in test_predictions:
         raise RuntimeError("Classification source_model not found in tracking predictions")
 
-    if seg_workflow is not None:
+    if seg_enabled:
         missing_masks = sum(
             1 for _video, preds in test_predictions[source_model].items() for pred in preds if pred.segmentation is None
         )
@@ -459,7 +694,7 @@ def _run_subject_classification_impl(
             # CTS static features, which is acceptable for a partial prediction.
             logger(
                 f"[Classification] Warning: {missing_masks} test frame(s) are missing "
-                "segmentation masks. CTS static features will be partial for those frames."
+                "segmentation masks from the main pipeline. CTS/TS static features will be partial for those frames."
             )
 
     test_features, test_owner, test_sources = _prepare_entity_features(
@@ -481,7 +716,7 @@ def _run_subject_classification_impl(
     logger(f"[Classification] X_train shape: {X_train.shape}, X_test shape: {X_test.shape}, n_feat_keys: {len(list(vectoriser.keys))}")
 
     logger(f"[Classification] Evaluating classifier on {len(test_entities)} entities")
-    y_pred = classifier.predict(X_test)
+    y_pred_default = classifier.predict(X_test)
     prob_positive: List[float] = []
     try:
         prob_matrix = classifier.predict_proba(X_test)
@@ -494,9 +729,30 @@ def _run_subject_classification_impl(
             pos_idx = 1 if prob_matrix.shape[1] > 1 else 0
         prob_positive = prob_matrix[:, pos_idx].tolist()
     except Exception:
-        prob_positive = [0.0 for _ in y_pred]
+        prob_positive = [0.0 for _ in y_pred_default]
+
+    # Apply the calibrated threshold (Youden or fixed) to prob_positive
+    if prob_positive and any(p > 0.0 for p in prob_positive):
+        y_pred = np.where(
+            np.asarray(prob_positive) >= decision_threshold, 1, 0
+        ).astype(np.int64)
+        logger(
+            f"[Classification] Threshold applied: {decision_threshold:.4f} "
+            f"(method={threshold_method})"
+        )
+    else:
+        # No valid probabilities – fall back to default predict()
+        y_pred = y_pred_default
+        decision_threshold = 0.5
+        logger("[Classification] Falling back to default predict() (no valid probabilities).")
 
     metrics = summarise_classification(y_test, y_pred, prob_positive)
+    metrics["threshold_used"] = round(decision_threshold, 6)
+    metrics["threshold_method"] = threshold_method
+    if youden_j_val is not None:
+        metrics["youden_j"] = round(youden_j_val, 6)
+    if n_loo_predictions:
+        metrics["threshold_n_loo_predictions"] = n_loo_predictions
     logger(
         "[Classification] Metrics: "
         + ", ".join(f"{k}={v:.4f}" for k, v in metrics.items() if isinstance(v, (int, float)))
@@ -515,6 +771,10 @@ def _run_subject_classification_impl(
         "test_entity_subject_map": test_owner,
         "feature_keys": list(vectoriser.keys),
         "train_info": train_info,
+        "threshold_method": threshold_method,
+        "threshold_used": round(decision_threshold, 6),
+        "youden_j": round(youden_j_val, 6) if youden_j_val is not None else None,
+        "threshold_n_loo_predictions": n_loo_predictions,
     }
     with open(os.path.join(model_dir, "artefacts.json"), "w", encoding="utf-8") as f:
         json.dump(artefacts, f, ensure_ascii=False, indent=2)
@@ -523,9 +783,13 @@ def _run_subject_classification_impl(
     for idx, entity in enumerate(test_entities):
         subject_id = test_owner.get(entity)
         source_paths = test_sources.get(entity, [])
+        # Strip the subject/ prefix added for uniqueness in video-level mode so
+        # that entity_id in the output is just the video stem (e.g. "Grasp"),
+        # which the web viewer's canonical-modality mapping expects.
+        display_entity_id = entity.rsplit("/", 1)[-1] if "/" in entity else entity
         rows.append(
             {
-                "entity_id": entity,
+                "entity_id": display_entity_id,
                 "subject_id": subject_id,
                 "source_videos": source_paths,
                 "label_true": int(y_test[idx]),
@@ -535,11 +799,6 @@ def _run_subject_classification_impl(
         )
     with open(os.path.join(model_dir, "predictions.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
-
-    if seg_metrics_by_model:
-        seg_metrics_path = os.path.join(seg_results_root, "metrics_summary.json")
-        with open(seg_metrics_path, "w", encoding="utf-8") as f:
-            json.dump(seg_metrics_by_model, f, ensure_ascii=False, indent=2)
 
     return metrics
 

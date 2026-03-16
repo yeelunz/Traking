@@ -348,7 +348,11 @@ class SegmentationWorkflow:
         """Apply preprocessing modules to a frame (BGR or grayscale).
 
         Preprocessing modules operate on RGB for 3-channel images.
+        Frames are always converted to grayscale first to ensure consistent processing.
         """
+        if frame.ndim == 3:
+            _g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not preprocs:
             return frame
         if frame.ndim == 2:
@@ -706,7 +710,11 @@ class SegmentationWorkflow:
             gt = None
             if gt_annotations and video_path in gt_annotations:
                 gt = gt_annotations[video_path]
-            out_dir = os.path.join(output_root, os.path.splitext(os.path.basename(video_path))[0])
+            # Two-level layout: {subject_id}/{vid_stem} to avoid collision when
+            # different subjects share the same video filename.
+            subject_id = os.path.basename(os.path.dirname(video_path))
+            vid_stem = os.path.splitext(os.path.basename(video_path))[0]
+            out_dir = os.path.join(output_root, subject_id, vid_stem)
             ensure_dir(out_dir)
             metrics, raw_accum = self.predict_video(video_path, predictions, out_dir, gt, viz_settings)
             metrics_by_video[video_path] = metrics
@@ -743,7 +751,9 @@ class SegmentationWorkflow:
                 model_to_restore.eval()
         gt_by_frame: Dict[int, FramePrediction] = {}
         if gt_annotation is not None:
-            gt_samples = attach_ground_truth_segmentation(gt_annotation, self.dataset_root)
+            gt_samples = attach_ground_truth_segmentation(
+                gt_annotation, self.dataset_root, video_path=video_path
+            )
             gt_by_frame = {sample.frame_index: sample for sample in gt_samples}
         accum: Dict[str, list] = {"dice": [], "iou": [], "centroid": []}
         per_frame_metrics: Dict[int, Dict[str, Optional[float]]] = {}
@@ -923,34 +933,35 @@ class SegmentationWorkflow:
                             full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
                             mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
                             computed_mask = False
-                        if self.input_size:
-                            roi_resized = cv2.resize(
-                                roi,
-                                (self.input_size[1], self.input_size[0]),
-                                interpolation=cv2.INTER_LINEAR,
-                            )
                         else:
-                            roi_resized = roi
-                        roi_tensor = (
-                            torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
-                            .permute(2, 0, 1)
-                            .unsqueeze(0)
-                        )
-                        roi_tensor = roi_tensor.to(self.device)
-                        start_time = time.perf_counter()
-                        logits = self._run_model_with_fallback(roi_tensor)
-                        probs = torch.sigmoid(logits)
-                        infer_elapsed = time.perf_counter() - start_time
-                        total_infer_time += infer_elapsed
-                        frame_counter += 1
-                        mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
-                        mask_roi = keep_largest_component(mask_roi)
-                        mask_roi = fill_holes(mask_roi)
-                        if self.input_size and (orig_h, orig_w) != self.input_size:
-                            mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-                        mask_roi = keep_largest_component(mask_roi)
-                        mask_roi = fill_holes(mask_roi)
-                        full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
+                            if self.input_size:
+                                roi_resized = cv2.resize(
+                                    roi,
+                                    (self.input_size[1], self.input_size[0]),
+                                    interpolation=cv2.INTER_LINEAR,
+                                )
+                            else:
+                                roi_resized = roi
+                            roi_tensor = (
+                                torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
+                                .permute(2, 0, 1)
+                                .unsqueeze(0)
+                            )
+                            roi_tensor = roi_tensor.to(self.device)
+                            start_time = time.perf_counter()
+                            logits = self._run_model_with_fallback(roi_tensor)
+                            probs = torch.sigmoid(logits)
+                            infer_elapsed = time.perf_counter() - start_time
+                            total_infer_time += infer_elapsed
+                            frame_counter += 1
+                            mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
+                            mask_roi = keep_largest_component(mask_roi)
+                            mask_roi = fill_holes(mask_roi)
+                            if self.input_size and (orig_h, orig_w) != self.input_size:
+                                mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                            mask_roi = keep_largest_component(mask_roi)
+                            mask_roi = fill_holes(mask_roi)
+                            full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
 
                     # If earlier we forced an empty ROI, ensure full_mask is defined
                     if full_mask is None:
@@ -1156,34 +1167,35 @@ class SegmentationWorkflow:
                             full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
                             mask_roi = np.zeros((int(max(1, round(bbox.h))), int(max(1, round(bbox.w)))), dtype=np.uint8)
                             computed_mask = False
-                        if self.input_size:
-                            roi_resized = cv2.resize(
-                                roi,
-                                (self.input_size[1], self.input_size[0]),
-                                interpolation=cv2.INTER_LINEAR,
-                            )
                         else:
-                            roi_resized = roi
-                        roi_tensor = (
-                            torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
-                            .permute(2, 0, 1)
-                            .unsqueeze(0)
-                        )
-                        roi_tensor = roi_tensor.to(self.device)
-                        start_time = time.perf_counter()
-                        logits = self._run_model_with_fallback(roi_tensor)
-                        probs = torch.sigmoid(logits)
-                        infer_elapsed = time.perf_counter() - start_time
-                        total_infer_time += infer_elapsed
-                        frame_counter += 1
-                        mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
-                        mask_roi = keep_largest_component(mask_roi)
-                        mask_roi = fill_holes(mask_roi)
-                        if self.input_size and (orig_h, orig_w) != self.input_size:
-                            mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-                        mask_roi = keep_largest_component(mask_roi)
-                        mask_roi = fill_holes(mask_roi)
-                        full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
+                            if self.input_size:
+                                roi_resized = cv2.resize(
+                                    roi,
+                                    (self.input_size[1], self.input_size[0]),
+                                    interpolation=cv2.INTER_LINEAR,
+                                )
+                            else:
+                                roi_resized = roi
+                            roi_tensor = (
+                                torch.from_numpy(roi_resized.astype(np.float32) / 255.0)
+                                .permute(2, 0, 1)
+                                .unsqueeze(0)
+                            )
+                            roi_tensor = roi_tensor.to(self.device)
+                            start_time = time.perf_counter()
+                            logits = self._run_model_with_fallback(roi_tensor)
+                            probs = torch.sigmoid(logits)
+                            infer_elapsed = time.perf_counter() - start_time
+                            total_infer_time += infer_elapsed
+                            frame_counter += 1
+                            mask_roi = (probs.squeeze().cpu().numpy() > self.cfg.threshold).astype(np.uint8) * 255
+                            mask_roi = keep_largest_component(mask_roi)
+                            mask_roi = fill_holes(mask_roi)
+                            if self.input_size and (orig_h, orig_w) != self.input_size:
+                                mask_roi = cv2.resize(mask_roi, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                            mask_roi = keep_largest_component(mask_roi)
+                            mask_roi = fill_holes(mask_roi)
+                            full_mask = place_mask_on_canvas(frame.shape[:2], mask_roi, bbox)
 
                     if full_mask is None:
                         full_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -1705,10 +1717,15 @@ class SegmentationWorkflow:
         mask_path = segmentation.mask_path
         if os.path.isabs(mask_path):
             abs_path = mask_path
+            if not os.path.exists(abs_path):
+                return None
         else:
-            abs_path = os.path.join(self.dataset_root, mask_path)
-        if not os.path.exists(abs_path):
-            return None
+            video_dir = os.path.dirname(os.path.abspath(video_path)) if video_path else None
+            from .dataset import _resolve_gt_mask_path  # avoid circular at module level
+            resolved = _resolve_gt_mask_path(mask_path, self.dataset_root, video_dir)
+            if resolved is None:
+                return None
+            abs_path = resolved
         # Guard against zero-byte files: Ultralytics patches cv2.imread to use
         # np.fromfile + imdecode; empty files produce an assertion failure.
         if os.path.getsize(abs_path) == 0:

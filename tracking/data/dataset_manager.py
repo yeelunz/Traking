@@ -45,7 +45,7 @@ class COCOJsonDatasetManager(DatasetManager):
         self._scan()
 
     def _scan(self):
-        exts = {".mp4", ".avi", ".mov", ".mkv"}
+        exts = {".mp4", ".avi", ".mov", ".mkv", ".wmv"}
         videos: List[str] = []
         missing: List[str] = []
         root_dir = os.path.abspath(self.root)
@@ -65,8 +65,12 @@ class COCOJsonDatasetManager(DatasetManager):
                         with open(json_path, "r", encoding="utf-8") as f:
                             data = json.load(f)
                         self.ann_by_video[video_path] = data
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        import logging as _logging
+                        _logging.getLogger(__name__).warning(
+                            "Failed to parse annotation %s: %s", json_path, exc,
+                        )
+                        missing.append(video_path)
                 else:
                     missing.append(video_path)
         videos.sort()
@@ -161,25 +165,17 @@ class COCOJsonDatasetManager(DatasetManager):
         groups = self._group_by_subject()
         subjects = list(groups.keys())
         random.Random(seed).shuffle(subjects)
-        total_videos = sum(len(groups[s]) for s in subjects)
-        train_ratio, val_ratio, test_ratio = ratios
-        target_train = int(total_videos * max(0.0, train_ratio))
-        target_val = int(total_videos * max(0.0, val_ratio))
-        train: List[str] = []
-        val: List[str] = []
-        test: List[str] = []
-        counts = [0, 0, 0]
-        for subject in subjects:
-            vids = groups[subject]
-            if counts[0] < target_train:
-                train.extend(vids)
-                counts[0] += len(vids)
-            elif counts[1] < target_val:
-                val.extend(vids)
-                counts[1] += len(vids)
-            else:
-                test.extend(vids)
-                counts[2] += len(vids)
+        n_subjects = len(subjects)
+        train_ratio, val_ratio, _test_ratio = ratios
+        # Split by *subject count* so every subject stays intact in one bucket.
+        n_train = max(1, int(n_subjects * max(0.0, train_ratio)))
+        n_val = int(n_subjects * max(0.0, val_ratio))
+        train_subjects = subjects[:n_train]
+        val_subjects = subjects[n_train:n_train + n_val]
+        test_subjects = subjects[n_train + n_val:]
+        train = [v for s in train_subjects for v in groups[s]]
+        val = [v for s in val_subjects for v in groups[s]]
+        test = [v for s in test_subjects for v in groups[s]]
         return train, val, test
 
     def k_fold(self, k: int, seed: int = 0) -> Iterable[Dict[str, Any]]:
@@ -188,11 +184,15 @@ class COCOJsonDatasetManager(DatasetManager):
             groups = self._group_by_subject()
             subjects = list(groups.keys())
             random.Random(seed).shuffle(subjects)
-            fold_size = max(1, len(subjects) // k)
+            # Use round-robin assignment so remainder subjects are distributed
+            # evenly — every subject appears in exactly one validation fold.
+            fold_bins: list[list[str]] = [[] for _ in range(k)]
+            for idx, s in enumerate(subjects):
+                fold_bins[idx % k].append(s)
             for i in range(k):
-                val_subjects = subjects[i * fold_size:(i + 1) * fold_size]
-                val = [v for s in val_subjects for v in groups[s]]
-                train = [v for s in subjects if s not in val_subjects for v in groups[s]]
+                val_set = set(fold_bins[i])
+                val = [v for s in fold_bins[i] for v in groups[s]]
+                train = [v for s in subjects if s not in val_set for v in groups[s]]
                 yield {
                     "train": SimpleDataset(train, self.ann_by_video),
                     "val": SimpleDataset(val, self.ann_by_video),
@@ -200,10 +200,13 @@ class COCOJsonDatasetManager(DatasetManager):
         else:
             vids = self.videos[:]
             random.Random(seed).shuffle(vids)
-            fold_size = max(1, len(vids) // k)
+            fold_bins_v: list[list[str]] = [[] for _ in range(k)]
+            for idx, v in enumerate(vids):
+                fold_bins_v[idx % k].append(v)
             for i in range(k):
-                val = vids[i * fold_size:(i + 1) * fold_size]
-                train = [v for v in vids if v not in val]
+                val_set = set(fold_bins_v[i])
+                val = fold_bins_v[i]
+                train = [v for v in vids if v not in val_set]
                 yield {
                     "train": SimpleDataset(train, self.ann_by_video),
                     "val": SimpleDataset(val, self.ann_by_video),

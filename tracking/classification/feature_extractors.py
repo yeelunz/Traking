@@ -1,10 +1,11 @@
 """Feature extractors for the classification pipeline.
 
 提供兩種特徵提取方法：
-1. ``motion_only``  — 僅運動特徵 (含卡爾曼濾波平滑)
+1. ``motion_only``  — 僅運動特徵 (多尺度 Hampel + 雙向 S-G 平滑)
 2. ``motion_texture`` — 運動特徵 + 紋理特徵 + CSA 靜態特徵 (紋理過多時以 PCA 降維)
 
 原有的 basic / texture_hybrid / backbone_texture / segmentation_motion 已移除。
+卡爾曼濾波已完全移除，改用多尺度雙階段 Hampel + 雙向 Savitzky-Golay 濾波。
 """
 from __future__ import annotations
 
@@ -32,13 +33,69 @@ def _safe_mean(arr: np.ndarray) -> float:
     return float(np.mean(arr)) if arr.size else 0.0
 
 
-# ───────────────────── Kalman Filter ─────────────────────
+def _global_standardize_features(
+    features_list: Sequence[Dict[str, float]],
+    keys: Sequence[str],
+    *,
+    fit: bool,
+    mean: Optional[np.ndarray],
+    std: Optional[np.ndarray],
+) -> Tuple[Sequence[Dict[str, float]], np.ndarray, np.ndarray]:
+    """Global Z-score standardization over a list of feature dicts.
+
+    Parameters
+    ----------
+    fit : bool
+        True => fit mean/std on this batch (training set) and apply.
+        False => apply provided mean/std (validation/test set).
+    """
+    if not features_list:
+        if mean is None:
+            mean = np.zeros(len(keys), dtype=np.float64)
+        if std is None:
+            std = np.ones(len(keys), dtype=np.float64)
+        return [], mean, std
+
+    X = np.array(
+        [[feat.get(k, 0.0) for k in keys] for feat in features_list],
+        dtype=np.float64,
+    )
+
+    if fit:
+        mean = X.mean(axis=0)
+        std = X.std(axis=0)
+        std = np.where(std < 1e-9, 1.0, std)
+    else:
+        if mean is None or std is None:
+            raise RuntimeError(
+                "Global feature scaler is not fitted. finalize_batch(fit=True) "
+                "must be called on training data before finalize_batch(fit=False)."
+            )
+
+    X = (X - mean) / std
+    np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+    out: List[Dict[str, float]] = []
+    for i, feat in enumerate(features_list):
+        new_feat = dict(feat)
+        for j, k in enumerate(keys):
+            new_feat[k] = float(X[i, j])
+        out.append(new_feat)
+    return out, mean, std
+
+
+# ───────────────────── Trajectory Smoothing (Hampel + S-G) ─────────────────────
+
+from .trajectory_filter import smooth_trajectory_2d as _smooth_trajectory_2d
+
+# Legacy stub: _KalmanSmoother2D is DEPRECATED — retained only for backward
+# compatibility of imports; all smoothing now uses multi-scale Hampel + S-G.
 
 class _KalmanSmoother2D:
-    """簡易二維卡爾曼濾波器，用於平滑 centroid 軌跡。
+    """DEPRECATED — retained for import compatibility only.
 
-    狀態: [x, y, vx, vy]
-    觀測: [x, y]
+    All smoothing now uses multi-scale Hampel + bidirectional Savitzky-Golay
+    via ``trajectory_filter.smooth_trajectory_2d``.
     """
 
     def __init__(
@@ -46,6 +103,12 @@ class _KalmanSmoother2D:
         process_noise: float = 1e-2,
         measurement_noise: float = 1e-1,
     ) -> None:
+        import warnings
+        warnings.warn(
+            "_KalmanSmoother2D is deprecated; use trajectory_filter.smooth_trajectory_2d instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.process_noise = process_noise
         self.measurement_noise = measurement_noise
 
@@ -54,78 +117,8 @@ class _KalmanSmoother2D:
         observations: np.ndarray,
         frame_indices: np.ndarray,
     ) -> np.ndarray:
-        """Forward-backward Kalman smoothing (RTS smoother).
-
-        Parameters
-        ----------
-        observations : (N, 2) centroid positions
-        frame_indices : (N,) frame numbers (used to compute dt)
-
-        Returns
-        -------
-        smoothed : (N, 2)
-        """
-        n = observations.shape[0]
-        if n <= 2:
-            return observations.copy()
-
-        dt_arr = np.diff(frame_indices).astype(np.float64)
-        dt_arr[dt_arr == 0] = 1.0
-
-        # Forward pass
-        dim_x, dim_z = 4, 2
-        x = np.zeros(dim_x)
-        x[:2] = observations[0]
-        P = np.eye(dim_x) * 1.0
-        Q_base = np.eye(dim_x) * self.process_noise
-        R = np.eye(dim_z) * self.measurement_noise
-        H = np.zeros((dim_z, dim_x))
-        H[0, 0] = H[1, 1] = 1.0
-
-        xs_fwd = np.zeros((n, dim_x))
-        Ps_fwd = np.zeros((n, dim_x, dim_x))
-        xs_fwd[0] = x
-        Ps_fwd[0] = P
-
-        for k in range(1, n):
-            dt = dt_arr[k - 1]
-            F = np.eye(dim_x)
-            F[0, 2] = dt
-            F[1, 3] = dt
-            Q = Q_base * (dt ** 2)
-
-            # Predict
-            x_pred = F @ x
-            P_pred = F @ P @ F.T + Q
-
-            # Update
-            z = observations[k]
-            y_innov = z - H @ x_pred
-            S = H @ P_pred @ H.T + R
-            K = P_pred @ H.T @ np.linalg.inv(S)
-            x = x_pred + K @ y_innov
-            P = (np.eye(dim_x) - K @ H) @ P_pred
-
-            xs_fwd[k] = x
-            Ps_fwd[k] = P
-
-        # Backward (RTS) smoothing
-        xs_smooth = xs_fwd.copy()
-        for k in range(n - 2, -1, -1):
-            dt = dt_arr[k]
-            F = np.eye(dim_x)
-            F[0, 2] = dt
-            F[1, 3] = dt
-            Q = Q_base * (dt ** 2)
-
-            P_pred = F @ Ps_fwd[k] @ F.T + Q
-            try:
-                G = Ps_fwd[k] @ F.T @ np.linalg.inv(P_pred)
-            except np.linalg.LinAlgError:
-                continue
-            xs_smooth[k] = xs_fwd[k] + G @ (xs_smooth[k + 1] - F @ xs_fwd[k])
-
-        return xs_smooth[:, :2]
+        """Forward to multi-scale Hampel + bidirectional S-G."""
+        return _smooth_trajectory_2d(observations, frame_indices)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -180,7 +173,20 @@ def _compute_motion_features(
     kalman_process_noise: float = 1e-2,
     kalman_measurement_noise: float = 1e-1,
 ) -> Dict[str, float]:
-    """從追蹤樣本計算運動特徵 (含卡爾曼平滑)。"""
+    """從追蹤樣本計算運動特徵。
+
+    Parameters ``kalman_process_noise`` and ``kalman_measurement_noise``
+    are kept in the signature for backward compatibility but are **ignored**.
+
+    NOTE (2025-06): Upstream trajectory filtering (multi-scale Hampel + bidi
+    S-G via ``trajectory_filter.filter_detections``) is now applied to **both**
+    test predictions and ground-truth training trajectories *before* they are
+    passed to the feature extractor.  Re-smoothing here would cause
+    double-smoothing (over-attenuation of legitimate high-frequency dynamics)
+    and would also re-introduce Hampel on GT trajectories that were explicitly
+    designed to bypass outlier removal.  Therefore the centroids are used
+    as-is from the input FramePrediction objects.
+    """
     zeros = OrderedDict((k, 0.0) for k in MOTION_FEATURE_KEYS)
     if not samples:
         return zeros
@@ -190,9 +196,9 @@ def _compute_motion_features(
     bboxes = np.asarray([s.bbox for s in samples], dtype=np.float64)
     areas = bboxes[:, 2] * bboxes[:, 3]
 
-    # ─── 卡爾曼平滑 ───
-    smoother = _KalmanSmoother2D(kalman_process_noise, kalman_measurement_noise)
-    centers = smoother.smooth(raw_centers, frames)
+    # Upstream trajectory_filter already applied appropriate smoothing;
+    # use pre-smoothed centroids directly (no double-smoothing).
+    centers = raw_centers
 
     n = len(samples)
     duration = float(frames[-1] - frames[0]) if n > 1 else 0.0
@@ -233,12 +239,13 @@ def _compute_motion_features(
     if n > 2:
         diffs_all = np.diff(centers, axis=0)
         curv_list = []
+        _MIN_SPEED_FOR_CURVATURE = 1.0  # at least 1 px/frame to avoid blow-up
         for i in range(len(diffs_all) - 1):
             v1 = diffs_all[i]
             v2 = diffs_all[i + 1]
             cross = abs(v1[0] * v2[1] - v1[1] * v2[0])
             norm_v1 = np.linalg.norm(v1)
-            if norm_v1 > 1e-9:
+            if norm_v1 > _MIN_SPEED_FOR_CURVATURE:
                 curv_list.append(cross / (norm_v1 ** 3 + 1e-9))
             else:
                 curv_list.append(0.0)
@@ -580,31 +587,29 @@ def _build_subject_keys(video_keys: List[str], subject_stats: List[str]) -> List
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Extractor 1: Motion Only (with Kalman filtering)
+# Extractor 1: Motion Only (with Hampel + S-G filtering)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 @register_feature_extractor("motion_only")
 class MotionOnlyFeatureExtractor(TrajectoryFeatureExtractor):
-    """僅提取運動特徵，使用卡爾曼濾波平滑 centroid 軌跡。
+    """僅提取運動特徵，使用多尺度 Hampel + 雙向 S-G 平滑 centroid 軌跡。
 
     運動特徵 (31 維):
     位移/路徑長度/直線度比/速度統計/加速度統計/急動度統計/曲率/角度變化/面積動態
     """
 
     name = "MotionOnlyFeatures"
-    DEFAULT_CONFIG = {
-        "kalman_process_noise": 1e-2,
-        "kalman_measurement_noise": 1e-1,
-    }
+    DEFAULT_CONFIG = {}
 
     def __init__(self, params: Dict[str, Any] | None = None):
         cfg = params or {}
-        self._kalman_process_noise = float(cfg.get("kalman_process_noise", 1e-2))
-        self._kalman_measurement_noise = float(cfg.get("kalman_measurement_noise", 1e-1))
+        # Legacy Kalman params accepted but ignored
         self._video_keys = list(MOTION_FEATURE_KEYS)
         self._subject_stats = [str(s) for s in cfg.get("aggregate_stats", ["mean", "std", "min", "max"])]
         self._subject_keys = _build_subject_keys(self._video_keys, self._subject_stats)
+        self._feat_mean: Optional[np.ndarray] = None
+        self._feat_std: Optional[np.ndarray] = None
 
     def feature_order(self, level: str = "video") -> Sequence[str]:
         if str(level).lower() == "subject":
@@ -616,14 +621,25 @@ class MotionOnlyFeatureExtractor(TrajectoryFeatureExtractor):
         samples: Sequence[FramePrediction],
         video_path: Optional[str] = None,
     ) -> Dict[str, float]:
-        return _compute_motion_features(
-            samples,
-            self._kalman_process_noise,
-            self._kalman_measurement_noise,
-        )
+        return _compute_motion_features(samples)
 
     def aggregate_subject(self, video_features: Sequence[Dict[str, float]]) -> Dict[str, float]:
         return _aggregate_video_features(video_features, self._video_keys, self._subject_stats)
+
+    def finalize_batch(
+        self,
+        features_list: Sequence[Dict[str, float]],
+        *,
+        fit: bool = True,
+    ) -> Sequence[Dict[str, float]]:
+        result, self._feat_mean, self._feat_std = _global_standardize_features(
+            features_list,
+            self._video_keys,
+            fit=fit,
+            mean=self._feat_mean,
+            std=self._feat_std,
+        )
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -636,7 +652,7 @@ class MotionTextureFeatureExtractor(TrajectoryFeatureExtractor):
     """運動特徵 + 紋理特徵 + CSA 靜態特徵。
 
     特徵結構:
-    - 運動特徵 (31 維): 含卡爾曼平滑
+    - 運動特徵 (31 維): 多尺度 Hampel + 雙向 S-G 平滑
     - CSA 靜態特徵 (8 維): 第一幀 / 最後一幀的面積/周長/等效直徑/圓度
     - 紋理特徵: 第一幀和最後一幀的灰階紋理描述子 (GLCM + LBP + 統計量)
       → 降維至 dim(motion) + dim(CSA) = 39 維
@@ -649,15 +665,12 @@ class MotionTextureFeatureExtractor(TrajectoryFeatureExtractor):
 
     name = "MotionTextureFeatures"
     DEFAULT_CONFIG = {
-        "kalman_process_noise": 1e-2,
-        "kalman_measurement_noise": 1e-1,
         "texture_patch_size": 96,
     }
 
     def __init__(self, params: Dict[str, Any] | None = None):
         cfg = params or {}
-        self._kalman_process_noise = float(cfg.get("kalman_process_noise", 1e-2))
-        self._kalman_measurement_noise = float(cfg.get("kalman_measurement_noise", 1e-1))
+        # Legacy Kalman params accepted but ignored
         self._patch_size = int(cfg.get("texture_patch_size", 96))
         self._subject_stats = [str(s) for s in cfg.get("aggregate_stats", ["mean", "std", "min", "max"])]
 
@@ -675,6 +688,8 @@ class MotionTextureFeatureExtractor(TrajectoryFeatureExtractor):
         # PCA 狀態
         self._pca_mean: Optional[np.ndarray] = None
         self._pca_components: Optional[np.ndarray] = None
+        self._feat_mean: Optional[np.ndarray] = None
+        self._feat_std: Optional[np.ndarray] = None
 
         # 紋理 key names
         self._texture_keys = [f"tex_pca_{i:03d}" for i in range(self._texture_target_dim)]
@@ -694,11 +709,7 @@ class MotionTextureFeatureExtractor(TrajectoryFeatureExtractor):
         video_path: Optional[str] = None,
     ) -> Dict[str, float]:
         # 1. Motion features
-        motion = _compute_motion_features(
-            samples,
-            self._kalman_process_noise,
-            self._kalman_measurement_noise,
-        )
+        motion = _compute_motion_features(samples)
 
         # 2. CSA features
         csa = _compute_csa_features(samples)
@@ -772,6 +783,14 @@ class MotionTextureFeatureExtractor(TrajectoryFeatureExtractor):
             feat.pop("_raw_texture_vec", None)
             result[row_idx] = feat
 
+        # Global standardization across all tabular features
+        result, self._feat_mean, self._feat_std = _global_standardize_features(
+            result,
+            self._video_keys,
+            fit=fit,
+            mean=self._feat_mean,
+            std=self._feat_std,
+        )
         return result
 
     def _reduce_texture(self, X: np.ndarray) -> np.ndarray:
@@ -815,8 +834,11 @@ class MotionTextureFeatureExtractor(TrajectoryFeatureExtractor):
         """使用已擬合的 PCA 參數進行轉換 (測試集)。"""
         target_dim = self._texture_target_dim
         if self._pca_mean is None or self._pca_components is None:
-            # 尚未擬合 → fallback 到擬合模式
-            return self._reduce_texture(X)
+            raise RuntimeError(
+                "PCA state is not available.  finalize_batch(fit=True) must "
+                "be called on training data before finalize_batch(fit=False) "
+                "is used to transform test data.  (motion_texture extractor)"
+            )
 
         n_samples = X.shape[0]
         X_centered = X - self._pca_mean

@@ -38,6 +38,18 @@
         </div>
       </aside>
       <main>
+        <section id="schedule-note-panel" class="hidden">
+          <div class="section-header">
+            <div>
+              <h2 id="schedule-note-title">排程 Note</h2>
+              <p id="schedule-note-path"></p>
+            </div>
+            <div class="note-actions">
+              <span id="schedule-note-status" class="note-status"></span>
+            </div>
+          </div>
+          <textarea id="schedule-note-input" rows="5" placeholder="在這裡記錄這個排程是做什麼的…"></textarea>
+        </section>
         <section id="welcome">
           <h2>請從左側選擇一個實驗</h2>
           <p>這個 Web UI 會自動讀取 schedule 中的 metadata、detection、segmentation 及 classification 指標、可視化結果。選擇實驗後即可查看詳細資訊。</p>
@@ -141,7 +153,7 @@
           <div class="grid summary-grid">
             <div>
               <div class="summary-header">
-                <h3>Detection 彙總</h3>
+                <h3>Detection 彙總 <span class="badge badge-raw">濾波前</span></h3>
               </div>
               <table id="detection-summary-table" class="summary-table"></table>
             </div>
@@ -153,10 +165,83 @@
             </div>
           </div>
 
+          <!-- Filtered Detection Section (IoU/CE/SR re-evaluated after trajectory filter) -->
+          <section id="filtered-detection-section" class="hidden">
+            <div class="summary-header">
+              <h3>Detection 彙總 <span class="badge badge-filtered">濾波後（分割實際使用）</span></h3>
+            </div>
+            <table id="filtered-detection-summary-table" class="summary-table" style="max-width:480px"></table>
+          </section>
+
+          <!-- Trajectory Filter Section (before/after comparison) -->
+          <section id="trajectory-filter-section" class="hidden">
+            <div class="summary-header">
+              <h3>軌跡濾波 (Trajectory Filter) — Before / After</h3>
+            </div>
+            <div class="grid summary-grid">
+              <div>
+                <h4>濾波前 (Before)</h4>
+                <table id="trajectory-filter-before-table" class="summary-table"></table>
+              </div>
+              <div>
+                <h4>濾波後 (After)</h4>
+                <table id="trajectory-filter-after-table" class="summary-table"></table>
+              </div>
+            </div>
+            <div id="trajectory-filter-config" class="config-details"></div>
+            <details>
+              <summary>Per-Video 軌跡濾波 Details</summary>
+              <table id="trajectory-filter-table"></table>
+            </details>
+          </section>
+
           <!-- Classification Section -->
           <section id="classification-section" class="hidden">
             <div class="section-header">
               <h3>Classification 結果</h3>
+            </div>
+            <div id="classification-threshold-panel" class="threshold-panel hidden">
+              <div class="threshold-card">
+                <div class="threshold-card-header">
+                  <h4>Threshold 分析</h4>
+                  <span id="classification-threshold-basis" class="threshold-basis"></span>
+                </div>
+                <!-- 訓練時使用的 Youden / fixed 閾值 -->
+                <div id="classification-threshold-actual-row" class="threshold-actual-row hidden">
+                  <div class="threshold-row-label">訓練時使用
+                    <span id="classification-threshold-actual-method-badge" class="threshold-method-badge"></span>
+                  </div>
+                  <div class="threshold-grid">
+                    <div class="threshold-main">
+                      <span class="threshold-label">閾值</span>
+                      <strong id="classification-threshold-actual-value">—</strong>
+                      <small id="classification-threshold-actual-j">—</small>
+                    </div>
+                    <div class="threshold-metrics">
+                      <div><label>Acc</label><span id="classification-threshold-actual-acc">—</span></div>
+                      <div><label>Precision</label><span id="classification-threshold-actual-precision">—</span></div>
+                      <div><label>Recall</label><span id="classification-threshold-actual-recall">—</span></div>
+                      <div><label>F1</label><span id="classification-threshold-actual-f1">—</span></div>
+                    </div>
+                  </div>
+                </div>
+                <!-- 事後所有 predictions 跑出的 Max-F1 建議值 -->
+                <div class="threshold-row-label">事後分析 (Max-F1)</div>
+                <div class="threshold-grid">
+                  <div class="threshold-main">
+                    <span class="threshold-label">建議值</span>
+                    <strong id="classification-threshold-value">—</strong>
+                    <small id="classification-threshold-sample">—</small>
+                  </div>
+                  <div class="threshold-metrics">
+                    <div><label>Acc</label><span id="classification-threshold-acc">—</span></div>
+                    <div><label>Precision</label><span id="classification-threshold-precision">—</span></div>
+                    <div><label>Recall</label><span id="classification-threshold-recall">—</span></div>
+                    <div><label>F1</label><span id="classification-threshold-f1">—</span></div>
+                  </div>
+                </div>
+                <p id="classification-threshold-note" class="threshold-note"></p>
+              </div>
             </div>
             <div class="grid summary-grid">
               <div>
@@ -194,15 +279,26 @@
                 <table id="voting-modality-table" class="voting-modality-table"></table>
               </div>
               <div class="voting-card">
-                <p class="voting-card-title">5-voting（全模態多數決）</p>
+                <p class="voting-card-title">全模態投票（多數決）</p>
                 <div id="voting-five-result"></div>
               </div>
             </div>
+            <div class="voting-two-col">
+              <div class="voting-card">
+                <p class="voting-card-title">全模態投票（Soft voting）</p>
+                <div id="voting-five-soft-result"></div>
+              </div>
+            </div>
             <div class="voting-combos-header">
-              <h4>3-模態組合排行</h4>
-              <span class="voting-combos-hint">C(5,3) = 10 種組合，多數決投票</span>
+              <h4>子集組合排行</h4>
+              <span class="voting-combos-hint">取最多 3 個模態組合，多數決投票</span>
             </div>
             <table id="voting-combos-table" class="voting-combos-table"></table>
+            <div class="voting-combos-header">
+              <h4>子集組合排行（Soft voting）</h4>
+              <span class="voting-combos-hint">以模態機率平均後做二元判定</span>
+            </div>
+            <table id="voting-soft-combos-table" class="voting-combos-table"></table>
           </section>
           <div class="grid">
             <div>
@@ -253,6 +349,6 @@
         </section>
       </main>
     </div>
-    <script src="/assets/app.js?v=20260307b"></script>
+    <script src="/assets/app.js?v=20260311a"></script>
   </body>
 </html>

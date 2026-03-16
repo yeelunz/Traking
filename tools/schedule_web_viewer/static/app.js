@@ -8,6 +8,8 @@ const state = {
   searchTerm: '',
   current: null,
   currentView: { mode: 'single', expId: null, label: '' },
+  noteAutosaveTimer: null,
+  currentClassificationPredictions: [],
   assetExpId: null,
   detectionChart: null,
   segmentationChart: null,
@@ -48,7 +50,20 @@ const CLASSIFICATION_SUMMARY_FIELDS = [
   { label: 'Precision', key: 'precision_positive', percent: true },
   { label: 'Recall', key: 'recall_positive', percent: true },
   { label: 'F1', key: 'f1_positive', percent: true },
-  { label: 'ROC AUC', key: 'roc_auc' }
+  { label: 'ROC AUC', key: 'roc_auc', percent: true, allowNull: true },
+  { label: 'Threshold', key: 'threshold_used', decimals: 4, chartExclude: true },
+  { label: "Youden's J", key: 'youden_j', decimals: 4, chartExclude: true },
+];
+
+const TRAJECTORY_FILTER_FIELDS = [
+  { label: 'Jitter CX', key: 'jitter_cx', decimals: 2 },
+  { label: 'Jitter CY', key: 'jitter_cy', decimals: 2 },
+  { label: 'Jitter W', key: 'jitter_w', decimals: 2 },
+  { label: 'Jitter H', key: 'jitter_h', decimals: 2 },
+  { label: 'Smoothness CX', key: 'smoothness_cx', decimals: 2 },
+  { label: 'Smoothness CY', key: 'smoothness_cy', decimals: 2 },
+  { label: 'Area Stability', key: 'area_stability', percent: true },
+  { label: 'Path Length', key: 'path_length', decimals: 1 },
 ];
 
 const SUMMARY_COLORS = ['#6aa5ff', '#f8c146', '#66dfc5', '#ff8ba7', '#bd93f9', '#94f7c5'];
@@ -59,6 +74,39 @@ async function fetchJSON(url, options) {
     throw new Error(await res.text());
   }
   return res.json();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function ensureScheduleNotePanel() {
+  let panel = document.getElementById('schedule-note-panel');
+  if (panel) return panel;
+  const main = document.querySelector('main');
+  if (!main) return null;
+  panel = document.createElement('section');
+  panel.id = 'schedule-note-panel';
+  panel.className = 'hidden';
+  panel.innerHTML = `
+    <div class="section-header">
+      <div>
+        <h2 id="schedule-note-title">排程 Note</h2>
+        <p id="schedule-note-path"></p>
+      </div>
+      <div class="note-actions">
+        <span id="schedule-note-status" class="note-status"></span>
+      </div>
+    </div>
+    <textarea id="schedule-note-input" rows="5" placeholder="在這裡記錄這個排程是做什麼的…"></textarea>
+  `;
+  main.insertBefore(panel, main.firstChild);
+  return panel;
 }
 
 function formatNumber(value, digits = 3) {
@@ -88,6 +136,12 @@ function formatPercentWithStd(value, std, digits = 2) {
 function formatPercentValue(value, digits = 2) {
   if (value === null || value === undefined) return '—';
   return `${Number(value).toFixed(digits)}%`;
+}
+
+function clamp01(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.max(0, Math.min(1, num));
 }
 
 function formatDatasetValueForExport(value, dataset) {
@@ -272,7 +326,7 @@ function renderExperiments() {
   state.filtered.forEach((exp) => {
     const li = document.createElement('li');
     const foldSuffix = exp.is_loso && exp.fold_count ? ` (LOSO × ${exp.fold_count})` : '';
-    li.innerHTML = `<strong>${exp.name}${foldSuffix}</strong><br /><small>${exp.relative_path}</small>`;
+    li.innerHTML = `<strong>${escapeHtml(exp.name)}${escapeHtml(foldSuffix)}</strong><br /><small>${escapeHtml(exp.relative_path)}</small>`;
     li.dataset.id = exp.id;
     if (state.current && state.current.id === exp.id) {
       li.classList.add('active');
@@ -286,9 +340,114 @@ function renderExperiments() {
   }
 }
 
+function getSelectedGroup() {
+  return state.groups.find((g) => g.key === state.selectedGroup) || null;
+}
+
+function getScheduleNoteContext() {
+  const group = getSelectedGroup();
+  if (!group) return null;
+  if (group.key === STANDALONE_GROUP_KEY) {
+    if (group.experiments.length !== 1) {
+      return null;
+    }
+    const exp = group.experiments[0];
+    return {
+      group,
+      groupPath: '',
+      expId: exp.id,
+      label: exp.name || exp.relative_path || exp.id,
+      pathLabel: exp.relative_path || exp.id,
+      note: exp.schedule_note || '',
+    };
+  }
+  return {
+    group,
+    groupPath: group.key,
+    expId: group.experiments[0]?.id || null,
+    label: group.label,
+    pathLabel: group.key,
+    note: group.note || '',
+  };
+}
+
+function renderScheduleNotePanel() {
+  ensureScheduleNotePanel();
+  const panel = document.getElementById('schedule-note-panel');
+  const title = document.getElementById('schedule-note-title');
+  const path = document.getElementById('schedule-note-path');
+  const input = document.getElementById('schedule-note-input');
+  const status = document.getElementById('schedule-note-status');
+  if (!panel || !title || !path || !input || !status) return;
+  const ctx = getScheduleNoteContext();
+  if (!ctx) {
+    panel.classList.add('hidden');
+    input.value = '';
+    path.textContent = '';
+    status.textContent = '';
+    status.className = 'note-status';
+    return;
+  }
+  panel.classList.remove('hidden');
+  title.textContent = `排程 Note：${ctx.label}`;
+  path.textContent = `排程位置：${ctx.pathLabel || '（單一實驗）'}`;
+  input.value = ctx.note || '';
+  status.textContent = '';
+  status.className = 'note-status';
+}
+
+async function saveCurrentScheduleNote() {
+  const input = document.getElementById('schedule-note-input');
+  const status = document.getElementById('schedule-note-status');
+  const ctx = getScheduleNoteContext();
+  if (!input || !status || !ctx) return;
+  const text = input.value;
+  status.textContent = '儲存中…';
+  status.className = 'note-status saving';
+  try {
+    await fetchJSON('/api/schedules/note', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        group_path: ctx.groupPath,
+        exp_id: ctx.expId,
+        text,
+      }),
+    });
+    if (ctx.group) {
+      ctx.group.note = text;
+      ctx.group.experiments.forEach((exp) => {
+        exp.schedule_note = text;
+      });
+    }
+    renderGroups();
+    status.textContent = '已儲存';
+    status.className = 'note-status saved';
+  } catch (err) {
+    console.error(err);
+    status.textContent = '儲存失敗';
+    status.className = 'note-status error';
+  }
+}
+
+function queueScheduleNoteAutosave() {
+  const status = document.getElementById('schedule-note-status');
+  if (state.noteAutosaveTimer) {
+    clearTimeout(state.noteAutosaveTimer);
+  }
+  if (status) {
+    status.textContent = '編輯中…';
+    status.className = 'note-status';
+  }
+  state.noteAutosaveTimer = setTimeout(() => {
+    state.noteAutosaveTimer = null;
+    saveCurrentScheduleNote();
+  }, 700);
+}
+
 function applySearch(term) {
   state.searchTerm = term;
-  const activeGroup = state.groups.find((g) => g.key === state.selectedGroup);
+  const activeGroup = getSelectedGroup();
   const pool = activeGroup ? activeGroup.experiments : state.experiments;
   const t = (term || '').trim().toLowerCase();
   state.filtered = pool.filter((exp) => {
@@ -315,9 +474,13 @@ function buildGroups() {
   state.experiments.forEach((exp) => {
     const key = exp.group_path ? exp.group_path : STANDALONE_GROUP_KEY;
     if (!buckets.has(key)) {
-      buckets.set(key, { key, label: normalizeGroupLabel(key), experiments: [] });
+      buckets.set(key, { key, label: normalizeGroupLabel(key), experiments: [], note: '' });
     }
-    buckets.get(key).experiments.push(exp);
+    const bucket = buckets.get(key);
+    bucket.experiments.push(exp);
+    if (!bucket.note && exp.schedule_note) {
+      bucket.note = exp.schedule_note;
+    }
   });
   state.groups = Array.from(buckets.values()).sort((a, b) => {
     if (a.key === STANDALONE_GROUP_KEY && b.key !== STANDALONE_GROUP_KEY) return 1;
@@ -347,7 +510,13 @@ function renderGroups() {
   } else {
     state.groups.forEach((group) => {
       const li = document.createElement('li');
-      li.textContent = `${group.label} (${group.experiments.length})`;
+      const title = document.createElement('div');
+      title.innerHTML = `<strong>${escapeHtml(group.label)}</strong> <small>(${group.experiments.length})</small>`;
+      li.appendChild(title);
+      const note = document.createElement('div');
+      note.className = 'group-note-preview';
+      note.textContent = group.note || '尚未填寫 note';
+      li.appendChild(note);
       if (state.selectedGroup === group.key) {
         li.classList.add('active');
       }
@@ -365,6 +534,7 @@ function selectGroup(key) {
   state.selectedGroup = key;
   state.current = null;
   renderGroups();
+  renderScheduleNotePanel();
   renderGroupOverview();
   applySearch(state.searchTerm);
   showWelcome();
@@ -435,7 +605,7 @@ function renderLosoFoldTable(folds) {
   const tbody = folds
     .map((fold) => {
       const cells = columns.map((c) => `<td>${c.format(fold)}</td>`).join('');
-      return `<tr data-exp-id="${fold.exp_id}">${cells}</tr>`;
+      return `<tr data-exp-id="${escapeHtml(fold.exp_id)}">${cells}</tr>`;
     })
     .join('');
   table.innerHTML = thead + tbody;
@@ -722,8 +892,8 @@ function renderGroupOverview() {
       const card = document.createElement('div');
       card.className = 'compare-card';
       card.innerHTML = `
-        <h4>${exp.name}</h4>
-        <p>${exp.relative_path}</p>
+        <h4>${escapeHtml(exp.name)}</h4>
+        <p>${escapeHtml(exp.relative_path)}</p>
         <div class="compare-metrics">
           <div class="compare-metric"><label>Det IoU</label><span>${formatPercent(previewMetric(exp, 'detection', 'iou_mean'))}</span></div>
           <div class="compare-metric"><label>Det SR@0.5</label><span>${formatPercent(previewMetric(exp, 'detection', 'success_rate_50'))}</span></div>
@@ -818,6 +988,7 @@ async function loadExperiments() {
   state.current = null;
   buildGroups();
   renderGroups();
+  renderScheduleNotePanel();
   document.getElementById('root-path').textContent = `Results root: ${data.root}`;
   renderGroupOverview();
   const searchInput = document.getElementById('search');
@@ -831,10 +1002,23 @@ function buildCards(metrics) {
   const detection = metrics.detection?.summary;
   const segmentation = metrics.segmentation?.summary;
   const classification = metrics.classification?.summary;
+  const tf = metrics.trajectory_filter?.summary;
   const entries = [];
   if (detection) {
     entries.push({ label: 'Detection IoU', value: formatPercentWithStd(detection.iou_mean, detection.iou_std) });
     entries.push({ label: 'Detection FPS', value: formatWithStd(detection.fps || detection.fps_mean, detection.fps_std) });
+  }
+  if (tf) {
+    const beforeJ = tf.before?.jitter_cx;
+    const afterJ = tf.after?.jitter_cx;
+    if (beforeJ != null && afterJ != null) {
+      const reduction = ((1 - afterJ / (beforeJ || 1)) * 100).toFixed(1);
+      entries.push({ label: 'Jitter 降低', value: `${reduction}%` });
+    }
+    const afterStab = tf.after?.area_stability;
+    if (afterStab != null) {
+      entries.push({ label: 'Area Stability', value: formatPercent(afterStab) });
+    }
   }
   if (segmentation) {
     entries.push({ label: 'Seg Dice', value: formatPercentWithStd(segmentation.dice_mean, segmentation.dice_std) });
@@ -843,9 +1027,8 @@ function buildCards(metrics) {
   if (classification) {
     entries.push({ label: 'Cls Accuracy', value: formatPercent(classification.accuracy) });
     entries.push({ label: 'Cls F1', value: formatPercent(classification.f1_positive) });
-    if (classification.roc_auc !== undefined && classification.roc_auc !== null) {
-      entries.push({ label: 'Cls ROC AUC', value: formatNumber(classification.roc_auc, 4) });
-    }
+    const aucVal = classification.roc_auc;
+    entries.push({ label: 'Cls ROC AUC', value: (aucVal !== undefined && aucVal !== null) ? formatNumber(aucVal, 4) : 'N/A' });
   }
   entries.forEach((item) => {
     const div = document.createElement('div');
@@ -875,6 +1058,13 @@ async function renderDetailSections(payload, expIdForAssets) {
 
   const detectionRows = payload.detection?.per_video || [];
   const segmentationRows = payload.segmentation?.per_video || [];
+
+  // Diagnostic logging — helps debug "無資料" issues in detection/segmentation tables
+  if (detectionRows.length === 0) {
+    console.warn('[Viewer] detection per_video is empty.', 'payload.detection:', payload.detection);
+  } else {
+    console.log(`[Viewer] Rendering ${detectionRows.length} detection per_video rows.`);
+  }
 
   buildTable('detection-table', detectionRows, [
     { label: 'Video', format: (row) => row.video },
@@ -928,21 +1118,218 @@ async function renderDetailSections(payload, expIdForAssets) {
 async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
   document.getElementById('exp-name').textContent = payload.experiment?.name || viewLabel || expIdForAssets || '';
   document.getElementById('exp-path').textContent = payload.experiment?.output_dir || '';
-  buildCards(payload);
-  renderSummaryTable('detection-summary-table', payload.detection?.summary, DETECTION_SUMMARY_FIELDS);
-  renderSummaryTable('segmentation-summary-table', payload.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS);
-  renderClassificationSection(payload.classification);
-  await renderDetailSections(payload, expIdForAssets);
+
+  // Each section rendering is wrapped in try-catch so that a failure in one
+  // section (e.g. classification) does NOT prevent subsequent sections
+  // (e.g. detection per-video tables) from rendering.
+  try { buildCards(payload); } catch (e) { console.error('[Viewer] buildCards error:', e); }
+  try { renderSummaryTable('detection-summary-table', payload.detection?.summary, DETECTION_SUMMARY_FIELDS); } catch (e) { console.error('[Viewer] detection summary error:', e); }
+  try { renderSummaryTable('segmentation-summary-table', payload.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS); } catch (e) { console.error('[Viewer] segmentation summary error:', e); }
+  try {
+    const _fdSec = document.getElementById('filtered-detection-section');
+    const _fdData = payload.filtered_detection?.summary;
+    if (_fdData) {
+      renderSummaryTable('filtered-detection-summary-table', _fdData, DETECTION_SUMMARY_FIELDS);
+      if (_fdSec) _fdSec.classList.remove('hidden');
+    } else {
+      if (_fdSec) _fdSec.classList.add('hidden');
+    }
+  } catch (e) { console.error('[Viewer] filtered detection summary error:', e); }
+  try { renderTrajectoryFilterSection(payload.trajectory_filter); } catch (e) { console.error('[Viewer] trajectory filter section error:', e); }
+  try { renderClassificationSection(payload.classification); } catch (e) { console.error('[Viewer] classification section error:', e); }
+
+  try {
+    await renderDetailSections(payload, expIdForAssets);
+  } catch (e) {
+    console.error('[Viewer] renderDetailSections error:', e);
+  }
+}
+
+function normalizeClassificationPredictions(predictions) {
+  const rows = [];
+  (predictions || []).forEach((p) => {
+    const prob = clamp01(p.prob_positive);
+    const labelTrue = p.label_true;
+    if (prob === null || labelTrue === null || labelTrue === undefined) return;
+    rows.push({
+      id: p.subject_id || p.entity_id || `row_${rows.length + 1}`,
+      label_true: Number(labelTrue),
+      prob_positive: prob,
+    });
+  });
+  return rows;
+}
+
+function classificationMetricsAtThreshold(rows, threshold) {
+  let tp = 0;
+  let fp = 0;
+  let fn = 0;
+  let tn = 0;
+  (rows || []).forEach((row) => {
+    const pred = (row.prob_positive ?? 0) >= threshold ? 1 : 0;
+    const truth = Number(row.label_true);
+    if (pred === 1 && truth === 1) tp += 1;
+    else if (pred === 1 && truth === 0) fp += 1;
+    else if (pred === 0 && truth === 1) fn += 1;
+    else tn += 1;
+  });
+  const total = tp + fp + fn + tn;
+  const accuracy = total ? (tp + tn) / total : null;
+  const precision = (tp + fp) ? tp / (tp + fp) : 0;
+  const recall = (tp + fn) ? tp / (tp + fn) : 0;
+  const f1 = (precision + recall) ? (2 * precision * recall) / (precision + recall) : 0;
+  return { threshold, accuracy, precision, recall, f1, tp, fp, fn, tn, total };
+}
+
+function suggestClassificationThreshold(predictions) {
+  const rows = normalizeClassificationPredictions(predictions);
+  if (!rows.length) return null;
+  const uniqueProbs = Array.from(new Set(rows.map((row) => Number(row.prob_positive).toFixed(6)))).map(Number).sort((a, b) => a - b);
+  const candidates = new Set([0, 0.5, 1]);
+  uniqueProbs.forEach((p) => candidates.add(p));
+  for (let i = 0; i < uniqueProbs.length - 1; i += 1) {
+    candidates.add((uniqueProbs[i] + uniqueProbs[i + 1]) / 2);
+  }
+  const evaluated = Array.from(candidates)
+    .map((threshold) => classificationMetricsAtThreshold(rows, threshold))
+    .sort((a, b) => {
+      if ((b.f1 ?? -1) !== (a.f1 ?? -1)) return (b.f1 ?? -1) - (a.f1 ?? -1);
+      if ((b.accuracy ?? -1) !== (a.accuracy ?? -1)) return (b.accuracy ?? -1) - (a.accuracy ?? -1);
+      return Math.abs(a.threshold - 0.5) - Math.abs(b.threshold - 0.5);
+    });
+  return {
+    best: evaluated[0],
+    baseline: classificationMetricsAtThreshold(rows, 0.5),
+    rowCount: rows.length,
+  };
+}
+
+function renderClassificationThresholdSuggestion(predictions, summary) {
+  const panel = document.getElementById('classification-threshold-panel');
+  const basis = document.getElementById('classification-threshold-basis');
+  const value = document.getElementById('classification-threshold-value');
+  const sample = document.getElementById('classification-threshold-sample');
+  const acc = document.getElementById('classification-threshold-acc');
+  const precision = document.getElementById('classification-threshold-precision');
+  const recall = document.getElementById('classification-threshold-recall');
+  const f1 = document.getElementById('classification-threshold-f1');
+  const note = document.getElementById('classification-threshold-note');
+  if (!panel || !basis || !value || !sample || !acc || !precision || !recall || !f1 || !note) return;
+
+  const rows = normalizeClassificationPredictions(predictions);
+  const suggestion = suggestClassificationThreshold(predictions);
+  if (!suggestion && !summary) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+
+  // ── 訓練時使用的 Youden / fixed 閾值 ────────────────────────────────────
+  const actualRow = document.getElementById('classification-threshold-actual-row');
+  const actualBadge = document.getElementById('classification-threshold-actual-method-badge');
+  const actualValue = document.getElementById('classification-threshold-actual-value');
+  const actualJ = document.getElementById('classification-threshold-actual-j');
+  const actualAcc = document.getElementById('classification-threshold-actual-acc');
+  const actualPrec = document.getElementById('classification-threshold-actual-precision');
+  const actualRec = document.getElementById('classification-threshold-actual-recall');
+  const actualF1 = document.getElementById('classification-threshold-actual-f1');
+
+  const trainThreshold = summary?.threshold_used ?? null;
+  const trainMethod = summary?.threshold_method ?? null;
+  const youdenJ = summary?.youden_j ?? null;
+  const nLoo = summary?.threshold_n_loo_predictions ?? null;
+
+  if (actualRow && trainThreshold != null) {
+    actualRow.classList.remove('hidden');
+    if (actualBadge) {
+      actualBadge.textContent = trainMethod === 'youden' ? "Youden's Index (LOO)" : (trainMethod === 'fixed' ? 'Fixed' : trainMethod || '');
+      actualBadge.className = 'threshold-method-badge threshold-method-' + (trainMethod || 'fixed');
+    }
+    if (actualValue) actualValue.textContent = Number(trainThreshold).toFixed(3);
+    if (actualJ) {
+      const jStr = youdenJ != null ? `J = ${Number(youdenJ).toFixed(3)}` : '';
+      const looStr = nLoo != null ? `n_loo = ${nLoo}` : '';
+      actualJ.textContent = [jStr, looStr].filter(Boolean).join('  ·  ');
+    }
+    if (rows.length) {
+      const m = classificationMetricsAtThreshold(rows, trainThreshold);
+      if (actualAcc) actualAcc.textContent = formatPercent(m.accuracy);
+      if (actualPrec) actualPrec.textContent = formatPercent(m.precision);
+      if (actualRec) actualRec.textContent = formatPercent(m.recall);
+      if (actualF1) actualF1.textContent = formatPercent(m.f1);
+    }
+  } else if (actualRow) {
+    actualRow.classList.add('hidden');
+  }
+
+  // ── 事後 Max-F1 建議 ────────────────────────────────────────────────────
+  if (!suggestion) {
+    basis.textContent = '';
+    return;
+  }
+  basis.textContent = `${suggestion.rowCount} predictions`;
+  value.textContent = Number(suggestion.best.threshold).toFixed(3);
+  sample.textContent = `Max-F1`;
+  acc.textContent = formatPercent(suggestion.best.accuracy);
+  precision.textContent = formatPercent(suggestion.best.precision);
+  recall.textContent = formatPercent(suggestion.best.recall);
+  f1.textContent = formatPercent(suggestion.best.f1);
+
+  // Compare note
+  const compareThresh = trainThreshold ?? 0.5;
+  const baseline = classificationMetricsAtThreshold(rows, compareThresh);
+  const baseLabel = trainThreshold != null ? `訓練閾值=${Number(trainThreshold).toFixed(3)}` : 'threshold=0.500';
+  note.textContent = `${baseLabel} 時：Acc ${formatPercent(baseline.accuracy)}，Precision ${formatPercent(baseline.precision)}，Recall ${formatPercent(baseline.recall)}，F1 ${formatPercent(baseline.f1)}。`;
+}
+
+function renderTrajectoryFilterSection(tf) {
+  const section = document.getElementById('trajectory-filter-section');
+  if (!section) return;
+  const summary = tf?.summary;
+  if (!summary || (!summary.before && !summary.after)) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+
+  // Render before / after tables
+  renderSummaryTable('trajectory-filter-before-table', summary.before, TRAJECTORY_FILTER_FIELDS);
+  renderSummaryTable('trajectory-filter-after-table', summary.after, TRAJECTORY_FILTER_FIELDS);
+
+  // Show config details
+  const configEl = document.getElementById('trajectory-filter-config');
+  if (configEl && summary.config) {
+    const strategy = summary.config.bbox_strategy || 'N/A';
+    configEl.innerHTML = `<small>BBox Strategy: <strong>${escapeHtml(strategy)}</strong></small>`;
+  }
+
+  // Per-video table
+  const perVideo = tf?.per_video || [];
+  buildTable('trajectory-filter-table', perVideo, [
+    { label: 'Model', format: (r) => r.model || '' },
+    { label: 'Video', format: (r) => r.video || '' },
+    { label: 'Frames', format: (r) => r.frames ?? '' },
+    { label: 'Jitter CX (B→A)', format: (r) => `${formatNumber(r.before?.jitter_cx, 2)} → ${formatNumber(r.after?.jitter_cx, 2)}` },
+    { label: 'Jitter CY (B→A)', format: (r) => `${formatNumber(r.before?.jitter_cy, 2)} → ${formatNumber(r.after?.jitter_cy, 2)}` },
+    { label: 'Area Stab (B→A)', format: (r) => `${formatPercent(r.before?.area_stability)} → ${formatPercent(r.after?.area_stability)}` },
+  ]);
 }
 
 function renderClassificationSection(classification) {
   const section = document.getElementById('classification-section');
+  const thresholdPanel = document.getElementById('classification-threshold-panel');
   if (!section) return;
-  const summary = classification?.summary;
+  // For LOSO aggregate, use combined (summed) data which has integer TP/FP/FN/TN
+  // and overall accuracy computed from all predictions. Fall back to summary for
+  // single experiments.
+  const combined = classification?.combined;
+  const summary = combined || classification?.summary;
   const predictions = classification?.predictions || [];
+  state.currentClassificationPredictions = predictions;
 
   if (!summary) {
     section.classList.add('hidden');
+    if (thresholdPanel) thresholdPanel.classList.add('hidden');
     // Destroy any lingering chart
     if (state.classificationChart && state.classificationChart.destroy) {
       state.classificationChart.destroy();
@@ -954,6 +1341,7 @@ function renderClassificationSection(classification) {
 
   // Summary table
   renderSummaryTable('classification-summary-table', summary, CLASSIFICATION_SUMMARY_FIELDS);
+  renderClassificationThresholdSuggestion(predictions, summary);
 
   // Confusion matrix
   renderConfusionMatrix('confusion-matrix', summary);
@@ -972,10 +1360,11 @@ function renderClassificationSection(classification) {
 function renderConfusionMatrix(containerId, summary) {
   const container = document.getElementById(containerId);
   if (!container) return;
-  const tp = summary.tp ?? 0;
-  const fp = summary.fp ?? 0;
-  const fn = summary.fn ?? 0;
-  const tn = summary.tn ?? 0;
+  // Round to integer (guards against LOSO aggregate float averages)
+  const tp = Math.round(summary.tp ?? 0);
+  const fp = Math.round(summary.fp ?? 0);
+  const fn = Math.round(summary.fn ?? 0);
+  const tn = Math.round(summary.tn ?? 0);
   const total = tp + fp + fn + tn || 1;
   container.innerHTML = `
     <table class="cm-table">
@@ -1029,7 +1418,7 @@ function renderPredictionsTable(tableId, predictions) {
     const correct = majorityPred === s.label_true;
     const labelMap = { 0: '健康 (0)', 1: '患病 (1)' };
     return `<tr class="${correct ? 'pred-correct' : 'pred-wrong'}">
-      <td>${s.subject_id}</td>
+      <td>${escapeHtml(s.subject_id)}</td>
       <td>${labelMap[s.label_true] ?? s.label_true}</td>
       <td>${labelMap[majorityPred] ?? majorityPred}</td>
       <td>${(avgProb * 100).toFixed(1)}%</td>
@@ -1129,10 +1518,17 @@ function renderSummaryTable(tableId, summary, fields) {
   const rows = fields
     .map((field) => {
       const value = summary[field.key];
+      if (value == null && !field.allowNull) return '';
+      if (value == null) {
+        return `<tr><th>${field.label}</th><td>N/A</td></tr>`;
+      }
       const std = field.std ? summary[field.std] : undefined;
-      const formatted = field.percent ? formatPercentWithStd(value, std) : formatWithStd(value, std);
+      const formatted = field.percent
+        ? formatPercentWithStd(value, std)
+        : formatWithStd(value, std, field.decimals ?? 3);
       return `<tr><th>${field.label}</th><td>${formatted}</td></tr>`;
     })
+    .filter(Boolean)
     .join('');
   table.innerHTML = rows;
 }
@@ -1152,7 +1548,8 @@ function renderGroupSummaryChart(canvasId, experiments, sectionKey, fields, char
     return;
   }
   const labels = validExperiments.map((exp) => exp.name);
-  const datasets = fields.map((field, idx) => {
+  const chartFields = fields.filter((f) => !f.chartExclude);
+  const datasets = chartFields.map((field, idx) => {
     const color = SUMMARY_COLORS[idx % SUMMARY_COLORS.length];
     const stdValues = labels.map((_, i) => {
       const exp = validExperiments[i];
@@ -1423,7 +1820,11 @@ async function loadGallery(galleryId, expId, category) {
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
         link.title = '點擊於新分頁檢視原始圖';
-        link.innerHTML = `<img src="${item.url}" alt="visual" loading="lazy" />`;
+        const img = document.createElement('img');
+        img.src = item.url;
+        img.alt = 'visual';
+        img.loading = 'lazy';
+        link.appendChild(img);
         figure.appendChild(link);
         const caption = document.createElement('figcaption');
         const lines = [item.label];
@@ -1451,14 +1852,186 @@ async function loadGallery(galleryId, expId, category) {
 
 const MODAL_DISPLAY = {
   doppler:   'Doppler',
-  grasp:     'Grasp / G-R',
-  relax:     'Relax / R-G',
+  grasp:     'Grasp / R-G',
+  relax:     'Relax / G-R',
   rest:      'Rest / R1',
   rest_post: 'Rest post / R2',
 };
 const MODAL_SHORT = {
   doppler: 'D', grasp: 'G', relax: 'Rel', rest: 'R', rest_post: 'Rp',
 };
+const VOTING_MODAL_MAP = {
+  doppler: 'doppler',
+  Grasp: 'grasp',
+  Relax: 'relax',
+  Rest: 'rest',
+  'Rest post': 'rest_post',
+  D: 'doppler',
+  'G-R': 'relax',
+  'R-G': 'grasp',
+  R1: 'rest',
+  R2: 'rest_post',
+};
+const VOTING_MODALITIES = ['doppler', 'grasp', 'relax', 'rest', 'rest_post'];
+
+function buildSoftVotingAnalysisFromPredictions(predictions) {
+  const subjects = new Map();
+  (predictions || []).forEach((item) => {
+    // Fall back to identity so datasets with arbitrary modality names work too
+    const canonical = VOTING_MODAL_MAP[String(item.entity_id || '')] || String(item.entity_id || '');
+    const subjectId = item.subject_id || '';
+    const prob = clamp01(item.prob_positive);
+    if (!canonical || !subjectId || prob === null) return;
+    if (!subjects.has(subjectId)) {
+      subjects.set(subjectId, {});
+    }
+    subjects.get(subjectId)[canonical] = {
+      prob,
+      true: Number(item.label_true),
+    };
+  });
+
+  // Derive effective modalities from actual data (known ones in order, then rest sorted)
+  const seenModalities = new Set();
+  Array.from(subjects.values()).forEach((subj) => Object.keys(subj).forEach((m) => seenModalities.add(m)));
+  const effectiveModalities = [
+    ...VOTING_MODALITIES.filter((m) => seenModalities.has(m)),
+    ...[...seenModalities].filter((m) => !VOTING_MODALITIES.includes(m)).sort(),
+  ];
+
+  function softVoteResult(modalities) {
+    let correct = 0;
+    let total = 0;
+    const details = [];
+    Array.from(subjects.entries()).sort((a, b) => a[0].localeCompare(b[0])).forEach(([subjectId, subj]) => {
+      const avail = modalities.filter((m) => subj[m]);
+      if (!avail.length) return;
+      const probs = avail.map((m) => subj[m].prob).filter((v) => v !== null && v !== undefined);
+      if (!probs.length) return;
+      const trueLabel = subj[avail[0]].true;
+      const meanProbPositive = probs.reduce((a, b) => a + b, 0) / probs.length;
+      const vote = meanProbPositive >= 0.5 ? 1 : 0;
+      const isCorrect = vote === trueLabel;
+      if (isCorrect) correct += 1;
+      total += 1;
+      details.push({
+        subject_id: subjectId,
+        true_label: trueLabel,
+        vote,
+        mean_prob_positive: meanProbPositive,
+        total_votes: probs.length,
+        correct: isCorrect,
+      });
+    });
+    return {
+      correct,
+      total,
+      accuracy: total ? correct / total : null,
+      details,
+    };
+  }
+
+  const softFive = softVoteResult(effectiveModalities);
+  softFive.modalities = [...effectiveModalities];
+  // C(N, k) combos where k = min(3, N); skip if N <= combo size
+  const comboSize = Math.min(3, effectiveModalities.length);
+  const softTopCombos = [];
+  if (comboSize >= 2 && effectiveModalities.length > comboSize) {
+    for (let i = 0; i < effectiveModalities.length; i += 1) {
+      if (comboSize === 2) {
+        for (let j = i + 1; j < effectiveModalities.length; j += 1) {
+          const combo = [effectiveModalities[i], effectiveModalities[j]];
+          const result = softVoteResult(combo);
+          result.modalities = combo;
+          softTopCombos.push(result);
+        }
+      } else {
+        for (let j = i + 1; j < effectiveModalities.length; j += 1) {
+          for (let k = j + 1; k < effectiveModalities.length; k += 1) {
+            const combo = [effectiveModalities[i], effectiveModalities[j], effectiveModalities[k]];
+            const result = softVoteResult(combo);
+            result.modalities = combo;
+            softTopCombos.push(result);
+          }
+        }
+      }
+    }
+  }
+  softTopCombos.sort((a, b) => ((b.accuracy ?? 0) - (a.accuracy ?? 0)) || (b.correct - a.correct));
+  return {
+    soft_five_voting: softFive,
+    soft_top_combos: softTopCombos,
+  };
+}
+
+function renderVotingResultBlock(container, voting, options = {}) {
+  if (!container) return;
+  if (!voting) {
+    container.innerHTML = '<p>無資料</p>';
+    return;
+  }
+  const pct = voting.accuracy !== null ? `${(voting.accuracy * 100).toFixed(0)}%` : '—';
+  const statColor = voting.accuracy === 1 ? '#22c55e' : voting.accuracy === 0 ? '#ef4444' : '#f59e0b';
+  const detailRows = (voting.details || []).map((d) => {
+    const icon = d.correct ? '✅' : '❌';
+    const trueLabel = d.true_label === 1 ? '病患' : '正常';
+    const voteLabel = d.vote === 1 ? '病患' : '正常';
+    const scoreCell = options.soft
+      ? `${((d.mean_prob_positive ?? 0) * 100).toFixed(1)}%`
+      : `${d.votes_for_positive} / ${d.total_votes}`;
+    const scoreHeader = options.soft ? '平均 P(Positive)' : '正票 / 總票';
+    return { row: `<tr>
+        <td>${d.subject_id}</td>
+        <td>${trueLabel}</td>
+        <td style="color:#9ea6c6">${scoreCell}</td>
+        <td>${voteLabel}</td>
+        <td>${icon}</td>
+      </tr>`, scoreHeader };
+  });
+  const scoreHeader = detailRows[0]?.scoreHeader || (options.soft ? '平均 P(Positive)' : '正票 / 總票');
+  container.innerHTML =
+    `<p class="voting-stat" style="color:${statColor}">${pct}
+      <small>(${voting.correct} / ${voting.total} subjects)</small>
+    </p>
+    <table class="voting-subject-table">
+      <thead><tr><th>Subject</th><th>真實</th><th>${scoreHeader}</th><th>投票結果</th><th></th></tr></thead>
+      <tbody>${detailRows.map((d) => d.row).join('')}</tbody>
+    </table>`;
+}
+
+function renderVotingCombosTable(table, combos, options = {}) {
+  if (!table) return;
+  if (!combos || !combos.length) {
+    table.innerHTML = '<tr><td>無資料</td></tr>';
+    return;
+  }
+  const maxComboAcc = Math.max(0.001, ...combos.map((c) => c.accuracy ?? 0));
+  const detailHeader = options.soft ? '各受試者平均機率' : '各受試者詳情';
+  const thead = `<tr><th></th><th>組合</th><th>準確率</th><th>正確 / 總數</th><th>${detailHeader}</th></tr>`;
+  const tbody = combos.map((c, idx) => {
+    const rank = idx + 1;
+    const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : 'rank-other';
+    const badge = `<span class="rank-badge ${rankClass}">${rank}</span>`;
+    const combo = c.modalities.map((m) => MODAL_SHORT[m] || m).join(' + ');
+    const acc = c.accuracy !== null ? `${(c.accuracy * 100).toFixed(0)}%` : '—';
+    const detail = (c.details || []).map((d) => {
+      const icon = d.correct ? '✅' : '❌';
+      if (options.soft) {
+        return `<span style="margin-right:0.6rem;white-space:nowrap">${d.subject_id}: ${((d.mean_prob_positive ?? 0) * 100).toFixed(1)}% ${icon}</span>`;
+      }
+      return `<span style="margin-right:0.6rem;white-space:nowrap">${d.subject_id}: ${d.votes_for_positive}/${d.total_votes} ${icon}</span>`;
+    }).join('');
+    const rowCls = c.accuracy === maxComboAcc ? 'top-rank' : c.accuracy !== null && c.accuracy < 0.6 ? 'mid-rank' : '';
+    return `<tr class="${rowCls}">
+      <td style="width:2.2rem;padding-right:0.25rem">${badge}</td>
+      <td style="font-weight:${rank <= 3 ? 600 : 400}">${combo}</td>
+      <td>${acc}</td>
+      <td style="color:#9ea6c6">${c.correct} / ${c.total}</td>
+      <td style="font-size:0.82rem;color:#7e86a8">${detail}</td>
+    </tr>`;
+  }).join('');
+  table.innerHTML = thead + tbody;
+}
 
 function renderVotingSection(data) {
   const section = document.getElementById('voting-section');
@@ -1496,58 +2069,18 @@ function renderVotingSection(data) {
 
   // ── 5-voting result ──
   const fiveEl = document.getElementById('voting-five-result');
-  if (fiveEl && data.five_voting) {
-    const fv = data.five_voting;
-    const pct = fv.accuracy !== null ? `${(fv.accuracy * 100).toFixed(0)}%` : '—';
-    const statColor = fv.accuracy === 1 ? '#22c55e' : fv.accuracy === 0 ? '#ef4444' : '#f59e0b';
-    const detailRows = (fv.details || []).map((d) => {
-      const icon = d.correct ? '✅' : '❌';
-      const trueLabel = d.true_label === 1 ? '病患' : '正常';
-      const voteLabel = d.vote === 1 ? '病患' : '正常';
-      return `<tr>
-        <td>${d.subject_id}</td>
-        <td>${trueLabel}</td>
-        <td style="color:#9ea6c6">${d.votes_for_positive} / ${d.total_votes}</td>
-        <td>${voteLabel}</td>
-        <td>${icon}</td>
-      </tr>`;
-    }).join('');
-    fiveEl.innerHTML =
-      `<p class="voting-stat" style="color:${statColor}">${pct}
-        <small>(${fv.correct} / ${fv.total} subjects)</small>
-      </p>
-      <table class="voting-subject-table">
-        <thead><tr><th>Subject</th><th>真實</th><th>正票 / 總票</th><th>投票結果</th><th></th></tr></thead>
-        <tbody>${detailRows}</tbody>
-      </table>`;
-  }
+  renderVotingResultBlock(fiveEl, data.five_voting, { soft: false });
+  const softFiveEl = document.getElementById('voting-five-soft-result');
+  const softFallback = (!data.soft_five_voting || !data.soft_top_combos)
+    ? buildSoftVotingAnalysisFromPredictions(state.currentClassificationPredictions)
+    : null;
+  renderVotingResultBlock(softFiveEl, data.soft_five_voting || softFallback?.soft_five_voting, { soft: true });
 
   // ── C(5,3) combos table ──
   const combosTable = document.getElementById('voting-combos-table');
-  if (combosTable && data.top_combos) {
-    const maxComboAcc = Math.max(0.001, ...data.top_combos.map((c) => c.accuracy ?? 0));
-    const thead = '<tr><th></th><th>組合</th><th>準確率</th><th>正確 / 總數</th><th>各受試者詳情</th></tr>';
-    const tbody = data.top_combos.map((c, idx) => {
-      const rank = idx + 1;
-      const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : 'rank-other';
-      const badge = `<span class="rank-badge ${rankClass}">${rank}</span>`;
-      const combo = c.modalities.map((m) => MODAL_SHORT[m] || m).join(' + ');
-      const acc = c.accuracy !== null ? `${(c.accuracy * 100).toFixed(0)}%` : '—';
-      const detail = (c.details || []).map((d) => {
-        const icon = d.correct ? '✅' : '❌';
-        return `<span style="margin-right:0.6rem;white-space:nowrap">${d.subject_id}: ${d.votes_for_positive}/${d.total_votes} ${icon}</span>`;
-      }).join('');
-      const rowCls = c.accuracy === maxComboAcc ? 'top-rank' : c.accuracy !== null && c.accuracy < 0.6 ? 'mid-rank' : '';
-      return `<tr class="${rowCls}">
-        <td style="width:2.2rem;padding-right:0.25rem">${badge}</td>
-        <td style="font-weight:${rank <= 3 ? 600 : 400}">${combo}</td>
-        <td>${acc}</td>
-        <td style="color:#9ea6c6">${c.correct} / ${c.total}</td>
-        <td style="font-size:0.82rem;color:#7e86a8">${detail}</td>
-      </tr>`;
-    }).join('');
-    combosTable.innerHTML = thead + tbody;
-  }
+  renderVotingCombosTable(combosTable, data.top_combos, { soft: false });
+  const softCombosTable = document.getElementById('voting-soft-combos-table');
+  renderVotingCombosTable(softCombosTable, data.soft_top_combos || softFallback?.soft_top_combos, { soft: true });
 }
 
 async function selectExperiment(expId) {
@@ -1558,6 +2091,7 @@ async function selectExperiment(expId) {
   }
   state.current = target;
   state.currentView = { mode: 'single', expId: expId, label: '' };
+  renderScheduleNotePanel();
   renderExperiments();
   hideWelcome();
   resetFoldControls();
@@ -1583,6 +2117,20 @@ async function selectExperiment(expId) {
     renderLosoChartControls(expId, res.folds);
     updateLosoCharts(expId, res.folds);
 
+    // Show combined LOSO voting analysis
+    if (res.loso_voting) {
+      renderVotingSection(res.loso_voting);
+    } else if (target.has_classification) {
+      // Fallback: fetch voting from the aggregate voting endpoint
+      try {
+        const vp = new URLSearchParams({ exp_id: expId });
+        const vr = await fetchJSON(`/api/experiments/voting?${vp.toString()}`);
+        renderVotingSection(vr);
+      } catch (e) {
+        console.warn('Aggregate voting unavailable:', e);
+      }
+    }
+
     const table = document.getElementById('loso-fold-table');
     if (table) {
       table.querySelectorAll('tr[data-exp-id]').forEach((row) => {
@@ -1592,8 +2140,20 @@ async function selectExperiment(expId) {
           state.currentView = { mode: 'fold', expId: foldId, label: '' };
           const foldParams = new URLSearchParams({ exp_id: foldId });
           const foldRes = await fetchJSON(`/api/experiments/metrics?${foldParams.toString()}`);
-          // Keep aggregate summary visible; only update per-video tables/charts + visuals for this fold.
+          // Update per-video tables/charts + visuals for the selected fold
           await renderDetailSections(foldRes, foldId);
+          // Also update the classification section (confusion matrix / predictions) for this fold
+          if (foldRes.classification) {
+            renderClassificationSection(foldRes.classification);
+          }
+          // Load voting for this specific fold
+          try {
+            const fvp = new URLSearchParams({ exp_id: foldId });
+            const fvr = await fetchJSON(`/api/experiments/voting?${fvp.toString()}`);
+            renderVotingSection(fvr);
+          } catch (e) {
+            console.warn('Fold voting unavailable:', e);
+          }
           const subtitle = document.getElementById('loso-subtitle');
           if (subtitle) subtitle.textContent = `${res.folds.length} folds | 目前檢視：${row.querySelector('td')?.textContent || foldId}`;
         });
@@ -1619,14 +2179,40 @@ async function selectExperiment(expId) {
 }
 
 async function init() {
+  ensureScheduleNotePanel();
   setupDownloadButtons();
   setupDataExportButtons();
   await loadExperiments();
-  document.getElementById('search').addEventListener('input', (e) => applySearch(e.target.value));
-  document.getElementById('refresh-btn').addEventListener('click', async () => {
-    await fetchJSON('/api/experiments/refresh', { method: 'POST' });
-    await loadExperiments();
-  });
+  const search = document.getElementById('search');
+  if (search) {
+    search.addEventListener('input', (e) => applySearch(e.target.value));
+  }
+  const noteInput = document.getElementById('schedule-note-input');
+  if (noteInput) {
+    noteInput.addEventListener('input', () => {
+      queueScheduleNoteAutosave();
+    });
+    noteInput.addEventListener('blur', () => {
+      if (state.noteAutosaveTimer) {
+        clearTimeout(state.noteAutosaveTimer);
+        state.noteAutosaveTimer = null;
+      }
+      saveCurrentScheduleNote();
+    });
+    noteInput.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        saveCurrentScheduleNote();
+      }
+    });
+  }
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      await fetchJSON('/api/experiments/refresh', { method: 'POST' });
+      await loadExperiments();
+    });
+  }
 }
 
 init().catch((err) => {

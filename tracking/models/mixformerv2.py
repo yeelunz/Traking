@@ -870,6 +870,9 @@ class MixFormerV2Tracker(TrackingModel):
 
     # ------------------------------------------------------------------
     def _apply_preprocs(self, frame_bgr: np.ndarray) -> np.ndarray:
+        if frame_bgr is not None and frame_bgr.ndim == 3:
+            _g = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            frame_bgr = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not self.preprocs:
             return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)

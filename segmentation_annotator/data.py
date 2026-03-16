@@ -288,6 +288,15 @@ class SegmentationProject:
             frame_ann = self.annotations_by_frame[frame_index]
             if not frame_ann:
                 continue
+
+            # Filter out zero-area annotations before deciding whether to export the frame.
+            valid_ann = {
+                tid: ann for tid, ann in frame_ann.items()
+                if np.count_nonzero(ann.mask) > 0
+            }
+            if not valid_ann:
+                continue
+
             frame_entry = {
                 "id": image_id,
                 "video_id": 1,
@@ -298,7 +307,7 @@ class SegmentationProject:
             }
             images.append(frame_entry)
 
-            for track_id, ann in sorted(frame_ann.items()):
+            for track_id, ann in sorted(valid_ann.items()):
                 mask_filename = f"frame_{frame_index + 1:08d}.png"
                 if len(frame_ann) > 1:
                     mask_filename = f"frame_{frame_index + 1:08d}_track_{track_id:04d}.png"
@@ -406,8 +415,43 @@ class SegmentationProject:
             frame_index = img_to_frame.get(int(image_id))
             if frame_index is None:
                 continue
-            mask_file = (json_path.parent / mask_rel).resolve()
-            mask = cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
+
+            # Resolve mask path.  Try multiple bases so that JSONs exported from
+            # different working directories (flat root vs subject sub-folder) still load.
+            # e.g. old exports stored mask_path = "001/seg_masks/..." relative to
+            # dataset_root, but json now lives in dataset_root/001/ – so parent.parent
+            # of the json recovers the correct absolute path.
+            candidate_bases = [
+                json_path.parent,              # same dir as JSON (current layout)
+                self.video_path.parent,        # video's own dir (same as above usually)
+                json_path.parent.parent,       # one level up  (old flat-export layout)
+            ]
+            mask_file: Optional[Path] = None
+            for base in candidate_bases:
+                candidate = (base / mask_rel).resolve()
+                if candidate.exists():
+                    mask_file = candidate
+                    break
+
+            # Last-resort: strip leading path components one by one and retry from
+            # the json directory.  Handles any depth of accidental prefix duplication.
+            if mask_file is None:
+                parts = Path(mask_rel).parts
+                for skip in range(1, len(parts)):
+                    stripped = Path(*parts[skip:])
+                    candidate = (json_path.parent / stripped).resolve()
+                    if candidate.exists():
+                        mask_file = candidate
+                        break
+
+            if mask_file is None:
+                # File genuinely missing – skip silently instead of crashing.
+                continue
+
+            try:
+                mask = cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
+            except Exception:
+                continue
             if mask is None:
                 continue
             mask = _largest_component(mask)

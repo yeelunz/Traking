@@ -129,12 +129,48 @@ def _to_ts3d(
     n_vars: int = N_TS_VARS,
     n_steps: int = N_TS_STEPS,
 ) -> np.ndarray:
-    """Reshape flat (n_samples, n_vars*n_steps) → (n_samples, n_vars, n_steps)."""
+    """Reshape flat (n_samples, n_vars*n_steps) → (n_samples, n_vars, n_steps).
+
+    When ``n_vars`` and ``n_steps`` match the legacy defaults (18/128) *and*
+    the input width suggests a different factorisation (e.g. 3072 = 12 × 256
+    from v3lite), auto-detection is attempted.  Explicit overrides always win.
+    """
     n = X.shape[0]
     expected = n_vars * n_steps
+
+    # ── Auto-detect v3lite dimensions ────────────────────────────────────────
+    if X.shape[1] != expected and n_vars == N_TS_VARS and n_steps == N_TS_STEPS:
+        from .feature_extractors_v3lite import N_TS_CHANNELS_LITE, N_TS_STEPS_LITE
+        lite_expected = N_TS_CHANNELS_LITE * N_TS_STEPS_LITE
+        if X.shape[1] == lite_expected:
+            n_vars = N_TS_CHANNELS_LITE
+            n_steps = N_TS_STEPS_LITE
+            expected = lite_expected
+            logger.info(
+                "_to_ts3d: auto-detected v3lite dims (%d ch × %d steps)",
+                n_vars, n_steps,
+            )
+        elif X.shape[1] % N_TS_CHANNELS_LITE == 0:
+            # v3lite with custom n_steps
+            n_steps = X.shape[1] // N_TS_CHANNELS_LITE
+            n_vars = N_TS_CHANNELS_LITE
+            expected = n_vars * n_steps
+            logger.info(
+                "_to_ts3d: auto-detected v3lite dims (%d ch × %d steps)",
+                n_vars, n_steps,
+            )
+    # ─────────────────────────────────────────────────────────────────────────
+
     if X.shape[1] < expected:
         pad = np.zeros((n, expected - X.shape[1]), dtype=X.dtype)
         X = np.hstack([X, pad])
+    elif X.shape[1] > expected:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "_to_ts3d: input has %d features but expected %d "
+            "(n_vars=%d × n_steps=%d); truncating.",
+            X.shape[1], expected, n_vars, n_steps,
+        )
     return X[:, :expected].reshape(n, n_vars, n_steps)
 
 
@@ -171,11 +207,18 @@ def _train_torch_classifier(
     model = model.to(device)
     model.train()
 
-    X_t = torch.tensor(X_3d, dtype=torch.float32, device=device)
-    y_t = torch.tensor(y, dtype=torch.long, device=device)
+    # Remap labels to contiguous 0-indexed integers.
+    # This is a safety net: if the caller passes labels like [1, 2] or [0, 1]
+    # we always get a clean [0, 1, ...] range expected by CrossEntropyLoss.
+    unique_classes = np.unique(y)
+    label_to_idx = {int(c): i for i, c in enumerate(unique_classes)}
+    y_remapped = np.array([label_to_idx[int(v)] for v in y], dtype=np.int64)
 
-    # Class-balanced weights
-    classes, counts = np.unique(y, return_counts=True)
+    X_t = torch.tensor(X_3d, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y_remapped, dtype=torch.long, device=device)
+
+    # Class-balanced weights (computed on remapped labels)
+    classes, counts = np.unique(y_remapped, return_counts=True)
     w = 1.0 / np.clip(counts.astype(np.float64), 1, None)
     w = w / w.sum() * len(classes)
     class_w = torch.tensor(w, dtype=torch.float32, device=device)
@@ -422,19 +465,23 @@ class XGBoostSubjectClassifier(_PickleSubjectClassifier):
             random_state=int(cfg.get("random_state", 42)),
         )
         self.classes_: Optional[np.ndarray] = None
+        self._init_dim_reduction(cfg)
 
     def fit(self, X, y) -> Dict[str, Any]:
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64)
+        X = self._fit_reduce(X, y)
         self._model.fit(X, y, verbose=False)
         self.classes_ = getattr(self._model, "classes_", None)
         return {"feature_importances": self._model.feature_importances_.tolist()}
 
     def predict(self, X):
-        return self._model.predict(np.asarray(X, dtype=np.float32))
+        X = self._transform_reduce(np.asarray(X, dtype=np.float32))
+        return self._model.predict(X)
 
     def predict_proba(self, X):
-        return self._model.predict_proba(np.asarray(X, dtype=np.float32))
+        X = self._transform_reduce(np.asarray(X, dtype=np.float32))
+        return self._model.predict_proba(X)
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -444,46 +491,163 @@ class XGBoostSubjectClassifier(_PickleSubjectClassifier):
 
 @register_classifier("tabpfn_v2")
 class TabPFNV2SubjectClassifier(_PickleSubjectClassifier):
-    """TabPFN v2: in-context learning for small tabular classification."""
+    """TabPFN v2: in-context learning for small tabular classification.
+
+    If ``tabpfn`` is not installed **or** the gated model cannot be
+    downloaded (e.g. missing HuggingFace authentication), the classifier
+    automatically falls back to ``XGBClassifier`` (if available) or
+    ``RandomForestClassifier`` so that the training pipeline does not
+    abort.
+    """
 
     name = "TabPFNv2"
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
-        if not _TABPFN_OK:
-            raise RuntimeError(
-                "tabpfn is required for TabPFNV2SubjectClassifier. "
-                "Install via: pip install tabpfn"
-            )
         cfg = params or {}
-        n_ens = int(cfg.get("n_ensemble_configurations", 32))
-        kwargs: Dict[str, Any] = {"N_ensemble_configurations": n_ens}
-        device = cfg.get("device", "cpu")
-        if device:
-            kwargs["device"] = str(device)
-        self._model = TabPFNClassifier(**kwargs)
+        self._fallback: bool = False
+        self._fallback_name: str = ""
+
+        if _TABPFN_OK:
+            try:
+                n_ens = int(cfg.get("n_ensemble_configurations", 32))
+                kwargs: Dict[str, Any] = {"n_estimators": n_ens}
+                device = cfg.get("device", "cpu")
+                if device:
+                    kwargs["device"] = str(device)
+                self._model = TabPFNClassifier(**kwargs)
+            except Exception as _init_err:
+                logger.warning(
+                    "TabPFN init failed (%s); will attempt fallback on fit().",
+                    _init_err,
+                )
+                self._model = None
+        else:
+            logger.warning(
+                "tabpfn package not available; TabPFN classifier will use a fallback."
+            )
+            self._model = None
+
         self.classes_: Optional[np.ndarray] = None
+        self._init_dim_reduction(cfg)
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    def _ensure_fallback(self) -> None:
+        """Lazily create a fallback estimator if the primary model is unavailable."""
+        if self._model is not None and not self._fallback:
+            return
+
+        if self._fallback:
+            return  # already created
+
+        if _XGB_OK:
+            self._model = XGBClassifier(
+                n_estimators=200, max_depth=4, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8, eval_metric="logloss",
+                use_label_encoder=False, random_state=42, n_jobs=-1,
+            )
+            self._fallback = True
+            self._fallback_name = "XGBoost"
+            logger.warning("TabPFN unavailable – falling back to XGBoost.")
+        else:
+            try:
+                from sklearn.ensemble import RandomForestClassifier as _RFC
+                self._model = _RFC(
+                    n_estimators=200, class_weight="balanced", random_state=42, n_jobs=-1,
+                )
+                self._fallback = True
+                self._fallback_name = "RandomForest"
+                logger.warning("TabPFN unavailable – falling back to RandomForest.")
+            except Exception:
+                raise RuntimeError(
+                    "TabPFN is unavailable and no fallback classifier (xgboost / sklearn) is installed."
+                )
+
+    # ── public interface ─────────────────────────────────────────────────
 
     def fit(self, X, y) -> Dict[str, Any]:
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64)
-        self._model.fit(X, y)
-        self.classes_ = np.unique(y)
-        return {"n_train_samples": len(y)}
+        X = self._fit_reduce(X, y)
+
+        if self._model is not None and not self._fallback:
+            try:
+                self._model.fit(X, y)
+                self.classes_ = np.unique(y)
+                return {"n_train_samples": len(y), "backend": "tabpfn_v2"}
+            except Exception as _fit_err:
+                logger.warning(
+                    "TabPFN fit failed (%s); switching to fallback classifier.",
+                    _fit_err,
+                )
+                self._model = None  # force fallback creation
+
+        self._ensure_fallback()
+        if self._fallback_name == "XGBoost":
+            self._model.fit(X, y, verbose=False)
+        else:
+            self._model.fit(X, y)
+        self.classes_ = getattr(self._model, "classes_", np.unique(y))
+        return {"n_train_samples": len(y), "backend": f"fallback_{self._fallback_name}"}
 
     def predict(self, X):
-        return self._model.predict(np.asarray(X, dtype=np.float32))
+        self._ensure_fallback()
+        X = self._transform_reduce(np.asarray(X, dtype=np.float32))
+        return self._model.predict(X)
 
     def predict_proba(self, X):
-        return self._model.predict_proba(np.asarray(X, dtype=np.float32))
+        self._ensure_fallback()
+        X = self._transform_reduce(np.asarray(X, dtype=np.float32))
+        return self._model.predict_proba(X)
 
     def save(self, path: str) -> None:
+        dr_state = self._dim_reducer.get_state() if self._dim_reducer is not None else None
         with open(path, "wb") as f:
-            pickle.dump(self._model, f)
+            pickle.dump(
+                {
+                    "model": self._model,
+                    "fallback": self._fallback,
+                    "fallback_name": self._fallback_name,
+                    "tabular_pipeline": getattr(self, "_tabular_pipeline", None),
+                    "tabular_pipeline_enabled": bool(
+                        getattr(self, "_tabular_pipeline_enabled", False)
+                    ),
+                    "dim_reduction_name": getattr(self, "_dim_reduction_name", None),
+                    "dim_reducer_state": dr_state,
+                },
+                f,
+            )
 
     def load(self, path: str) -> None:
         with open(path, "rb") as f:
-            self._model = pickle.load(f)
-        self.classes_ = None
+            state = pickle.load(f)
+        if isinstance(state, dict) and "model" in state:
+            self._model = state["model"]
+            self._fallback = state.get("fallback", False)
+            self._fallback_name = state.get("fallback_name", "")
+            self._tabular_pipeline = state.get("tabular_pipeline")
+            self._tabular_pipeline_enabled = bool(
+                state.get("tabular_pipeline_enabled", self._tabular_pipeline is not None)
+            )
+            dr_name = state.get("dim_reduction_name")
+            dr_state = state.get("dim_reducer_state")
+            if dr_name and dr_state:
+                from .dim_reduction import get_tabular_reducer
+                self._dim_reducer = get_tabular_reducer(dr_name, {})
+                self._dim_reducer.set_state(dr_state)
+                self._dim_reduction_name = dr_name
+            else:
+                self._dim_reducer = None
+                self._dim_reduction_name = None
+        else:
+            # Legacy format: raw model
+            self._model = state
+            self._fallback = False
+            self._tabular_pipeline = None
+            self._tabular_pipeline_enabled = False
+            self._dim_reducer = None
+            self._dim_reduction_name = None
+        self.classes_ = getattr(self._model, "classes_", None)
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -512,6 +676,16 @@ class MultiRocketSubjectClassifier(_PickleSubjectClassifier):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "num_features": 50_000,
         "max_dilations_per_kernel": 32,
+        # v3lite adaptive dims — leave None to auto-detect.
+        "n_vars": None,
+        "n_steps": None,
+        # Dimensionality reduction (two independent axes):
+        # Time axis:    None | "autoencoder"        (auto-encoder T → dim_reduction_target)
+        # Channel axis: set channel_reduction_target + method (pca/lda/umap)
+        "dim_reduction": None,
+        "dim_reduction_target": 128,       # target time steps after T-reduction
+        "channel_reduction_target": None,  # target channels after C-reduction (None = off)
+        "channel_reduction_method": "pca",  # pca | lda | umap
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -529,6 +703,27 @@ class MultiRocketSubjectClassifier(_PickleSubjectClassifier):
         self._n_features_per_kernel = 4  # PPV, LSPV, MPV, MIPV (official)
         self._num_kernels = int(total / 2 / self._n_features_per_kernel)
         self._max_dilations = int(cfg["max_dilations_per_kernel"])
+
+        # Adaptive n_vars / n_steps
+        self._cfg_n_vars = cfg.get("n_vars")    # None → auto-detect
+        self._cfg_n_steps = cfg.get("n_steps")   # None → auto-detect
+
+        # Dim reduction (two-axis, non-differentiable)
+        self._dim_reduction_name = cfg.get("dim_reduction")
+        self._dim_reduction_target = int(cfg.get("dim_reduction_target", 128))
+        self._channel_reduction_target: Optional[int] = (
+            int(cfg["channel_reduction_target"])
+            if cfg.get("channel_reduction_target") is not None else None
+        )
+        self._channel_reduction_method: str = str(
+            cfg.get("channel_reduction_method", "pca")
+        ).strip().lower()
+        if self._channel_reduction_method not in {"pca", "lda", "umap"}:
+            raise ValueError(
+                "channel_reduction_method must be one of: pca, lda, umap"
+            )
+        self._ae_reducer: Any = None
+        self._channel_reducer: Any = None
 
         self._base_params: Any = None
         self._diff_params: Any = None
@@ -549,8 +744,79 @@ class MultiRocketSubjectClassifier(_PickleSubjectClassifier):
             return padded
         return X_3d
 
-    def _preprocess(self, X: np.ndarray) -> np.ndarray:
-        X_3d = _to_ts3d(np.asarray(X, dtype=np.float32)).astype(np.float64)
+    def _preprocess(
+        self,
+        X: np.ndarray,
+        *,
+        fit_ae: bool = False,
+        y: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        nv = int(self._cfg_n_vars) if self._cfg_n_vars else N_TS_VARS
+        ns = int(self._cfg_n_steps) if self._cfg_n_steps else N_TS_STEPS
+        X_3d = _to_ts3d(np.asarray(X, dtype=np.float32), nv, ns).astype(np.float64)
+
+        # Step A: Channel reduction (pca/lda/umap; independent of time axis)
+        if self._channel_reduction_target is not None:
+            if fit_ae:
+                from .dim_reduction import (
+                    ChannelLDAReducer,
+                    ChannelPCAReducer,
+                    ChannelUMAPReducer,
+                )
+                if self._channel_reduction_method == "pca":
+                    self._channel_reducer = ChannelPCAReducer(
+                        n_components=self._channel_reduction_target
+                    )
+                elif self._channel_reduction_method == "lda":
+                    self._channel_reducer = ChannelLDAReducer(
+                        n_components=self._channel_reduction_target
+                    )
+                else:
+                    self._channel_reducer = ChannelUMAPReducer(
+                        n_components=self._channel_reduction_target
+                    )
+                orig_c = X_3d.shape[1]
+                X_3d_in = X_3d.astype(np.float32)
+                if self._channel_reduction_method == "lda":
+                    if y is None:
+                        raise ValueError(
+                            "channel_reduction_method='lda' requires labels y during fit()."
+                        )
+                    X_3d = self._channel_reducer.fit_transform(X_3d_in, y).astype(np.float64)
+                elif self._channel_reduction_method == "umap":
+                    X_3d = self._channel_reducer.fit_transform(X_3d_in, y).astype(np.float64)
+                else:
+                    X_3d = self._channel_reducer.fit_transform(X_3d_in).astype(np.float64)
+                logger.info(
+                    "MultiRocket channel reduction (%s): %d → %d channels",
+                    self._channel_reduction_method,
+                    orig_c,
+                    int(X_3d.shape[1]),
+                )
+            elif self._channel_reducer is not None:
+                X_3d = self._channel_reducer.transform(
+                    X_3d.astype(np.float32)
+                ).astype(np.float64)
+
+        # Step B: Temporal reduction (autoencoder, independent of channel axis)
+        if self._dim_reduction_name == "autoencoder":
+            if fit_ae:
+                from .dim_reduction import TSAutoEncoderReducer
+                self._ae_reducer = TSAutoEncoderReducer(
+                    n_channels=X_3d.shape[1],
+                    seq_len=X_3d.shape[2],
+                    target_len=self._dim_reduction_target,
+                    device="auto",
+                )
+                X_3d = self._ae_reducer.fit_transform(X_3d.astype(np.float32)).astype(np.float64)
+                logger.info(
+                    "MultiRocket autoencoder: %d → %d time steps",
+                    ns if self._cfg_n_steps else N_TS_STEPS,
+                    self._dim_reduction_target,
+                )
+            elif self._ae_reducer is not None:
+                X_3d = self._ae_reducer.transform(X_3d.astype(np.float32)).astype(np.float64)
+
         return self._ensure_min_length(X_3d)
 
     def _transform(self, X_3d: np.ndarray) -> np.ndarray:
@@ -565,8 +831,8 @@ class MultiRocketSubjectClassifier(_PickleSubjectClassifier):
     # ── public interface ─────────────────────────────────────────────────────
 
     def fit(self, X, y) -> Dict[str, Any]:
-        X_3d = self._preprocess(X)
         y = np.asarray(y, dtype=np.int64)
+        X_3d = self._preprocess(X, fit_ae=True, y=y)
 
         X_diff = np.diff(X_3d, axis=2)
 
@@ -608,20 +874,32 @@ class MultiRocketSubjectClassifier(_PickleSubjectClassifier):
         return (exp_d / exp_d.sum(axis=1, keepdims=True)).astype(np.float32)
 
     def save(self, path: str) -> None:
+        state = {
+            "base_params": self._base_params,
+            "diff_params": self._diff_params,
+            "scaler": self._scaler,
+            "clf": self._clf,
+            "classes_": self.classes_,
+            "num_kernels": self._num_kernels,
+            "n_features_per_kernel": self._n_features_per_kernel,
+            "max_dilations": self._max_dilations,
+            "cfg_n_vars": self._cfg_n_vars,
+            "cfg_n_steps": self._cfg_n_steps,
+            "dim_reduction": self._dim_reduction_name,
+            "dim_reduction_target": self._dim_reduction_target,
+            "channel_reduction_target": self._channel_reduction_target,
+            "channel_reduction_method": self._channel_reduction_method,
+            "ae_state": (
+                self._ae_reducer.get_state()
+                if self._ae_reducer is not None else None
+            ),
+            "channel_reducer_state": (
+                self._channel_reducer.get_state()
+                if self._channel_reducer is not None else None
+            ),
+        }
         with open(path, "wb") as f:
-            pickle.dump(
-                {
-                    "base_params": self._base_params,
-                    "diff_params": self._diff_params,
-                    "scaler": self._scaler,
-                    "clf": self._clf,
-                    "classes_": self.classes_,
-                    "num_kernels": self._num_kernels,
-                    "n_features_per_kernel": self._n_features_per_kernel,
-                    "max_dilations": self._max_dilations,
-                },
-                f,
-            )
+            pickle.dump(state, f)
 
     def load(self, path: str) -> None:
         with open(path, "rb") as f:
@@ -634,6 +912,42 @@ class MultiRocketSubjectClassifier(_PickleSubjectClassifier):
         self._num_kernels = state.get("num_kernels", self._num_kernels)
         self._n_features_per_kernel = state.get("n_features_per_kernel", 4)
         self._max_dilations = state.get("max_dilations", 32)
+        self._cfg_n_vars = state.get("cfg_n_vars")
+        self._cfg_n_steps = state.get("cfg_n_steps")
+        self._dim_reduction_name = state.get("dim_reduction")
+        self._dim_reduction_target = state.get("dim_reduction_target", 128)
+        self._channel_reduction_target = state.get("channel_reduction_target")
+        self._channel_reduction_method = state.get("channel_reduction_method", "pca")
+        ae_state = state.get("ae_state")
+        if ae_state is not None:
+            from .dim_reduction import TSAutoEncoderReducer
+            self._ae_reducer = TSAutoEncoderReducer(
+                n_channels=ae_state["n_channels"],
+                seq_len=ae_state["seq_len"],
+                target_len=ae_state["target_len"],
+            )
+            self._ae_reducer.set_state(ae_state)
+        ch_state = state.get("channel_reducer_state")
+        if ch_state is not None:
+            from .dim_reduction import (
+                ChannelLDAReducer,
+                ChannelPCAReducer,
+                ChannelUMAPReducer,
+            )
+            method = self._channel_reduction_method
+            if method == "lda":
+                self._channel_reducer = ChannelLDAReducer(
+                    n_components=ch_state["n_components"]
+                )
+            elif method == "umap":
+                self._channel_reducer = ChannelUMAPReducer(
+                    n_components=ch_state["n_components"]
+                )
+            else:
+                self._channel_reducer = ChannelPCAReducer(
+                    n_components=ch_state["n_components"]
+                )
+            self._channel_reducer.set_state(ch_state)
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -671,6 +985,8 @@ class _PatchTSTClassification(_TorchModule):
         d_ff: int = 64,
         dropout: float = 0.3,
         n_classes: int = 2,
+        temporal_projection_target: Optional[int] = None,
+        channel_projection_target: Optional[int] = None,
     ):
         super().__init__()
         self.c_in = c_in
@@ -678,11 +994,29 @@ class _PatchTSTClassification(_TorchModule):
         self.patch_len = patch_len
         self.stride = stride
 
-        # RevIN
+        # ── (A) Optional channel projection: reduces C → C_target (end-to-end) ──
+        if channel_projection_target and channel_projection_target < c_in:
+            from .dim_reduction import build_learned_channel_projection
+            self.channel_proj = build_learned_channel_projection(c_in, channel_projection_target)
+            self.effective_c_in = channel_projection_target
+        else:
+            self.channel_proj = None
+            self.effective_c_in = c_in
+
+        # ── (B) Optional temporal projection: reduces T → T_target (end-to-end) ──
+        if temporal_projection_target and temporal_projection_target < seq_len:
+            from .dim_reduction import build_learned_projection
+            self.temporal_proj = build_learned_projection(seq_len, temporal_projection_target)
+            effective_len = temporal_projection_target
+        else:
+            self.temporal_proj = None
+            effective_len = seq_len
+
+        # RevIN (operates on original c_in channels — applied before channel_proj)
         self.revin = _RevIN(c_in, affine=True)
 
-        # Patching geometry
-        self.n_patches = int((seq_len - patch_len) / stride + 1)
+        # Patching geometry (uses effective_len after optional projection)
+        self.n_patches = int((effective_len - patch_len) / stride + 1)
 
         # Linear projection: patch_len → d_model  (W_P in official code)
         self.W_P = nn.Linear(patch_len, d_model)
@@ -705,43 +1039,51 @@ class _PatchTSTClassification(_TorchModule):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # Classification head
+        # Classification head (uses effective_c_in after optional channel proj)
         self.head = nn.Sequential(
-            nn.LayerNorm(c_in * d_model),
+            nn.LayerNorm(self.effective_c_in * d_model),
             nn.Dropout(dropout),
-            nn.Linear(c_in * d_model, n_classes),
+            nn.Linear(self.effective_c_in * d_model, n_classes),
         )
 
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         # x: (bs, c_in, seq_len)
         bs = x.shape[0]
 
-        # 1. RevIN (expects bs, seq_len, c_in)
+        # 1. RevIN (expects bs, seq_len, c_in) — applied on original channels
         x = x.permute(0, 2, 1)
         x = self.revin(x, "norm")
         x = x.permute(0, 2, 1)                              # (bs, c_in, seq_len)
 
+        # 1a. Optional channel projection: C → C_target  (independent per timestep)
+        if self.channel_proj is not None:
+            x = self.channel_proj(x)                         # (bs, effective_c_in, seq_len)
+
+        # 1b. Optional temporal projection: T → T_target  (independent per channel)
+        if self.temporal_proj is not None:
+            x = self.temporal_proj(x)                        # (bs, effective_c_in, target_len)
+
         # 2. Patching
         x = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)
-        # → (bs, c_in, n_patches, patch_len)
+        # → (bs, effective_c_in, n_patches, patch_len)
 
         # 3. Channel-independent
-        x = x.reshape(bs * self.c_in, self.n_patches, self.patch_len)
+        x = x.reshape(bs * self.effective_c_in, self.n_patches, self.patch_len)
 
         # 4. Patch embedding
-        x = self.W_P(x)                                     # (bs*c_in, n_patches, d_model)
+        x = self.W_P(x)                                     # (bs*effective_c_in, n_patches, d_model)
 
         # 5. Positional encoding + dropout
         x = self.input_dropout(x + self.W_pos)
 
         # 6. Transformer encoder
-        x = self.encoder(x)                                  # (bs*c_in, n_patches, d_model)
+        x = self.encoder(x)                                  # (bs*effective_c_in, n_patches, d_model)
 
         # 7. Mean pooling over patches
-        x = x.mean(dim=1)                                    # (bs*c_in, d_model)
+        x = x.mean(dim=1)                                    # (bs*effective_c_in, d_model)
 
         # 8. Reshape and classify
-        x = x.reshape(bs, -1)                                # (bs, c_in*d_model)
+        x = x.reshape(bs, -1)                                # (bs, effective_c_in*d_model)
         return self.head(x)                                   # (bs, n_classes)
 
 
@@ -756,7 +1098,12 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
       - 可學習位置編碼
       - 分類頭: mean pooling → LayerNorm → Dropout → Linear
 
-    Input X 來自 ``time_series`` 特徵提取器（flat 2304-dim = 18 ch × 128 steps）。
+    Input X 來自 ``time_series`` 特徵提取器（flat 4608-dim = 18 ch × 256 steps）
+    或 ``time_series_v3lite`` 特徵提取器（flat 3072-dim = 12 ch × 256 steps）。
+
+    透過 ``n_vars`` / ``n_steps`` 指定維度，或由 auto-detection 推斷。
+    ``dim_reduction`` 支援 ``"learned_projection"``（end-to-end 時間軸降維）。
+    ``channel_reduction_target`` 支援獨立的 channel 維度降維（Linear per-timestep）。
     需要: torch
     """
 
@@ -776,6 +1123,15 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
         "patience": 15,
         "seed": 42,
         "device": "auto",
+        # v3lite adaptive dims — leave None to auto-detect.
+        "n_vars": None,
+        "n_steps": None,
+        # Dimensionality reduction (two independent axes):
+        # Time axis:    None | "learned_projection"   (Linear T → dim_reduction_target)
+        # Channel axis: set channel_reduction_target to an int to enable
+        "dim_reduction": None,
+        "dim_reduction_target": 128,       # target time steps after T-reduction
+        "channel_reduction_target": None,  # target channels after C-reduction (None = off)
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -787,12 +1143,28 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
         self._model: Optional[_PatchTSTClassification] = None
         self._device = _get_torch_device(str(cfg.get("device", "auto")))
         self.classes_: Optional[np.ndarray] = None
+        # dim-reduction config
+        self._cfg_n_vars: Optional[int] = cfg.get("n_vars")
+        self._cfg_n_steps: Optional[int] = cfg.get("n_steps")
+        self._dim_reduction_name: Optional[str] = cfg.get("dim_reduction")
+        self._dim_reduction_target: int = int(cfg.get("dim_reduction_target", 128))
+        self._channel_reduction_target: Optional[int] = (
+            int(cfg["channel_reduction_target"])
+            if cfg.get("channel_reduction_target") is not None else None
+        )
 
     def _build_model(self, n_classes: int = 2) -> _PatchTSTClassification:
         torch.manual_seed(self._seed)
+        c_in = int(self._cfg_n_vars) if self._cfg_n_vars else N_TS_VARS
+        seq_len = int(self._cfg_n_steps) if self._cfg_n_steps else N_TS_STEPS
+        tp_target = (
+            self._dim_reduction_target
+            if self._dim_reduction_name == "learned_projection" else None
+        )
+        cp_target = self._channel_reduction_target
         return _PatchTSTClassification(
-            c_in=N_TS_VARS,
-            seq_len=N_TS_STEPS,
+            c_in=c_in,
+            seq_len=seq_len,
             patch_len=int(self._cfg["patch_len"]),
             stride=int(self._cfg["stride"]),
             n_layers=int(self._cfg["n_layers"]),
@@ -801,12 +1173,19 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
             d_ff=int(self._cfg["d_ff"]),
             dropout=float(self._cfg["dropout"]),
             n_classes=n_classes,
+            temporal_projection_target=tp_target,
+            channel_projection_target=cp_target,
         )
+
+    def _reshape(self, X: np.ndarray) -> np.ndarray:
+        nv = int(self._cfg_n_vars) if self._cfg_n_vars else N_TS_VARS
+        ns = int(self._cfg_n_steps) if self._cfg_n_steps else N_TS_STEPS
+        return _to_ts3d(X, nv, ns)
 
     def fit(self, X, y) -> Dict[str, Any]:
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64)
-        X_3d = _to_ts3d(X)
+        X_3d = self._reshape(X)
 
         self.classes_ = np.unique(y)
         n_classes = len(self.classes_)
@@ -826,7 +1205,7 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
         return {"n_params": sum(p.numel() for p in self._model.parameters())}
 
     def predict(self, X):
-        X_3d = _to_ts3d(np.asarray(X, dtype=np.float32))
+        X_3d = self._reshape(np.asarray(X, dtype=np.float32))
         X_t = torch.tensor(X_3d, dtype=torch.float32, device=self._device)
         self._model.to(self._device).eval()
         with torch.no_grad():
@@ -834,7 +1213,7 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
         return self.classes_[logits.argmax(dim=1).cpu().numpy()]
 
     def predict_proba(self, X):
-        X_3d = _to_ts3d(np.asarray(X, dtype=np.float32))
+        X_3d = self._reshape(np.asarray(X, dtype=np.float32))
         X_t = torch.tensor(X_3d, dtype=torch.float32, device=self._device)
         self._model.to(self._device).eval()
         with torch.no_grad():
@@ -850,6 +1229,11 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
             ),
             "cfg": self._cfg,
             "classes_": self.classes_,
+            "cfg_n_vars": self._cfg_n_vars,
+            "cfg_n_steps": self._cfg_n_steps,
+            "dim_reduction": self._dim_reduction_name,
+            "dim_reduction_target": self._dim_reduction_target,
+            "channel_reduction_target": self._channel_reduction_target,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f)
@@ -859,6 +1243,11 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
             state = pickle.load(f)
         self._cfg = state["cfg"]
         self.classes_ = state.get("classes_")
+        self._cfg_n_vars = state.get("cfg_n_vars")
+        self._cfg_n_steps = state.get("cfg_n_steps")
+        self._dim_reduction_name = state.get("dim_reduction")
+        self._dim_reduction_target = state.get("dim_reduction_target", 128)
+        self._channel_reduction_target = state.get("channel_reduction_target")
         n_classes = len(self.classes_) if self.classes_ is not None else 2
         self._model = self._build_model(n_classes)
         if state.get("model_state"):
@@ -907,6 +1296,8 @@ class _TimeMachineClassification(_TorchModule):
         ch_ind: bool = True,
         residual: bool = True,
         n_classes: int = 2,
+        temporal_projection_target: Optional[int] = None,
+        channel_projection_target: Optional[int] = None,
     ):
         super().__init__()
         self.c_in = c_in
@@ -916,7 +1307,25 @@ class _TimeMachineClassification(_TorchModule):
         self.n1 = n1
         self.n2 = n2
 
-        # RevIN
+        # ── (A) Optional channel projection: C → C_target (end-to-end) ──
+        if channel_projection_target and channel_projection_target < c_in:
+            from .dim_reduction import build_learned_channel_projection
+            self.channel_proj = build_learned_channel_projection(c_in, channel_projection_target)
+            self.effective_c_in = channel_projection_target
+        else:
+            self.channel_proj = None
+            self.effective_c_in = c_in
+
+        # ── (B) Optional temporal projection: T → T_target (end-to-end) ──
+        if temporal_projection_target and temporal_projection_target < seq_len:
+            from .dim_reduction import build_learned_projection
+            self.temporal_proj = build_learned_projection(seq_len, temporal_projection_target)
+            effective_len = temporal_projection_target
+        else:
+            self.temporal_proj = None
+            effective_len = seq_len
+
+        # RevIN (operates on original c_in channels)
         self.revin = _RevIN(c_in, affine=True)
 
         # d_model for cross-dim Mamba blocks depends on ch_ind
@@ -924,7 +1333,7 @@ class _TimeMachineClassification(_TorchModule):
         d_param2 = 1 if ch_ind else n1
 
         # Linear projections (official: operates on last dim)
-        self.lin1 = nn.Linear(seq_len, n1)
+        self.lin1 = nn.Linear(effective_len, n1)
         self.dropout1 = nn.Dropout(dropout)
         self.lin2 = nn.Linear(n1, n2)
         self.dropout2 = nn.Dropout(dropout)
@@ -947,14 +1356,23 @@ class _TimeMachineClassification(_TorchModule):
         # x: (bs, c_in, seq_len)
         bs = x.shape[0]
 
-        # RevIN: (bs, seq_len, c_in)
+        # RevIN: (bs, seq_len, c_in) — applied on original channels
         x = x.permute(0, 2, 1)
         x = self.revin(x, "norm")
         x = x.permute(0, 2, 1)                              # (bs, c_in, seq_len)
 
+        # (A) Optional channel projection: C → C_target  (independent per timestep)
+        if self.channel_proj is not None:
+            x = self.channel_proj(x)                         # (bs, effective_c_in, seq_len)
+
+        # (B) Optional temporal projection: T → T_target  (independent per channel)
+        if self.temporal_proj is not None:
+            x = self.temporal_proj(x)                        # (bs, effective_c_in, target_len)
+
         # Channel-independent
+        effective_len = x.shape[-1]
         if self.ch_ind:
-            x = x.reshape(bs * self.c_in, 1, self.seq_len)  # (bs*C, 1, L)
+            x = x.reshape(bs * self.effective_c_in, 1, effective_len)  # (bs*C_eff, 1, L)
 
         # ── Stage 1 ──────────────────────────────────────────────────────────
         x = self.lin1(x)                                     # (…, 1, n1)
@@ -1005,8 +1423,8 @@ class _TimeMachineClassification(_TorchModule):
 
         # ── Classification: pool ─────────────────────────────────────────────
         if self.ch_ind:
-            x = x.squeeze(1)                                  # (bs*C, 2*n1)
-            x = x.reshape(bs, self.c_in, -1)                 # (bs, C, 2*n1)
+            x = x.squeeze(1)                                  # (bs*C_eff, 2*n1)
+            x = x.reshape(bs, self.effective_c_in, -1)        # (bs, C_eff, 2*n1)
             x = x.mean(dim=1)                                 # (bs, 2*n1)
         else:
             x = x.mean(dim=1)                                 # (bs, 2*n1)
@@ -1028,7 +1446,12 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
       - 分類頭: mean pool → LayerNorm → Dropout → Linear
 
     使用 mamba_ssm.Mamba（若有安裝），否則自動回退至 _SimpleMamba。
-    Input X 來自 ``time_series`` 特徵提取器（flat 2304-dim = 18 ch × 128 steps）。
+    Input X 來自 ``time_series`` 特徵提取器（flat 2304-dim = 18 ch × 128 steps）
+    或 ``time_series_v3lite`` 特徵提取器（flat 3072-dim = 12 ch × 256 steps）。
+
+    可透過 ``n_vars`` / ``n_steps`` 指定維度，或由 auto-detection 推斷。
+    ``dim_reduction`` 支援 ``"learned_projection"``（end-to-end Linear 降維）。
+
     需要: torch (+ 可選: mamba_ssm)
     """
 
@@ -1049,6 +1472,15 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
         "patience": 15,
         "seed": 42,
         "device": "auto",
+        # --- v3lite / dim-reduction ---
+        "n_vars": None,           # None = auto-detect
+        "n_steps": None,          # None = auto-detect
+        # Dimensionality reduction (two independent axes):
+        # Time axis:    None | "learned_projection"   (Linear T → dim_reduction_target)
+        # Channel axis: set channel_reduction_target to an int to enable
+        "dim_reduction": None,
+        "dim_reduction_target": 128,
+        "channel_reduction_target": None,  # target channels after C-reduction (None = off)
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -1060,12 +1492,34 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
         self._model: Optional[_TimeMachineClassification] = None
         self._device = _get_torch_device(str(cfg.get("device", "auto")))
         self.classes_: Optional[np.ndarray] = None
+        # dim-reduction config
+        self._cfg_n_vars: Optional[int] = cfg.get("n_vars")
+        self._cfg_n_steps: Optional[int] = cfg.get("n_steps")
+        self._dim_reduction_name: Optional[str] = cfg.get("dim_reduction")
+        self._dim_reduction_target: int = int(cfg.get("dim_reduction_target", 128))
+        self._channel_reduction_target: Optional[int] = (
+            int(cfg["channel_reduction_target"])
+            if cfg.get("channel_reduction_target") is not None else None
+        )
+
+    # ---- helpers ----
+    def _reshape(self, X: np.ndarray) -> np.ndarray:
+        """Reshape flat X → 3-D (N, C, T) using configured / auto-detected dims."""
+        n_vars = self._cfg_n_vars if self._cfg_n_vars else N_TS_VARS
+        n_steps = self._cfg_n_steps if self._cfg_n_steps else N_TS_STEPS
+        return _to_ts3d(X, n_vars=n_vars, n_steps=n_steps)
 
     def _build_model(self, n_classes: int = 2) -> _TimeMachineClassification:
         torch.manual_seed(self._seed)
+        n_vars = self._cfg_n_vars if self._cfg_n_vars else N_TS_VARS
+        n_steps = self._cfg_n_steps if self._cfg_n_steps else N_TS_STEPS
+        tp_target: Optional[int] = None
+        if self._dim_reduction_name == "learned_projection" and self._dim_reduction_target < n_steps:
+            tp_target = self._dim_reduction_target
+        cp_target = self._channel_reduction_target
         return _TimeMachineClassification(
-            c_in=N_TS_VARS,
-            seq_len=N_TS_STEPS,
+            c_in=n_vars,
+            seq_len=n_steps,
             n1=int(self._cfg["n1"]),
             n2=int(self._cfg["n2"]),
             d_state=int(self._cfg["d_state"]),
@@ -1075,12 +1529,14 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
             ch_ind=bool(self._cfg["ch_ind"]),
             residual=bool(self._cfg["residual"]),
             n_classes=n_classes,
+            temporal_projection_target=tp_target,
+            channel_projection_target=cp_target,
         )
 
     def fit(self, X, y) -> Dict[str, Any]:
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.int64)
-        X_3d = _to_ts3d(X)
+        X_3d = self._reshape(X)
 
         self.classes_ = np.unique(y)
         n_classes = len(self.classes_)
@@ -1103,7 +1559,7 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
         }
 
     def predict(self, X):
-        X_3d = _to_ts3d(np.asarray(X, dtype=np.float32))
+        X_3d = self._reshape(np.asarray(X, dtype=np.float32))
         X_t = torch.tensor(X_3d, dtype=torch.float32, device=self._device)
         self._model.to(self._device).eval()
         with torch.no_grad():
@@ -1111,7 +1567,7 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
         return self.classes_[logits.argmax(dim=1).cpu().numpy()]
 
     def predict_proba(self, X):
-        X_3d = _to_ts3d(np.asarray(X, dtype=np.float32))
+        X_3d = self._reshape(np.asarray(X, dtype=np.float32))
         X_t = torch.tensor(X_3d, dtype=torch.float32, device=self._device)
         self._model.to(self._device).eval()
         with torch.no_grad():
@@ -1127,6 +1583,11 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
             ),
             "cfg": self._cfg,
             "classes_": self.classes_,
+            "cfg_n_vars": self._cfg_n_vars,
+            "cfg_n_steps": self._cfg_n_steps,
+            "dim_reduction": self._dim_reduction_name,
+            "dim_reduction_target": self._dim_reduction_target,
+            "channel_reduction_target": self._channel_reduction_target,
         }
         with open(path, "wb") as f:
             pickle.dump(state, f)
@@ -1136,6 +1597,11 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
             state = pickle.load(f)
         self._cfg = state["cfg"]
         self.classes_ = state.get("classes_")
+        self._cfg_n_vars = state.get("cfg_n_vars")
+        self._cfg_n_steps = state.get("cfg_n_steps")
+        self._dim_reduction_name = state.get("dim_reduction")
+        self._dim_reduction_target = state.get("dim_reduction_target", 128)
+        self._channel_reduction_target = state.get("channel_reduction_target")
         n_classes = len(self.classes_) if self.classes_ is not None else 2
         self._model = self._build_model(n_classes)
         if state.get("model_state"):

@@ -112,9 +112,12 @@ class YOLOv11Model(TrackingModel):
             self._device_str = "cpu"
 
     def _apply_preprocs_np(self, frame_bgr: np.ndarray) -> np.ndarray:
+        import cv2
+        if frame_bgr is not None and frame_bgr.ndim == 3:
+            _g = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            frame_bgr = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not self.preprocs:
             return frame_bgr
-        import cv2
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         for p in self.preprocs:
             if getattr(p, "train_only", False):
@@ -154,9 +157,12 @@ class YOLOv11Model(TrackingModel):
             frame_bgr: np.ndarray,
             bboxes: List[tuple],
         ) -> tuple[np.ndarray, List[tuple]]:
+            import cv2
+            if frame_bgr is not None and frame_bgr.ndim == 3:
+                _g = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                frame_bgr = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
             if not self.preprocs:
                 return frame_bgr, list(bboxes or [])
-            import cv2
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             out_bboxes: List[tuple] = list(bboxes or [])
             for p in self.preprocs:

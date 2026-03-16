@@ -183,7 +183,6 @@ queue:
             random_state: 42
         segmentation:
           enabled: false      # classification no longer requires seg masks
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -199,7 +198,6 @@ queue:
             random_state: 42
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -216,7 +214,6 @@ queue:
             probability: true
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -232,7 +229,6 @@ queue:
             random_state: 42
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -248,7 +244,6 @@ queue:
             random_state: 42
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -264,7 +259,6 @@ queue:
             random_state: 42
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -281,7 +275,6 @@ queue:
             probability: true
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 
@@ -297,7 +290,6 @@ queue:
             random_state: 42
         segmentation:
           enabled: false
-          params: {}
         label_file: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged\\ann.txt"
         level: video
 

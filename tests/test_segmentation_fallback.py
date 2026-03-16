@@ -212,6 +212,11 @@ def test_predict_video_empty_predictions_with_gt_penalizes(monkeypatch, tmp_path
 
     monkeypatch.setattr(cv2, "VideoCapture", lambda *_args, **_kwargs: _FakeCapture(_args[0] if _args else None))
 
+    # Create a real dummy mask file so _resolve_gt_mask_path finds it on disk.
+    _mask_img = np.zeros((16, 16), dtype=np.uint8)
+    _mask_img[2:6, 3:7] = 255
+    cv2.imwrite(str(tmp_path / "dummy.png"), _mask_img)
+
     written_masks = {}
 
     def _fake_imwrite(path, image):
@@ -276,6 +281,11 @@ def test_bootstrap_bbox_from_full_frame_segmentation(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(cv2, "VideoCapture", lambda *_args, **_kwargs: _FakeCapture(_args[0] if _args else None))
+
+    # Create a real dummy mask file on disk so _resolve_gt_mask_path can find it.
+    _mask_img = np.zeros((16, 16), dtype=np.uint8)
+    _mask_img[2:6, 3:7] = 255
+    cv2.imwrite(str(tmp_path / "dummy.png"), _mask_img)
 
     written_masks = {}
 

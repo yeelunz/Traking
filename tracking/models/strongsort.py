@@ -224,6 +224,9 @@ class StrongSortTracker(TrackingModel):
     # Internal helpers
     # ------------------------------------------------------------------
     def _apply_preprocs(self, frame_bgr: np.ndarray) -> np.ndarray:
+        if frame_bgr is not None and frame_bgr.ndim == 3:
+            _g = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            frame_bgr = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not self.preprocs:
             return frame_bgr
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -506,33 +509,66 @@ class StrongSortPPTracker(StrongSortTracker):
         return [frame_map[i] for i in sorted(frame_map.keys())]
 
     def _interpolate_gaps(self, preds: Sequence[FramePrediction], max_gap: int) -> List[FramePrediction]:
+        """Cubic-spline gap interpolation (GSI) for detection gaps.
+
+        Uses cubic spline interpolation to fill gaps in the detection
+        sequence, ensuring C2 continuity (velocity and acceleration) at
+        interpolated points.  Falls back to linear interpolation when the
+        number of known keypoints is < 4.
+        """
         if len(preds) < 2 or max_gap < 2:
             return list(preds)
         preds_sorted = sorted(preds, key=lambda p: int(p.frame_index))
+
+        # Collect all known keypoints for global spline fitting
+        known_frames = np.array([int(p.frame_index) for p in preds_sorted], dtype=np.float64)
+        known_boxes = np.array([list(p.bbox) for p in preds_sorted], dtype=np.float64)
+        known_scores = np.array(
+            [self._score_float(p.score) for p in preds_sorted], dtype=np.float64,
+        )
+        has_score = any(p.score is not None for p in preds_sorted)
+
+        # Build cubic spline for each bbox dimension + score
+        _spline_ok = False
+        try:
+            from scipy.interpolate import CubicSpline
+            if len(known_frames) >= 4:
+                box_splines = [
+                    CubicSpline(known_frames, known_boxes[:, d], extrapolate=True)
+                    for d in range(4)
+                ]
+                score_spline = CubicSpline(known_frames, known_scores, extrapolate=True) if has_score else None
+                _spline_ok = True
+        except (ImportError, Exception):
+            _spline_ok = False
+
         output: List[FramePrediction] = []
         for cur, nxt in zip(preds_sorted[:-1], preds_sorted[1:]):
             output.append(cur)
             gap = int(nxt.frame_index) - int(cur.frame_index)
             if 1 < gap <= max_gap:
-                cur_box = np.asarray(cur.bbox, dtype=np.float32)
-                nxt_box = np.asarray(nxt.bbox, dtype=np.float32)
-                cur_score = self._score_float(cur.score)
-                nxt_score = self._score_float(nxt.score)
-                has_score = (cur.score is not None) or (nxt.score is not None)
-                delta_box = (nxt_box - cur_box) / float(gap)
-                delta_score = (nxt_score - cur_score) / float(gap)
                 for step in range(1, gap):
                     frame_idx = int(cur.frame_index) + step
-                    bbox = cur_box + delta_box * step
-                    score = None
-                    if has_score:
-                        score = self._clip_score(cur_score + delta_score * step)
+                    t = np.float64(frame_idx)
+                    if _spline_ok:
+                        bbox = tuple(float(box_splines[d](t)) for d in range(4))
+                        score = None
+                        if has_score and score_spline is not None:
+                            score = self._clip_score(float(score_spline(t)))
+                    else:
+                        # Fallback: linear interpolation between two endpoints
+                        alpha = float(step) / float(gap)
+                        cur_box = np.asarray(cur.bbox, dtype=np.float64)
+                        nxt_box = np.asarray(nxt.bbox, dtype=np.float64)
+                        interp_box = cur_box + (nxt_box - cur_box) * alpha
+                        bbox = tuple(float(v) for v in interp_box)
+                        score = None
+                        if has_score:
+                            cur_s = self._score_float(cur.score)
+                            nxt_s = self._score_float(nxt.score)
+                            score = self._clip_score(cur_s + (nxt_s - cur_s) * alpha)
                     output.append(
-                        FramePrediction(
-                            frame_idx,
-                            (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
-                            score,
-                        )
+                        FramePrediction(frame_idx, bbox, score)
                     )
         output.append(preds_sorted[-1])
         return self._deduplicate(output)

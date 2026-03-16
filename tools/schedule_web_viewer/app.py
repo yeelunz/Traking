@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import re
 from urllib.parse import quote, urlencode
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -43,8 +43,8 @@ _MODAL_MAP: Dict[str, str] = {
     "Rest post": "rest_post",
     # normal subject naming
     "D":   "doppler",
-    "G-R": "grasp",
-    "R-G": "relax",
+    "G-R": "relax",
+    "R-G": "grasp",
     "R1":  "rest",
     "R2":  "rest_post",
 }
@@ -56,15 +56,21 @@ def _compute_voting_analysis(predictions: List[Dict]) -> Dict:
     """Compute per-modality accuracy and voting analysis from predictions.json entries.
 
     Each entry: {entity_id, subject_id, label_true, label_pred, prob_positive}.
-    Returns a dict with keys: modalities, per_modality, five_voting, top_combos.
+    Returns a dict with keys: modalities, per_modality, five_voting,
+    soft_five_voting, top_combos, soft_top_combos.
+
+    Modalities are detected dynamically from the data: known entity_id strings are
+    mapped via _MODAL_MAP; unknown strings fall back to their own value.
+    This supports datasets with arbitrary video/modality names.
     """
     # Group by subject_id → {canonical_modality: {pred, true, prob}}
     subjects: Dict[str, Dict[str, Dict]] = {}
     for item in predictions:
         entity_id = item.get("entity_id", "")
         subject_id = item.get("subject_id", "")
-        canonical = _MODAL_MAP.get(str(entity_id))
-        if canonical is None:
+        # Fall back to identity mapping so new datasets with arbitrary names work too
+        canonical = _MODAL_MAP.get(str(entity_id), str(entity_id))
+        if not canonical or not subject_id:
             continue
         if subject_id not in subjects:
             subjects[subject_id] = {}
@@ -74,12 +80,25 @@ def _compute_voting_analysis(predictions: List[Dict]) -> Dict:
             "prob": item.get("prob_positive"),
         }
 
+    # Build effective modality list from data (preserving _MODALITIES order for known ones)
+    seen: set = set(m for subj in subjects.values() for m in subj)
+    effective_modalities: List[str] = [
+        m for m in _MODALITIES if m in seen
+    ] + sorted(seen - set(_MODALITIES))
+
     if not subjects:
-        return {"modalities": _MODALITIES, "per_modality": [], "five_voting": None, "top_combos": []}
+        return {
+            "modalities": _MODALITIES,
+            "per_modality": [],
+            "five_voting": None,
+            "soft_five_voting": None,
+            "top_combos": [],
+            "soft_top_combos": [],
+        }
 
     # Per-modality accuracy
     per_modality: List[Dict] = []
-    for m in _MODALITIES:
+    for m in effective_modalities:
         correct = 0
         total = 0
         for subj_data in subjects.values():
@@ -127,23 +146,166 @@ def _compute_voting_analysis(predictions: List[Dict]) -> Dict:
             "details": details,
         }
 
-    five_voting = _vote_result(_MODALITIES)
-    five_voting["modalities"] = _MODALITIES
+    def _soft_vote_result(mod_list: List[str]) -> Dict:
+        """Soft vote using the mean positive probability across selected modalities."""
+        correct = 0
+        total = 0
+        details: List[Dict] = []
+        for subj_id, subj_data in sorted(subjects.items()):
+            avail = [m for m in mod_list if m in subj_data]
+            if not avail:
+                continue
+            probs = [subj_data[m]["prob"] for m in avail if subj_data[m].get("prob") is not None]
+            if not probs:
+                continue
+            true_label = subj_data[avail[0]]["true"]
+            mean_prob = float(sum(float(p) for p in probs) / len(probs))
+            vote = 1 if mean_prob >= 0.5 else 0
+            is_correct = (vote == true_label)
+            if is_correct:
+                correct += 1
+            total += 1
+            details.append({
+                "subject_id": subj_id,
+                "true_label": true_label,
+                "vote": vote,
+                "mean_prob_positive": mean_prob,
+                "total_votes": len(probs),
+                "correct": is_correct,
+            })
+        return {
+            "correct": correct,
+            "total": total,
+            "accuracy": correct / total if total > 0 else None,
+            "details": details,
+        }
 
+    five_voting = _vote_result(effective_modalities)
+    five_voting["modalities"] = effective_modalities
+    soft_five_voting = _soft_vote_result(effective_modalities)
+    soft_five_voting["modalities"] = effective_modalities
+
+    # Generate C(N, k) combos where k = min(3, N); skip if fewer than 2 modalities
+    combo_size = min(3, len(effective_modalities))
     top_combos: List[Dict] = []
-    for combo in combinations(_MODALITIES, 3):
-        result = _vote_result(list(combo))
-        result["modalities"] = list(combo)
-        top_combos.append(result)
+    soft_top_combos: List[Dict] = []
+    if combo_size >= 2 and len(effective_modalities) > combo_size:
+        for combo in combinations(effective_modalities, combo_size):
+            result = _vote_result(list(combo))
+            result["modalities"] = list(combo)
+            top_combos.append(result)
+            soft_result = _soft_vote_result(list(combo))
+            soft_result["modalities"] = list(combo)
+            soft_top_combos.append(soft_result)
     top_combos.sort(key=lambda x: (x["accuracy"] or 0, x["correct"]), reverse=True)
+    soft_top_combos.sort(key=lambda x: (x["accuracy"] or 0, x["correct"]), reverse=True)
 
     return {
-        "modalities": _MODALITIES,
+        "modalities": effective_modalities,
         "per_modality": per_modality,
         "five_voting": five_voting,
+        "soft_five_voting": soft_five_voting,
         "top_combos": top_combos,
+        "soft_top_combos": soft_top_combos,
     }
 
+
+
+def _build_loso_combined(
+    fold_entries: List[Dict],
+    entries: Dict,
+) -> Tuple[Optional[Dict], List[Dict]]:
+    """Combine classification data from all LOSO folds.
+
+    Returns ``(combined_summary, all_predictions)`` where:
+    - ``combined_summary`` has *integer* TP/FP/FN/TN summed across every
+      fold and re-computed overall accuracy / F1 / balanced-accuracy.
+    - ``all_predictions`` is the flat list of all per-fold prediction dicts.
+    """
+    all_predictions: List[Dict] = []
+    tp = fp = fn = tn = 0
+    fold_thresholds: List[float] = []
+    fold_youden_js: List[float] = []
+    fold_threshold_method: Optional[str] = None
+    total_loo_predictions: int = 0
+    for fold in fold_entries:
+        raw_id = fold.get("exp_id")
+        if not raw_id:
+            continue
+        raw_entry = entries.get(raw_id)
+        if not raw_entry:
+            continue
+        exp_path = Path(raw_entry["path"])
+        preds = load_json(exp_path / "classification" / "predictions.json") or []
+        all_predictions.extend(preds)
+        s = load_json(exp_path / "classification" / "summary.json") or {}
+        tp += int(round(float(s.get("tp") or 0)))
+        fp += int(round(float(s.get("fp") or 0)))
+        fn += int(round(float(s.get("fn") or 0)))
+        tn += int(round(float(s.get("tn") or 0)))
+        total_loo_predictions += int(s.get("threshold_n_loo_predictions") or 0)
+        # Gather per-fold Youden threshold info from artefacts
+        art = load_json(exp_path / "classification" / "artefacts.json") or {}
+        t_used = art.get("threshold_used")
+        j_val = art.get("youden_j")
+        if t_used is not None:
+            fold_thresholds.append(float(t_used))
+        if j_val is not None:
+            fold_youden_js.append(float(j_val))
+        if fold_threshold_method is None and art.get("threshold_method"):
+            fold_threshold_method = art["threshold_method"]
+
+    total = tp + fp + fn + tn
+    if total == 0:
+        return None, all_predictions
+
+    accuracy = (tp + tn) / total
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    balanced = (tpr + tnr) / 2
+
+    # Compute AUC-ROC from combined predictions across all LOSO folds.
+    # Each fold predicts a held-out subject, so the union of all fold predictions
+    # covers the entire dataset without data leakage — making this the correct way
+    # to compute AUC-ROC for a LOSO evaluation.
+    roc_auc: Optional[float] = None
+    try:
+        y_true_all = [p.get("label_true") for p in all_predictions if p.get("label_true") is not None and p.get("prob_positive") is not None]
+        y_prob_all = [p.get("prob_positive") for p in all_predictions if p.get("label_true") is not None and p.get("prob_positive") is not None]
+        if len(set(y_true_all)) >= 2:
+            from sklearn.metrics import roc_auc_score as _roc_auc_score  # type: ignore
+            roc_auc = float(_roc_auc_score(y_true_all, y_prob_all))
+    except Exception:
+        roc_auc = None
+
+    mean_threshold: Optional[float] = (
+        float(sum(fold_thresholds) / len(fold_thresholds)) if fold_thresholds else None
+    )
+    mean_youden_j: Optional[float] = (
+        float(sum(fold_youden_js) / len(fold_youden_js)) if fold_youden_js else None
+    )
+
+    combined_summary: Dict = {
+        "accuracy": accuracy,
+        "balanced_accuracy": balanced,
+        "precision_positive": precision,
+        "recall_positive": recall,
+        "f1_positive": f1,
+        "roc_auc": roc_auc,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+        "support_positive": tp + fn,
+        "threshold_used": mean_threshold,
+        "threshold_method": fold_threshold_method,
+        "youden_j": mean_youden_j,
+        "threshold_n_loo_predictions": total_loo_predictions or None,
+    }
+    return combined_summary, all_predictions
 
 
 def load_json(path: Path) -> Optional[Dict]:
@@ -185,6 +347,14 @@ def segmentation_summary_metrics(exp_path: Path) -> Optional[Dict]:
 def classification_summary_metrics(exp_path: Path) -> Optional[Dict]:
     """Load classification summary from ``<exp>/classification/summary.json``."""
     summary_path = exp_path / "classification" / "summary.json"
+    if not summary_path.exists():
+        return None
+    return load_json(summary_path)
+
+
+def trajectory_filter_summary_metrics(exp_path: Path) -> Optional[Dict]:
+    """Load trajectory filter summary from ``<exp>/test/trajectory_filter/summary.json``."""
+    summary_path = exp_path / "test" / "trajectory_filter" / "summary.json"
     if not summary_path.exists():
         return None
     return load_json(summary_path)
@@ -362,6 +532,7 @@ class ExperimentIndex:
             det_preview = detection_summary_metrics(exp_path)
             seg_preview = segmentation_summary_metrics(exp_path)
             cls_preview = classification_summary_metrics(exp_path)
+            tf_preview = trajectory_filter_summary_metrics(exp_path)
             entry = {
                 "id": rel,
                 "path": exp_path,
@@ -377,12 +548,14 @@ class ExperimentIndex:
                 "has_detection": det_summary.exists(),
                 "has_segmentation": seg_summary.exists(),
                 "has_classification": cls_summary_path.exists(),
+                "has_trajectory_filter": (exp_path / "test" / "trajectory_filter" / "summary.json").exists(),
                 "has_detection_visuals": (exp_path / "test" / "detection" / "visualizations").exists(),
                 "has_segmentation_visuals": bool(list((exp_path / "test" / "segmentation").rglob("visualizations_roi"))) if (exp_path / "test" / "segmentation").exists() else False,
                 "preview": {
                     "detection": det_preview,
                     "segmentation": seg_preview,
                     "classification": cls_preview,
+                    "trajectory_filter": tf_preview,
                 },
             }
             entries[rel] = entry
@@ -409,6 +582,37 @@ class ExperimentIndex:
         if len(parts) <= 1:
             return ""
         return "/".join(parts[:-1])
+
+    def _resolve_note_file(self, group_path: str = "", exp_id: Optional[str] = None) -> Path:
+        group_path = str(group_path or "").strip().strip("/")
+        if group_path:
+            note_dir = (self.root / Path(group_path)).resolve()
+            try:
+                note_dir.relative_to(self.root)
+            except ValueError as exc:
+                raise ValueError("Invalid group path") from exc
+            return note_dir / "note.txt"
+        if exp_id:
+            return self.get_path(exp_id) / "note.txt"
+        raise KeyError("Missing note target")
+
+    def load_schedule_note(self, group_path: str = "", exp_id: Optional[str] = None) -> str:
+        try:
+            note_path = self._resolve_note_file(group_path=group_path, exp_id=exp_id)
+        except KeyError:
+            return ""
+        if not note_path.exists():
+            return ""
+        try:
+            return note_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+
+    def save_schedule_note(self, text: str, group_path: str = "", exp_id: Optional[str] = None) -> Path:
+        note_path = self._resolve_note_file(group_path=group_path, exp_id=exp_id)
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(str(text or ""), encoding="utf-8")
+        return note_path
 
     def list_entries(self) -> List[Dict]:
         public_entries: List[Dict] = []
@@ -457,6 +661,24 @@ class ExperimentIndex:
                 "segmentation": aggregate_preview_dicts(seg_previews),
                 "classification": aggregate_preview_dicts(cls_previews),
             }
+            # Override classification roc_auc with the correctly pooled value
+            # (individual-fold AUC is often null for LOSO with 1 test subject).
+            try:
+                _fold_list = [{"exp_id": f.get("id")} for f in fold_public]
+                _, _pool_preds = _build_loso_combined(_fold_list, self.entries)
+                if _pool_preds:
+                    _yt = [p.get("label_true") for p in _pool_preds
+                           if p.get("label_true") is not None and p.get("prob_positive") is not None]
+                    _yp = [p.get("prob_positive") for p in _pool_preds
+                           if p.get("label_true") is not None and p.get("prob_positive") is not None]
+                    if len(set(_yt)) >= 2:
+                        from sklearn.metrics import roc_auc_score as _roc_fn  # noqa: PLC0415
+                        _pooled_auc = float(_roc_fn(_yt, _yp))
+                        if aggregate_preview["classification"] is None:
+                            aggregate_preview["classification"] = {}
+                        aggregate_preview["classification"]["roc_auc"] = _pooled_auc
+            except Exception:
+                pass
             created_at = fold_public[0].get("created_at")
             group_path = ""
             try:
@@ -469,12 +691,16 @@ class ExperimentIndex:
                 "name": newest_raw.get("name"),
                 "relative_path": aggregate_id,
                 "group_path": group_path,
+                "schedule_note": self.load_schedule_note(group_path, newest_raw.get("id")),
                 "created_at": created_at,
                 "preprocs": newest_raw.get("preprocs", []),
                 "models": newest_raw.get("models", []),
                 "has_detection": any(bool(f.get("has_detection")) for f in fold_public),
                 "has_segmentation": any(bool(f.get("has_segmentation")) for f in fold_public),
                 "has_classification": any(bool(f.get("has_classification")) for f in fold_public),
+                "has_trajectory_filter": any(
+                    self.entries.get(f.get("id"), {}).get("has_trajectory_filter") for f in fold_public
+                ),
                 "has_detection_visuals": any(self.entries.get(f.get("id"), {}).get("has_detection_visuals") for f in fold_public),
                 "has_segmentation_visuals": any(self.entries.get(f.get("id"), {}).get("has_segmentation_visuals") for f in fold_public),
                 "preview": aggregate_preview,
@@ -490,12 +716,14 @@ class ExperimentIndex:
             "name": entry["name"],
             "relative_path": entry["relative_path"],
             "group_path": entry.get("group_path", ""),
+            "schedule_note": self.load_schedule_note(entry.get("group_path", ""), entry.get("id")),
             "created_at": entry["created_at"],
             "preprocs": entry["preprocs"],
             "models": entry["models"],
             "has_detection": entry["has_detection"],
             "has_segmentation": entry["has_segmentation"],
             "has_classification": entry.get("has_classification", False),
+            "has_trajectory_filter": entry.get("has_trajectory_filter", False),
             "has_detection_visuals": entry["has_detection_visuals"],
             "has_segmentation_visuals": entry["has_segmentation_visuals"],
             "preview": entry.get("preview", {}),
@@ -524,15 +752,30 @@ def gather_detection_metrics(exp_path: Path) -> Dict:
             if not item.is_dir():
                 continue
             summary_file = item / "summary.json"
-            if not summary_file.exists():
-                continue
-            data = load_json(summary_file)
-            metrics = first_value(data) if data else None
-            if metrics:
-                per_video.append({
-                    "video": item.name,
-                    "metrics": metrics,
-                })
+            if summary_file.exists():
+                # Old flat layout: metrics/{vid_stem}/summary.json
+                data = load_json(summary_file)
+                metrics = first_value(data) if data else None
+                if metrics:
+                    per_video.append({
+                        "video": item.name,
+                        "metrics": metrics,
+                    })
+            else:
+                # New two-level layout: metrics/{subject_id}/{vid_stem}/summary.json
+                for subitem in sorted(item.iterdir()):
+                    if not subitem.is_dir():
+                        continue
+                    sub_summary_file = subitem / "summary.json"
+                    if not sub_summary_file.exists():
+                        continue
+                    data = load_json(sub_summary_file)
+                    metrics = first_value(data) if data else None
+                    if metrics:
+                        per_video.append({
+                            "video": f"{item.name}/{subitem.name}",
+                            "metrics": metrics,
+                        })
     return {
         "summary": summary_metrics,
         "per_video": per_video,
@@ -564,7 +807,12 @@ def gather_segmentation_metrics(exp_path: Path) -> Dict:
     if metrics_file:
         data = load_json(metrics_file) or {}
         for video_path, metrics in data.items():
-            label = os.path.basename(video_path)
+            # Show subject_id/filename to distinguish videos across subjects
+            parts = Path(video_path).parts
+            if len(parts) >= 2:
+                label = f"{parts[-2]}/{Path(video_path).stem}"
+            else:
+                label = os.path.basename(video_path)
             per_video.append({
                 "video": label,
                 "metrics": metrics,
@@ -572,6 +820,53 @@ def gather_segmentation_metrics(exp_path: Path) -> Dict:
     return {
         "summary": summary_metrics,
         "per_video": per_video,
+    }
+
+
+def gather_trajectory_filter_metrics(exp_path: Path) -> Optional[Dict]:
+    """Gather before/after trajectory filter metrics for the web viewer.
+
+    Reads ``test/trajectory_filter/summary.json`` (dataset-level aggregates)
+    and ``test/trajectory_filter/metrics.json`` (per-video before/after).
+    Also reads ``test/trajectory_filter/filtered_detection_summary.json`` when
+    available (IoU / CE / SR re-evaluated on the smoothed predictions).
+    """
+    tf_dir = exp_path / "test" / "trajectory_filter"
+    summary_path = tf_dir / "summary.json"
+    metrics_path = tf_dir / "metrics.json"
+    fdet_path = tf_dir / "filtered_detection_summary.json"
+
+    if not summary_path.exists():
+        return None
+
+    summary = load_json(summary_path)
+    per_video_data = load_json(metrics_path) if metrics_path.exists() else None
+    filtered_detection_data = load_json(fdet_path) if fdet_path.exists() else None
+
+    # Flatten per-model per-video into a single per-video list for the UI
+    per_video: List[Dict] = []
+    if isinstance(per_video_data, dict):
+        for model_name, videos in per_video_data.items():
+            if not isinstance(videos, dict):
+                continue
+            for vid_stem, vid_metrics in videos.items():
+                if not isinstance(vid_metrics, dict):
+                    continue
+                per_video.append({
+                    "model": model_name,
+                    "video": vid_stem,
+                    "before": vid_metrics.get("before"),
+                    "after": vid_metrics.get("after"),
+                    "frames": vid_metrics.get("frames"),
+                })
+
+    # Build filtered_detection summary using same shape as detection summary
+    filtered_detection_summary = first_value(filtered_detection_data) if filtered_detection_data else None
+
+    return {
+        "summary": summary,
+        "per_video": per_video,
+        "filtered_detection_summary": filtered_detection_summary,
     }
 
 
@@ -645,6 +940,19 @@ def create_app(results_root: Path) -> FastAPI:
         index.refresh()
         return {"count": len(index.entries)}
 
+    @app.post("/api/schedules/note")
+    def save_schedule_note(payload: Dict[str, Any] = Body(...)):
+        group_path = str(payload.get("group_path") or "").strip()
+        exp_id = payload.get("exp_id")
+        text = str(payload.get("text") or "")
+        try:
+            note_path = index.save_schedule_note(text=text, group_path=group_path, exp_id=exp_id)
+        except KeyError:
+            raise HTTPException(status_code=400, detail="Missing note target")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "note": text, "path": str(note_path)}
+
     def _experiment_payload(exp_id: str):
         # Aggregated LOSO entry (virtual experiment id)
         folds = index.get_loso_folds(exp_id)
@@ -653,6 +961,7 @@ def create_app(results_root: Path) -> FastAPI:
             det_fold_previews: List[Optional[Dict]] = []
             seg_fold_previews: List[Optional[Dict]] = []
             cls_fold_previews: List[Optional[Dict]] = []
+            tf_fold_previews: List[Optional[Dict]] = []
             newest_created_at = None
             newest_entry: Optional[Dict] = None
 
@@ -671,6 +980,7 @@ def create_app(results_root: Path) -> FastAPI:
                 det_fold_previews.append((raw_entry.get("preview") or {}).get("detection"))
                 seg_fold_previews.append((raw_entry.get("preview") or {}).get("segmentation"))
                 cls_fold_previews.append((raw_entry.get("preview") or {}).get("classification"))
+                tf_fold_previews.append((raw_entry.get("preview") or {}).get("trajectory_filter"))
                 fold_payloads.append({
                     "fold": fold.get("fold"),
                     "exp_id": raw_id,
@@ -685,6 +995,17 @@ def create_app(results_root: Path) -> FastAPI:
             aggregate_detection = aggregate_preview_dicts(det_fold_previews)
             aggregate_segmentation = aggregate_preview_dicts(seg_fold_previews)
             aggregate_classification = aggregate_preview_dicts(cls_fold_previews)
+            aggregate_trajectory_filter = aggregate_preview_dicts(tf_fold_previews)
+
+            # Combined (summed) classification stats across all LOSO folds
+            combined_cls_summary, combined_predictions = _build_loso_combined(
+                folds, index.entries
+            )
+            loso_voting = (
+                _compute_voting_analysis(combined_predictions)
+                if combined_predictions
+                else None
+            )
 
             experiment_name = (newest_entry or {}).get("name") if newest_entry else exp_id
             created_at = newest_created_at
@@ -701,7 +1022,14 @@ def create_app(results_root: Path) -> FastAPI:
                 "dataset": None,
                 "detection": {"summary": aggregate_detection, "per_video": []},
                 "segmentation": {"summary": aggregate_segmentation, "per_video": []},
-                "classification": {"summary": aggregate_classification, "predictions": [], "artefacts": None},
+                "classification": {
+                    "summary": combined_cls_summary or aggregate_classification,
+                    "combined": combined_cls_summary,
+                    "predictions": combined_predictions,
+                    "artefacts": None,
+                },
+                "trajectory_filter": {"summary": aggregate_trajectory_filter, "per_video": []} if aggregate_trajectory_filter else None,
+                "loso_voting": loso_voting,
                 "folds": fold_payloads,
             }
 
@@ -715,6 +1043,13 @@ def create_app(results_root: Path) -> FastAPI:
         detection = gather_detection_metrics(exp_path) if (exp_path / "test" / "detection").exists() else None
         segmentation = gather_segmentation_metrics(exp_path) if (exp_path / "test" / "segmentation").exists() else None
         classification = gather_classification_metrics(exp_path) if (exp_path / "classification").exists() else None
+        trajectory_filter = gather_trajectory_filter_metrics(exp_path)
+        # Expose filtered-detection accuracy (IoU/CE/SR after smoothing) as a
+        # dedicated top-level key so the frontend can render it alongside the
+        # raw detection summary without altering the trajectory_filter section.
+        filtered_detection_summary = (
+            (trajectory_filter or {}).get("filtered_detection_summary")
+        )
         return {
             "id": exp_id,
             "mode": "single",
@@ -728,6 +1063,8 @@ def create_app(results_root: Path) -> FastAPI:
             "detection": detection,
             "segmentation": segmentation,
             "classification": classification,
+            "trajectory_filter": trajectory_filter,
+            "filtered_detection": {"summary": filtered_detection_summary} if filtered_detection_summary else None,
         }
 
     @app.get("/api/experiments/{exp_id:path}/metrics")
@@ -780,6 +1117,8 @@ def create_app(results_root: Path) -> FastAPI:
                 metrics = entry.get("metrics") or {}
                 ce_val = metrics.get("ce_mean") if isinstance(metrics, dict) else None
                 if video is not None and ce_val is not None:
+                    # Store both the full key ("001/Grasp") and basename fallback ("Grasp")
+                    ce_map[str(video)] = ce_val
                     video_name = os.path.basename(str(video))
                     ce_map[str(video_name)] = ce_val
                     ce_map[Path(video_name).stem] = ce_val
@@ -789,6 +1128,11 @@ def create_app(results_root: Path) -> FastAPI:
                     idx = parts.index("visualizations")
                     if idx + 1 < len(parts):
                         video_name = parts[idx + 1]
+                        # Support both flat (vid_stem) and two-level (subject_id/vid_stem) layouts
+                        # If parts[idx+1] is a subject dir (no summary.json at that level), look one deeper
+                        _flat_metrics = exp_path / "test" / "detection" / "metrics" / video_name
+                        if not _flat_metrics.exists() and idx + 2 < len(parts):
+                            video_name = str(Path(parts[idx + 1]) / parts[idx + 2])
                         # Try per-frame metrics first
                         metrics_dir = (exp_path / "test" / "detection" / "metrics" / video_name)
                         per_frame_metrics = None
@@ -851,7 +1195,8 @@ def create_app(results_root: Path) -> FastAPI:
                             if isinstance(frame_entry, dict):
                                 ce_val = frame_entry.get("ce")
                         if ce_val is None:
-                            ce_val = ce_map.get(video_name)
+                            # Try both full path key ("001/Grasp") and basename key ("Grasp")
+                            ce_val = ce_map.get(video_name) or ce_map.get(Path(video_name).name)
                         if ce_val is not None:
                             item["ce_px"] = ce_val
 
@@ -871,7 +1216,8 @@ def create_app(results_root: Path) -> FastAPI:
                 metrics = entry.get("metrics") or {}
                 ce_val = metrics.get("centroid_mean") if isinstance(metrics, dict) else None
                 if video is not None and ce_val is not None:
-                    # map both basename and stem for robustness
+                    # map full key, basename and stem for robustness
+                    ce_map[str(video)] = ce_val
                     video_name = os.path.basename(str(video))
                     ce_map[video_name] = ce_val
                     ce_map[Path(video_name).stem] = ce_val
@@ -929,6 +1275,15 @@ def create_app(results_root: Path) -> FastAPI:
         return {"items": items}
 
     def _experiment_voting(exp_id: str):
+        # Aggregate LOSO: combine predictions from all folds
+        agg_folds = index.get_loso_folds(exp_id)
+        if agg_folds:
+            _, all_preds = _build_loso_combined(agg_folds, index.entries)
+            return Response(
+                content=json.dumps(_sanitize(_compute_voting_analysis(all_preds))),
+                media_type="application/json",
+            )
+        # Single experiment
         try:
             exp_path = index.get_path(exp_id)
         except KeyError:
@@ -957,7 +1312,11 @@ def create_app(results_root: Path) -> FastAPI:
         except KeyError:
             raise HTTPException(status_code=404, detail="Experiment not found")
         target = (exp_path / resource).resolve()
-        if not str(target).startswith(str(exp_path)) or not target.exists():
+        try:
+            target.relative_to(exp_path.resolve())
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if not target.exists():
             raise HTTPException(status_code=404, detail="Resource not found")
         return FileResponse(target)
 

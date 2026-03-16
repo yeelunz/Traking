@@ -63,7 +63,7 @@ class SegmentationCropDataset(Dataset):
         self.entries: List[SegmentationSampleDescriptor] = []
         self._annotations_cache: Dict[str, Dict] = dict(cache_annotations or {})
         self.missing_annotations: List[str] = []
-        self._mask_valid_cache: Dict[str, bool] = {}
+        self._mask_valid_cache: Dict[Tuple[str, str], bool] = {}
         self.empty_masks: List[Tuple[str, int]] = []
         # global preprocs apply to full frames before ROI cropping
         self.preprocs: List[PreprocessingModule] = list(preprocs or [])
@@ -114,7 +114,18 @@ class SegmentationCropDataset(Dataset):
             raise RuntimeError(f"Failed to read frame {entry.frame_index} from {entry.video_path}")
         mask_full = self._load_mask(entry.video_path, entry.mask_path)
         if mask_full is None:
-            raise RuntimeError(f"Mask not found for frame {entry.frame_index} in {entry.video_path}")
+            # Mask file missing or empty on disk (e.g. zero-area annotation written
+            # by the annotator for a frame where nothing was drawn).  Raise a
+            # descriptive error so the DataLoader can surface the issue clearly,
+            # but also attempt to return a blank mask so training can continue.
+            # Re-raise as SkipSample-style error is not supported by default
+            # DataLoader; instead we raise RuntimeError with full context.
+            raise RuntimeError(
+                f"Mask not found or empty for frame {entry.frame_index} in "
+                f"{entry.video_path} (mask_path={entry.mask_path!r}). "
+                "This usually means the annotation has area=0 or the mask file "
+                "does not exist. Remove or re-annotate this frame."
+            )
         roi_bbox = entry.roi_bbox
         if self.preprocs:
             frame, mask_full, roi_bbox = self._apply_preprocs_frame_mask_bbox(
@@ -157,7 +168,11 @@ class SegmentationCropDataset(Dataset):
         """Apply preprocessing modules to a frame (BGR or grayscale).
 
         Preprocessing modules operate on RGB for 3-channel images.
+        Frames are always converted to grayscale first to ensure consistent processing.
         """
+        if frame.ndim == 3:
+            _g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not preprocs:
             return frame
         if frame.ndim == 2:
@@ -176,6 +191,9 @@ class SegmentationCropDataset(Dataset):
         mask: np.ndarray,
         preprocs: Sequence[PreprocessingModule],
     ) -> Tuple[np.ndarray, np.ndarray]:
+        if frame.ndim == 3:
+            _g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not preprocs:
             return frame, mask
         if frame.ndim == 2:
@@ -203,6 +221,9 @@ class SegmentationCropDataset(Dataset):
         bbox: BoundingBox,
         preprocs: Sequence[PreprocessingModule],
     ) -> Tuple[np.ndarray, np.ndarray, BoundingBox]:
+        if frame.ndim == 3:
+            _g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
         if not preprocs:
             return frame, mask, bbox
         bbox_tuple = bbox.as_tuple()
@@ -345,11 +366,15 @@ class SegmentationCropDataset(Dataset):
     def _mask_has_content(self, video_path: str, mask_path: Optional[str]) -> bool:
         if not mask_path:
             return False
-        if mask_path in self._mask_valid_cache:
-            return self._mask_valid_cache[mask_path]
+        # Use (video_path, mask_path) as the cache key so that different subjects
+        # with the same relative mask_path (e.g. seg_masks/doppler/frame_xxx.png)
+        # do not share a cached result and risk a False-Positive on empty masks.
+        cache_key = (video_path, mask_path)
+        if cache_key in self._mask_valid_cache:
+            return self._mask_valid_cache[cache_key]
         mask = self._load_mask(video_path, mask_path)
         has_content = mask is not None
-        self._mask_valid_cache[mask_path] = has_content
+        self._mask_valid_cache[cache_key] = has_content
         return has_content
 
     # ---------------- resize helpers -----------------
@@ -382,7 +407,83 @@ class SegmentationCropDataset(Dataset):
         return resized
 
 
-def attach_ground_truth_segmentation(annotation: Dict, dataset_root: str) -> List[FramePrediction]:
+def _resolve_gt_mask_path(
+    mask_path: Optional[str],
+    dataset_root: Optional[str],
+    video_dir: Optional[str] = None,
+) -> Optional[str]:
+    """Return absolute mask path if the file actually exists on disk, else None.
+
+    Resolution order (merged / subject-level dataset support):
+    1. Absolute path as-is
+    2. dataset_root / mask_path
+    3. video_dir / mask_path  (most reliable for merged layouts)
+    4. dataset_root's parent / mask_path  (old flat-export layout)
+    5. Strip leading path components from mask_path and retry from each base
+    """
+    if not mask_path:
+        return None
+    mp = mask_path.replace("/", os.sep)
+    if os.path.isabs(mp):
+        return mp if os.path.isfile(mp) and os.path.getsize(mp) > 0 else None
+
+    bases: List[Optional[str]] = [dataset_root, video_dir]
+    if dataset_root:
+        parent = os.path.dirname(dataset_root.rstrip(os.sep))
+        if parent and parent != dataset_root:
+            bases.append(parent)
+
+    def _safe_candidate(base: str, rel: str) -> "str | None":
+        candidate = os.path.normpath(os.path.join(base, rel))
+        # Guard: resolved path must stay under the trusted base directory.
+        base_norm = os.path.normpath(base)
+        if not candidate.startswith(base_norm + os.sep) and candidate != base_norm:
+            return None
+        if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+            return candidate
+        return None
+
+    for base in bases:
+        if not base:
+            continue
+        hit = _safe_candidate(base, mp)
+        if hit:
+            return hit
+
+    # Last-resort: strip leading path components and retry
+    parts = Path(mask_path).parts
+    for skip in range(1, len(parts)):
+        stripped = os.path.join(*parts[skip:])
+        for base in bases:
+            if not base:
+                continue
+            hit = _safe_candidate(base, stripped)
+            if hit:
+                return hit
+    return None
+
+
+def attach_ground_truth_segmentation(
+    annotation: Dict,
+    dataset_root: str,
+    video_path: Optional[str] = None,
+) -> List[FramePrediction]:
+    """Build a list of ground-truth FramePrediction objects from a COCO-VID annotation dict.
+
+    Parameters
+    ----------
+    annotation:
+        Parsed COCO-VID dict (from :func:`load_coco_vid`).
+    dataset_root:
+        Root directory of the dataset.  Used as the primary base for resolving
+        relative ``mask_path`` values stored inside the JSON.
+    video_path:
+        Optional absolute path to the video file associated with this annotation.
+        When provided, the video's parent directory is used as an additional
+        resolution candidate, which is required for the merged / subject-level
+        dataset layout (``dataset_root/<subject>/video.avi``).
+    """
+    video_dir: Optional[str] = os.path.dirname(os.path.abspath(video_path)) if video_path else None
     frames = []
     raw_frames = annotation.get("frames", {})
     frame_ann = annotation.get("frame_annotations", {})
@@ -404,12 +505,20 @@ def attach_ground_truth_segmentation(annotation: Dict, dataset_root: str) -> Lis
                 perimeter_px=float(metadata.get("perimeter_px", 0.0)),
                 equivalent_diameter_px=float(metadata.get("equivalent_diameter_px", 0.0)),
             )
+
+        # Skip frames whose mask file does not exist on disk.
+        # If the mask was manually deleted the associated bbox is also unreliable,
+        # so we drop the entire frame rather than using it without a mask.
+        resolved_mask = _resolve_gt_mask_path(mask_path, dataset_root, video_dir)
+        if resolved_mask is None:
+            continue
+
         pred = FramePrediction(
             frame_index=idx,
             bbox=tuple(map(float, bbox)),
             score=None,
             segmentation=SegmentationData(
-                mask_path=mask_path,
+                mask_path=resolved_mask,
                 stats=stats or MaskStats(0.0, (0.0, 0.0, 0.0, 0.0), (0.0, 0.0), 0.0, 0.0),
             ),
         )

@@ -25,17 +25,16 @@ import yaml
 
 
 def _load_predictions_from_dir(predictions_dir: str) -> Dict[str, List]:
-    """從 predictions_by_video 目錄載入 FramePrediction 列表。"""
+    """從 predictions_by_video 目錄載入 FramePrediction 列表。
+    支援舊版 (predictions_by_video/{vid_stem}/*.json)
+    和新版 (predictions_by_video/{subject_id}/{vid_stem}/*.json) 兩種目錄結構。"""
     from tracking.core.interfaces import FramePrediction
 
     predictions: Dict[str, List[FramePrediction]] = {}
     if not os.path.isdir(predictions_dir):
         raise FileNotFoundError(f"prediction dir not found: {predictions_dir}")
 
-    for vid_stem in os.listdir(predictions_dir):
-        vid_dir = os.path.join(predictions_dir, vid_stem)
-        if not os.path.isdir(vid_dir):
-            continue
+    def _load_vid_dir(vid_stem: str, vid_dir: str):
         for json_file in os.listdir(vid_dir):
             if not json_file.endswith(".json"):
                 continue
@@ -43,7 +42,6 @@ def _load_predictions_from_dir(predictions_dir: str) -> Dict[str, List]:
             full_path = os.path.join(vid_dir, json_file)
             with open(full_path, encoding="utf-8") as f:
                 raw = json.load(f)
-
             fps: List[FramePrediction] = []
             for entry in raw:
                 try:
@@ -56,12 +54,26 @@ def _load_predictions_from_dir(predictions_dir: str) -> Dict[str, List]:
                     )
                 except Exception as exc:
                     print(f"  WARN: skip frame entry {entry}: {exc}")
-
             if not predictions.get(model_name):
                 predictions[model_name] = {}
             if fps:
-                # Map vid_stem back to full video path
                 predictions[model_name][vid_stem] = fps
+
+    for entry1 in os.listdir(predictions_dir):
+        path1 = os.path.join(predictions_dir, entry1)
+        if not os.path.isdir(path1):
+            continue
+        sub_entries = os.listdir(path1)
+        has_json = any(e.endswith(".json") for e in sub_entries)
+        if has_json:
+            # Legacy layout: {vid_stem}/{model}.json
+            _load_vid_dir(entry1, path1)
+        else:
+            # New layout: {subject_id}/{vid_stem}/{model}.json
+            for entry2 in sub_entries:
+                path2 = os.path.join(path1, entry2)
+                if os.path.isdir(path2):
+                    _load_vid_dir(entry2, path2)
 
     return predictions
 
@@ -148,39 +160,50 @@ def main():
     # Build test_predictions dict: {model_name: {video_path: [FramePrediction]}}
     test_predictions: Dict[str, Dict[str, List[FramePrediction]]] = {}
 
-    # Walk predictions_by_video/
-    for vid_stem in os.listdir(pred_root):
-        vid_dir_path = os.path.join(pred_root, vid_stem)
-        if not os.path.isdir(vid_dir_path):
+    # Walk predictions_by_video/ — supports both legacy (vid_stem/) and new (subject_id/vid_stem/) layouts
+    import glob as _glob
+    for entry1 in os.listdir(pred_root):
+        path1 = os.path.join(pred_root, entry1)
+        if not os.path.isdir(path1):
             continue
-        for json_fname in os.listdir(vid_dir_path):
-            if not json_fname.endswith(".json"):
-                continue
-            model_name = json_fname.replace(".json", "")
-            json_fpath = os.path.join(vid_dir_path, json_fname)
-            with open(json_fpath, encoding="utf-8") as ff:
-                raw = json.load(ff)
-            fps = []
-            for entry in raw:
-                fps.append(
-                    FramePrediction(
-                        frame_index=int(entry["frame_index"]),
-                        bbox=tuple(float(x) for x in entry["bbox"]),
-                        score=float(entry.get("score", 1.0)),
+        # Detect layout: if path1 contains JSON files directly → legacy (entry1 = vid_stem)
+        # If path1 contains subdirectories → new layout (entry1 = subject_id)
+        sub_entries = os.listdir(path1)
+        has_json = any(e.endswith(".json") for e in sub_entries)
+        if has_json:
+            # Legacy layout: predictions_by_video/{vid_stem}/{model}.json
+            level2_dirs = [(entry1, path1)]
+        else:
+            # New layout: predictions_by_video/{subject_id}/{vid_stem}/{model}.json
+            level2_dirs = [(e, os.path.join(path1, e)) for e in sub_entries if os.path.isdir(os.path.join(path1, e))]
+        for vid_stem, vid_dir_path in level2_dirs:
+            for json_fname in os.listdir(vid_dir_path):
+                if not json_fname.endswith(".json"):
+                    continue
+                model_name = json_fname.replace(".json", "")
+                json_fpath = os.path.join(vid_dir_path, json_fname)
+                with open(json_fpath, encoding="utf-8") as ff:
+                    raw = json.load(ff)
+                fps = []
+                for entry in raw:
+                    fps.append(
+                        FramePrediction(
+                            frame_index=int(entry["frame_index"]),
+                            bbox=tuple(float(x) for x in entry["bbox"]),
+                            score=float(entry.get("score", 1.0)),
+                        )
                     )
-                )
-            if model_name not in test_predictions:
-                test_predictions[model_name] = {}
+                if model_name not in test_predictions:
+                    test_predictions[model_name] = {}
 
-            # Resolve full video path
-            import glob
-            pattern = os.path.join(dataset_root, "**", vid_stem + ".*")
-            matches = glob.glob(pattern, recursive=True)
-            if matches:
-                test_predictions[model_name][matches[0]] = fps
-            else:
-                print(f"  WARN: no video file found for stem '{vid_stem}'")
-                test_predictions[model_name][vid_stem] = fps
+                # Resolve full video path
+                pattern = os.path.join(dataset_root, "**", vid_stem + ".*")
+                matches = _glob.glob(pattern, recursive=True)
+                if matches:
+                    test_predictions[model_name][matches[0]] = fps
+                else:
+                    print(f"  WARN: no video file found for stem '{vid_stem}'")
+                    test_predictions[model_name][vid_stem] = fps
 
     print(f"Models found in predictions: {list(test_predictions.keys())}")
     for model_name, vpreds in test_predictions.items():

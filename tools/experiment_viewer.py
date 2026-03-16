@@ -167,6 +167,29 @@ def _overall_stage_status(stages: Sequence[Dict[str, Any]]) -> Tuple[str, List[D
     return "OK", summary
 
 
+# ---------------------------------------------------------------------------
+# Note helpers – each experiment folder may contain a note.txt
+# ---------------------------------------------------------------------------
+
+def _note_path(exp_dir: Path) -> Path:
+    return Path(exp_dir) / "note.txt"
+
+
+def _load_note(exp_dir: Path) -> str:
+    p = _note_path(exp_dir)
+    if p.is_file():
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def _save_note(exp_dir: Path, text: str) -> None:
+    Path(exp_dir).mkdir(parents=True, exist_ok=True)
+    _note_path(exp_dir).write_text(text, encoding="utf-8")
+
+
 def _collect_experiments(results_root: Path) -> List[Dict[str, Any]]:
     if not results_root.exists():
         return []
@@ -226,6 +249,7 @@ def _collect_experiments(results_root: Path) -> List[Dict[str, Any]]:
                 "segmentation": seg_summary,
                 "classification": clf_summary,
             },
+            "note": _load_note(entry),
         }
         records.append(record)
     return records
@@ -277,6 +301,7 @@ def _print_table(records: Sequence[Dict[str, Any]]) -> None:
             r.get("dataset", {}).get("train_videos"),
             r.get("dataset", {}).get("test_videos"),
         )),
+        Column("Note", 35, lambda r: (r.get("note") or "").replace("\n", " ")[:35]),
         Column("Folder", 40, lambda r: r.get("relative_path", "-")),
     ]
 
@@ -312,13 +337,13 @@ def _to_serialisable(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return serialisable
 
 
-def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
+def _generate_html_str(records: Sequence[Dict[str, Any]]) -> str:
     data = _to_serialisable(records)
     table_rows = json.dumps(data, indent=2)
-    html = f"""<!DOCTYPE html>
-<html lang=\"en\">
+    return f"""<!DOCTYPE html>
+<html lang="zh-TW">
 <head>
-  <meta charset=\"utf-8\" />
+  <meta charset="utf-8" />
   <title>Experiment Viewer</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 2rem; background: #fafafa; color: #222; }}
@@ -330,6 +355,18 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
     .status-PARTIAL {{ color: #ef6c00; font-weight: 600; }}
     .status-OK {{ color: #2e7d32; font-weight: 600; }}
     caption {{ text-align: left; font-size: 1.4rem; margin-bottom: 1rem; font-weight: 600; }}
+    .note-cell {{ min-width: 200px; max-width: 320px; }}
+    .note-text {{ cursor: pointer; white-space: pre-wrap; font-size: 0.85em; color: #444;
+                  display: block; min-height: 1.2em; border-radius: 3px; padding: 2px 4px; }}
+    .note-text.empty {{ color: #bbb; font-style: italic; }}
+    .note-text:hover {{ background: #eef5ff; }}
+    textarea.note-edit {{ width: 100%; min-height: 64px; font-family: inherit; font-size: 0.85em;
+                           padding: 4px; border: 1px solid #4a90d9; border-radius: 3px;
+                           resize: vertical; box-sizing: border-box; }}
+    .note-status {{ display: block; font-size: 0.72em; margin-top: 2px; }}
+    .note-saving {{ color: #888; }}
+    .note-saved {{ color: #2e7d32; }}
+    .note-error {{ color: #c62828; }}
   </style>
 </head>
 <body>
@@ -351,13 +388,15 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
         <th data-key=\"metrics.classification.recall\">Clf Rec</th>
         <th data-key=\"dataset.train_videos\">Train Videos</th>
         <th data-key=\"dataset.test_videos\">Test Videos</th>
-        <th data-key=\"relative_path\">Folder</th>
+        <th data-key="relative_path">Folder</th>
+        <th>Note</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
   <script>
     const data = {table_rows};
+    const isServed = window.location.protocol !== 'file:';
     function formatDuration(value) {{
       if (!value && value !== 0) return '-';
       const total = Math.floor(value);
@@ -377,6 +416,54 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
     }}
     function valueByKey(obj, key) {{
       return key.split('.').reduce((acc, part) => (acc && acc[part] !== undefined) ? acc[part] : undefined, obj);
+    }}
+    function makeNoteCell(td, row) {{
+      const noteText = row.note || '';
+      const span = document.createElement('span');
+      span.className = 'note-text' + (noteText ? '' : ' empty');
+      span.textContent = noteText || (isServed ? '點此新增備註…' : '(以 --serve 模式開啟以編輯備註)');
+      td.appendChild(span);
+      if (!isServed) return;
+      span.addEventListener('click', () => {{
+        const ta = document.createElement('textarea');
+        ta.className = 'note-edit';
+        ta.value = noteText;
+        const st = document.createElement('span');
+        st.className = 'note-status note-saving';
+        td.innerHTML = '';
+        td.appendChild(ta);
+        td.appendChild(st);
+        ta.focus();
+        async function saveNote() {{
+          const newText = ta.value;
+          try {{
+            st.textContent = '儲存中…';
+            st.className = 'note-status note-saving';
+            const resp = await fetch('/api/note', {{
+              method: 'POST',
+              headers: {{'Content-Type': 'application/json'}},
+              body: JSON.stringify({{path: row.path, text: newText}})
+            }});
+            const d = await resp.json();
+            if (d.ok) {{
+              row.note = newText;
+              st.textContent = '已儲存 ✓';
+              st.className = 'note-status note-saved';
+              setTimeout(() => {{ td.innerHTML = ''; makeNoteCell(td, row); }}, 900);
+            }} else {{
+              st.textContent = '儲存失敗';
+              st.className = 'note-status note-error';
+            }}
+          }} catch(e) {{
+            st.textContent = '錯誤: ' + e.message;
+            st.className = 'note-status note-error';
+          }}
+        }}
+        ta.addEventListener('blur', saveNote);
+        ta.addEventListener('keydown', e => {{
+          if (e.key === 'Escape') {{ td.innerHTML = ''; makeNoteCell(td, row); }}
+        }});
+      }});
     }}
     function render(rows) {{
       const tbody = document.querySelector('#exp-table tbody');
@@ -418,6 +505,10 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
           }}
           tr.appendChild(td);
         }});
+        const noteTd = document.createElement('td');
+        noteTd.className = 'note-cell';
+        makeNoteCell(noteTd, row);
+        tr.appendChild(noteTd);
         tbody.appendChild(tr);
       }});
     }}
@@ -443,7 +534,73 @@ def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
 </body>
 </html>
 """
-    destination.write_text(html, encoding="utf-8")
+
+
+def _write_html(records: Sequence[Dict[str, Any]], destination: Path) -> None:
+    destination.write_text(_generate_html_str(records), encoding="utf-8")
+
+
+def _run_server(results_root: Path, args: argparse.Namespace, port: int) -> None:
+    """Serve an interactive HTML dashboard with note editing support."""
+    import json as _json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *a):  # suppress default request log
+            pass
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                recs = _collect_experiments(results_root)
+                _sort_records(recs, args.sort, args.descending)
+                html = _generate_html_str(recs)
+                body = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            if self.path == "/api/note":
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length)
+                try:
+                    payload = _json.loads(raw)
+                    exp_path = Path(payload["path"])
+                    text = str(payload.get("text", ""))
+                    _save_note(exp_path, text)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":true}')
+                except Exception as exc:
+                    msg = f'{{"ok":false,"error":"{exc}"}}'.encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(msg)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    httpd = HTTPServer(("", port), _Handler)
+    url = f"http://localhost:{port}/"
+    print(f"Experiment Viewer  →  {url}  (Ctrl-C 停止)")
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -456,11 +613,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of a text table")
     parser.add_argument("--html", type=Path, help="Write an interactive HTML dashboard to the given path")
     parser.add_argument("--stages", action="store_true", help="Print per-stage status details after the table")
+    parser.add_argument(
+        "--serve", type=int, metavar="PORT", nargs="?", const=8765,
+        help="啟動本地 HTTP server（預設 port 8765）以開啟互動式 Note 編輯介面",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    if getattr(args, "serve", None) is not None:
+        _run_server(args.results_root, args, args.serve)
+        return 0
     records = _collect_experiments(args.results_root)
     if not records:
         print(f"No experiments found under {args.results_root}")

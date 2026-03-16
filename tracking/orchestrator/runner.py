@@ -863,7 +863,8 @@ class PipelineRunner:
                     # --- NEW: write per-video predictions for easier debugging/inspection ---
                     try:
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
-                        pred_dir = os.path.join(out_dir_base, "predictions_by_video", vid_stem)
+                        _subj_id_pred = dm.video_subjects.get(vp, "unknown")
+                        pred_dir = os.path.join(out_dir_base, "predictions_by_video", _subj_id_pred, vid_stem)
                         os.makedirs(pred_dir, exist_ok=True)
                         for display_name, pl in pv_predictions.items():
                             outp_video = os.path.join(pred_dir, f"{display_name}.json")
@@ -928,9 +929,10 @@ class PipelineRunner:
                                 eval_pv_predictions[mn] = best
                         else:
                             eval_pv_predictions = pv_predictions
-                        # per-video evaluation directory to avoid overwriting
+                        # per-video evaluation directory to avoid overwriting (split by subject)
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
-                        vid_met_dir = os.path.join(met_dir, vid_stem)
+                        _subj_id_met = dm.video_subjects.get(vp, "unknown")
+                        vid_met_dir = os.path.join(met_dir, _subj_id_met, vid_stem)
                         os.makedirs(vid_met_dir, exist_ok=True)
                         res = evaluator.evaluate(eval_pv_predictions, gt, vid_met_dir)
                         # --- Debug: log coverage stats per model (from evaluator summary) ---
@@ -995,7 +997,7 @@ class PipelineRunner:
                         if viz_enabled and viz_include_detection:
                             try:
                                 import cv2  # type: ignore
-                                vis_dir = os.path.join(out_dir_base, "visualizations", vid_stem)
+                                vis_dir = os.path.join(out_dir_base, "visualizations", _subj_id_met, vid_stem)
                                 os.makedirs(vis_dir, exist_ok=True)
                                 gt_frames_sorted = sorted([int(fi) for fi, boxes in gt.get("frames", {}).items() if boxes])
                                 cap = cv2.VideoCapture(vp)
@@ -1408,6 +1410,294 @@ class PipelineRunner:
                     stage_entry.setdefault("artifacts", {})["predictions_dir"] = detection_metrics.get("predictions_dir")
                 _dump_meta()
 
+            # ── Trajectory Filter Stage ─────────────────────────────────
+            # Detection → Trajectory Filtering → Re-cropping → Segmentation
+            # Applies multi-scale Hampel + bidirectional S-G to smooth noisy
+            # detection bbox trajectories before segmentation ROI cropping.
+            traj_filter_cfg = self.cfg.get("trajectory_filter", {}) or {}
+            traj_filter_enabled = bool(traj_filter_cfg.get("enabled", True))
+            if traj_filter_enabled and test_predictions:
+                import numpy as _np_tf
+                from ..classification.trajectory_filter import (
+                    filter_detections as _filter_detections,
+                    compute_trajectory_metrics as _compute_traj_metrics,
+                )
+                with stage_scope(
+                    "trajectory_filter",
+                    "trajectory_filter",
+                    {
+                        "bbox_strategy": str(traj_filter_cfg.get("bbox_strategy", "hampel_only")),
+                        "detector_models": list(test_predictions.keys()),
+                    },
+                ) as stage_entry:
+                    _tf_bbox_strategy = str(traj_filter_cfg.get("bbox_strategy", "hampel_only"))
+                    _tf_bbox_params = dict(traj_filter_cfg.get("bbox_params", {}) or {})
+                    _tf_traj_params = dict(traj_filter_cfg.get("traj_params", {}) or {})
+
+                    _tf_metrics_all: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                    _tf_filtered: Dict[str, Dict[str, list]] = {}
+
+                    for _tf_mn, _tf_pbv in test_predictions.items():
+                        _tf_filtered[_tf_mn] = {}
+                        _tf_metrics_all[_tf_mn] = {}
+
+                        for _tf_vp, _tf_preds in _tf_pbv.items():
+                            if len(_tf_preds) < 2:
+                                _tf_filtered[_tf_mn][_tf_vp] = list(_tf_preds)
+                                continue
+
+                            # Deduplicate predictions with same frame_index (keep first)
+                            _tf_seen_fi: set = set()
+                            _tf_dedup: list = []
+                            for _tp in _tf_preds:
+                                if _tp.frame_index not in _tf_seen_fi:
+                                    _tf_seen_fi.add(_tp.frame_index)
+                                    _tf_dedup.append(_tp)
+                            _tf_preds = _tf_dedup
+
+                            if len(_tf_preds) < 2:
+                                _tf_filtered[_tf_mn][_tf_vp] = list(_tf_preds)
+                                continue
+
+                            # Extract arrays from FramePrediction objects
+                            _tf_fi = _np_tf.array([p.frame_index for p in _tf_preds], dtype=_np_tf.int64)
+                            _tf_bb = _np_tf.array([list(p.bbox) for p in _tf_preds], dtype=_np_tf.float64)
+                            _tf_cx = _tf_bb[:, 0] + _tf_bb[:, 2] / 2.0
+                            _tf_cy = _tf_bb[:, 1] + _tf_bb[:, 3] / 2.0
+                            _tf_w = _tf_bb[:, 2].copy()
+                            _tf_h = _tf_bb[:, 3].copy()
+                            _tf_sc = _np_tf.array(
+                                # Detector predictions: default to 0.0 if score missing
+                                [float(p.score if p.score is not None else 0.0) for p in _tf_preds],
+                                dtype=_np_tf.float64,
+                            )
+
+                            # Before-filtering metrics (sort first for correct time order)
+                            _tf_sort_b = _np_tf.argsort(_tf_fi)
+                            _tf_before = _compute_traj_metrics(
+                                _tf_cx[_tf_sort_b], _tf_cy[_tf_sort_b],
+                                _tf_w[_tf_sort_b], _tf_h[_tf_sort_b],
+                                _tf_fi[_tf_sort_b],
+                            )
+
+                            # Apply trajectory filter (multi-scale Hampel + bidirectional S-G)
+                            _tf_result = _filter_detections(
+                                _tf_fi, _tf_cx, _tf_cy, _tf_w, _tf_h, _tf_sc,
+                                bbox_strategy=_tf_bbox_strategy,
+                                bbox_params=_tf_bbox_params,
+                                traj_params=_tf_traj_params,
+                            )
+
+                            # After-filtering metrics
+                            _tf_after = _compute_traj_metrics(
+                                _tf_result["cx"], _tf_result["cy"],
+                                _tf_result["widths"], _tf_result["heights"],
+                                _tf_result["frame_indices"],
+                            )
+
+                            _tf_vid_stem = os.path.splitext(os.path.basename(_tf_vp))[0]
+                            _tf_metrics_all[_tf_mn][_tf_vid_stem] = {
+                                "before": _tf_before,
+                                "after": _tf_after,
+                                "frames": int(len(_tf_fi)),
+                            }
+
+                            # Map sorted results back to original prediction order
+                            # Use frame_index→result_index lookup for robustness
+                            _tf_fi_result = _tf_result["frame_indices"]
+                            _tf_fi_map = {int(fi): idx for idx, fi in enumerate(_tf_fi_result)}
+
+                            _tf_new_preds: list = []
+                            for _tf_i, _tf_pred in enumerate(_tf_preds):
+                                _tf_k = _tf_fi_map.get(int(_tf_pred.frame_index))
+                                if _tf_k is None:
+                                    # Frame was removed (shouldn't happen after dedup); keep original
+                                    _tf_new_preds.append(_tf_pred)
+                                    continue
+                                _tf_ncx = float(_tf_result["cx"][_tf_k])
+                                _tf_ncy = float(_tf_result["cy"][_tf_k])
+                                _tf_nw = float(_tf_result["widths"][_tf_k])
+                                _tf_nh = float(_tf_result["heights"][_tf_k])
+                                _tf_nx = _tf_ncx - _tf_nw / 2.0
+                                _tf_ny = _tf_ncy - _tf_nh / 2.0
+                                _tf_new_preds.append(FramePrediction(
+                                    frame_index=_tf_pred.frame_index,
+                                    bbox=(_tf_nx, _tf_ny, _tf_nw, _tf_nh),
+                                    score=_tf_pred.score,
+                                    confidence=getattr(_tf_pred, "confidence", None),
+                                    confidence_components=getattr(_tf_pred, "confidence_components", None),
+                                    segmentation=getattr(_tf_pred, "segmentation", None),
+                                    is_fallback=bool(getattr(_tf_pred, "is_fallback", False)),
+                                    bbox_source=getattr(_tf_pred, "bbox_source", "detector"),
+                                ))
+                            _tf_filtered[_tf_mn][_tf_vp] = _tf_new_preds
+
+                    # Replace test_predictions with filtered version for downstream stages
+                    test_predictions = _tf_filtered
+
+                    # Save per-video and summary metrics
+                    _tf_out_dir = os.path.join(test_dir, "trajectory_filter")
+                    os.makedirs(_tf_out_dir, exist_ok=True)
+                    _tf_metrics_path = os.path.join(_tf_out_dir, "metrics.json")
+                    with open(_tf_metrics_path, "w", encoding="utf-8") as f:
+                        json.dump(_tf_metrics_all, f, ensure_ascii=False, indent=2)
+
+                    # Aggregate before/after across all videos for dataset-level summary
+                    _tf_agg_b: Dict[str, list] = {}
+                    _tf_agg_a: Dict[str, list] = {}
+                    for _tf_vm in _tf_metrics_all.values():
+                        for _tf_vd in _tf_vm.values():
+                            for _tk, _tv in _tf_vd.get("before", {}).items():
+                                _tf_agg_b.setdefault(_tk, []).append(float(_tv))
+                            for _tk, _tv in _tf_vd.get("after", {}).items():
+                                _tf_agg_a.setdefault(_tk, []).append(float(_tv))
+                    _tf_summary = {
+                        "before": {
+                            k: float(_np_tf.mean(v)) for k, v in _tf_agg_b.items()
+                        } if _tf_agg_b else {},
+                        "after": {
+                            k: float(_np_tf.mean(v)) for k, v in _tf_agg_a.items()
+                        } if _tf_agg_a else {},
+                        "config": {
+                            "bbox_strategy": _tf_bbox_strategy,
+                            "bbox_params": _tf_bbox_params,
+                            "traj_params": _tf_traj_params,
+                        },
+                    }
+                    _tf_summary_path = os.path.join(_tf_out_dir, "summary.json")
+                    with open(_tf_summary_path, "w", encoding="utf-8") as f:
+                        json.dump(_tf_summary, f, ensure_ascii=False, indent=2)
+
+                    # ── Filtered-detection accuracy metrics (IoU / CE / SR) ──────
+                    # Re-evaluate the smoothed predictions against GT so the viewer
+                    # can show bbox accuracy *after* trajectory filtering.
+                    # This mirrors BasicEvaluator's exact IoU / CE / SR definitions.
+                    try:
+                        from ..utils.annotations import load_coco_vid as _tf_load_gt
+                        # restrict_to_gt_frames is defined inside run_on_dataset (local scope);
+                        # read it directly from config here so this outer-scope block is safe.
+                        _tf_eval_cfg = self.cfg.get("evaluation", {}) or {}
+                        restrict_to_gt_frames = bool(_tf_eval_cfg.get("restrict_to_gt_frames", True))
+
+                        def _tf_iou(px, py, pw, ph, gx, gy, gw, gh):
+                            ix1 = max(px, gx); iy1 = max(py, gy)
+                            ix2 = min(px + pw, gx + gw); iy2 = min(py + ph, gy + gh)
+                            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                            union = pw * ph + gw * gh - inter
+                            return inter / union if union > 0 else 0.0
+
+                        _tf_fdet_agg: Dict[str, Dict] = {}
+                        for _fm, _fpbv in _tf_filtered.items():
+                            _fa = _tf_fdet_agg.setdefault(_fm, {
+                                "count": 0,
+                                "sum_iou": 0.0, "sum_iou_sq": 0.0,
+                                "sum_ce": 0.0, "sum_ce_sq": 0.0,
+                                "tp_50": 0, "fp_50": 0, "fn_50": 0,
+                                "tp_75": 0, "fp_75": 0, "fn_75": 0,
+                            })
+                            for _fvp, _fpreds in _fpbv.items():
+                                if not _fpreds:
+                                    continue
+                                _fgt_json = os.path.splitext(_fvp)[0] + ".json"
+                                if not os.path.exists(_fgt_json):
+                                    continue
+                                _fgt = _tf_load_gt(_fgt_json)
+                                _fgt_frames = _fgt.get("frames", {})
+                                if not _fgt_frames:
+                                    continue
+                                # Build prediction lookup by frame (first prediction wins)
+                                _fpred_map: Dict[int, tuple] = {}
+                                for _fp in _fpreds:
+                                    _fk = int(getattr(_fp, "frame_index", -1))
+                                    if _fk not in _fpred_map:
+                                        _fpred_map[_fk] = tuple(_fp.bbox)[:4]
+                                # Collect all GT frames with boxes
+                                _fgt_set = {int(fi) for fi, boxes in _fgt_frames.items() if boxes}
+                                # When restrict_to_gt_frames is on, only evaluate on GT frames
+                                # (matching how the detector was evaluated in BasicEvaluator)
+                                if restrict_to_gt_frames:
+                                    _fall_frames = _fgt_set
+                                else:
+                                    _fall_frames = _fgt_set | set(_fpred_map.keys())
+                                for _ffi in _fall_frames:
+                                    _has_gt = _ffi in _fgt_set
+                                    _has_pred = _ffi in _fpred_map
+                                    if _has_gt and _has_pred:
+                                        _px, _py, _pw, _ph = _fpred_map[_ffi]
+                                        _gbox = _fgt_frames.get(_ffi, [None])[0]
+                                        if _gbox is None:
+                                            _fa["fp_50"] += 1
+                                            _fa["fp_75"] += 1
+                                            continue
+                                        _gx, _gy, _gw, _gh = list(_gbox)[:4]
+                                        _fiou = _tf_iou(_px, _py, _pw, _ph, _gx, _gy, _gw, _gh)
+                                        _pce = float(_np_tf.sqrt(
+                                            (_px + _pw / 2.0 - (_gx + _gw / 2.0)) ** 2 +
+                                            (_py + _ph / 2.0 - (_gy + _gh / 2.0)) ** 2
+                                        ))
+                                        _fa["count"] += 1
+                                        _fa["sum_iou"] += _fiou
+                                        _fa["sum_iou_sq"] += _fiou * _fiou
+                                        _fa["sum_ce"] += _pce
+                                        _fa["sum_ce_sq"] += _pce * _pce
+                                        if _fiou >= 0.50:
+                                            _fa["tp_50"] += 1
+                                        else:
+                                            _fa["fp_50"] += 1
+                                        if _fiou >= 0.75:
+                                            _fa["tp_75"] += 1
+                                        else:
+                                            _fa["fp_75"] += 1
+                                    elif _has_gt and not _has_pred:
+                                        _fa["fn_50"] += 1
+                                        _fa["fn_75"] += 1
+                                    elif _has_pred and not _has_gt:
+                                        _fa["fp_50"] += 1
+                                        _fa["fp_75"] += 1
+
+                        _tf_fdet_out: Dict[str, Dict] = {}
+                        for _fm, _fa in _tf_fdet_agg.items():
+                            _fn = max(1, int(_fa["count"]))
+                            _fi_mu = _fa["sum_iou"] / _fn
+                            _fi_sd = max(0.0, _fa["sum_iou_sq"] / _fn - _fi_mu * _fi_mu) ** 0.5
+                            _fc_mu = _fa["sum_ce"] / _fn
+                            _fc_sd = max(0.0, _fa["sum_ce_sq"] / _fn - _fc_mu * _fc_mu) ** 0.5
+                            # SR = precision = tp / (tp + fp), same as BasicEvaluator
+                            _ft50 = int(_fa["tp_50"]); _ff50 = int(_fa["fp_50"])
+                            _ft75 = int(_fa["tp_75"]); _ff75 = int(_fa["fp_75"])
+                            _tf_fdet_out[_fm] = {
+                                "frames_count": int(_fa["count"]),
+                                "iou_mean": _fi_mu, "iou_std": _fi_sd,
+                                "ce_mean": _fc_mu, "ce_std": _fc_sd,
+                                "success_rate_50": (_ft50 / (_ft50 + _ff50)) if (_ft50 + _ff50) > 0 else 0.0,
+                                "success_rate_75": (_ft75 / (_ft75 + _ff75)) if (_ft75 + _ff75) > 0 else 0.0,
+                            }
+                        if _tf_fdet_out:
+                            _tf_fdet_path = os.path.join(_tf_out_dir, "filtered_detection_summary.json")
+                            with open(_tf_fdet_path, "w", encoding="utf-8") as f:
+                                json.dump(_tf_fdet_out, f, ensure_ascii=False, indent=2)
+                            self._log(
+                                f"[TrajectoryFilter] Filtered-detection accuracy saved → {_tf_fdet_path}",
+                                to_console=(tqdm is None),
+                            )
+                    except Exception as _tf_fdet_err:
+                        self._log(
+                            f"[TrajectoryFilter] WARNING: filtered detection accuracy metrics failed "
+                            f"({_tf_fdet_err})"
+                        )
+
+                    stage_entry["metrics"] = _tf_summary
+                    stage_entry.setdefault("artifacts", {})["metrics_path"] = _tf_metrics_path
+                    stage_entry.setdefault("artifacts", {})["summary_path"] = _tf_summary_path
+                    self._log(
+                        f"[TrajectoryFilter] bbox_strategy={_tf_bbox_strategy} | "
+                        f"videos_filtered={sum(len(v) for v in _tf_metrics_all.values())}",
+                        to_console=(tqdm is None),
+                    )
+                    _dump_meta()
+            elif not traj_filter_enabled:
+                _record_stage_skip("trajectory_filter", "trajectory_filter", "disabled via config")
+
             # segmentation stage (mandatory)
             seg_cfg = self.cfg.get("segmentation", {}) or {}
             seg_results_root = os.path.join(test_dir, "segmentation")
@@ -1677,14 +1967,18 @@ class PipelineRunner:
 
                 def _inject_roi_fallback_metrics_into_detection(
                     model_label: str,
-                    vid_stem: str,
+                    vid_key: str,
                     stats: Dict[str, float],
                 ) -> None:
-                    """Update detection metrics JSON files in-place for viewer consumption."""
+                    """Update detection metrics JSON files in-place for viewer consumption.
+
+                    ``vid_key`` is ``subject_id/vid_stem`` for per-video files, or
+                    empty string for the dataset-level summary.
+                    """
                     try:
                         # Per-video summary.json
-                        if vid_stem:
-                            det_vid_summary = os.path.join(detection_test_dir, "metrics", vid_stem, "summary.json")
+                        if vid_key:
+                            det_vid_summary = os.path.join(detection_test_dir, "metrics", vid_key, "summary.json")
                             if os.path.exists(det_vid_summary):
                                 try:
                                     with open(det_vid_summary, "r", encoding="utf-8") as f:
@@ -1732,14 +2026,16 @@ class PipelineRunner:
                     roi_fallback_sum = 0.0
                     try:
                         for vp in preds_by_video.keys():
+                            _subj_id_seg = os.path.basename(os.path.dirname(vp))
                             vid_stem = os.path.splitext(os.path.basename(vp))[0]
-                            roi_trace_path = os.path.join(out_dir_model, vid_stem, "roi_trace.json")
+                            roi_trace_path = os.path.join(out_dir_model, _subj_id_seg, vid_stem, "roi_trace.json")
                             stats = _roi_trace_fallback_stats(roi_trace_path)
                             if not stats:
                                 continue
                             roi_total_sum += float(stats.get("roi_total_frames", 0.0))
                             roi_fallback_sum += float(stats.get("roi_fallback_frames", 0.0))
-                            _inject_roi_fallback_metrics_into_detection(str(model_name), vid_stem, stats)
+                            vid_key = os.path.join(_subj_id_seg, vid_stem)
+                            _inject_roi_fallback_metrics_into_detection(str(model_name), vid_key, stats)
                     except Exception:
                         pass
                     if roi_total_sum > 0.0:
@@ -1760,9 +2056,10 @@ class PipelineRunner:
                     # Post-process detection visualization JPGs to include ROI bbox derived from previous segmentation.
                     try:
                         for vp in preds_by_video.keys():
+                            _subj_id_seg = os.path.basename(os.path.dirname(vp))
                             vid_stem = os.path.splitext(os.path.basename(vp))[0]
-                            det_vis_dir = os.path.join(detection_test_dir, "visualizations", vid_stem)
-                            roi_trace_path = os.path.join(out_dir_model, vid_stem, "roi_trace.json")
+                            det_vis_dir = os.path.join(detection_test_dir, "visualizations", _subj_id_seg, vid_stem)
+                            roi_trace_path = os.path.join(out_dir_model, _subj_id_seg, vid_stem, "roi_trace.json")
                             _augment_detection_visuals_with_seg_roi(det_vis_dir, roi_trace_path, str(model_name))
                     except Exception:
                         pass
@@ -1840,14 +2137,16 @@ class PipelineRunner:
                         # Save newly produced classifier to cache
                         _clf_produced_pkl = os.path.join(out_dir, "classification", "classifier.pkl")
                         if os.path.exists(_clf_produced_pkl):
+                            _clf_cache_entry: Dict[str, str] = {
+                                "checkpoint": _clf_produced_pkl,
+                                "model_key": _clf_model_key,
+                            }
                             self._save_to_stage_cache(
                                 self._persistent_clf_cache_file, _clf_sig_key, _clf_model_key,
-                                {"checkpoint": _clf_produced_pkl, "model_key": _clf_model_key},
+                                _clf_cache_entry,
                             )
                             self._log(f"[ClfCache] Saved classifier to persistent cache: {_clf_produced_pkl}")
-                            _clf_disk_cache.setdefault(_clf_sig_key, {})[_clf_model_key] = {
-                                "checkpoint": _clf_produced_pkl
-                            }
+                            _clf_disk_cache.setdefault(_clf_sig_key, {})[_clf_model_key] = _clf_cache_entry
                     except Exception as _e_cls:
                         import traceback as _tb
                         stage_entry["status"] = "failed"
@@ -1878,6 +2177,18 @@ class PipelineRunner:
                 if seg_summary_path:
                     seg_artifacts["summary_path"] = seg_summary_path
                 seg_artifacts["predictions_root"] = predictions_root
+
+            # Trajectory filter metrics: read from test/trajectory_filter/summary.json
+            _tf_summary_file = os.path.join(test_dir, "trajectory_filter", "summary.json")
+            if os.path.exists(_tf_summary_file):
+                try:
+                    with open(_tf_summary_file, "r", encoding="utf-8") as f:
+                        metrics_section["trajectory_filter"] = json.load(f)
+                    tf_artifacts = meta.setdefault("artifacts", {}).setdefault("trajectory_filter", {})
+                    tf_artifacts["summary_path"] = _tf_summary_file
+                    tf_artifacts["metrics_path"] = os.path.join(test_dir, "trajectory_filter", "metrics.json")
+                except Exception:
+                    pass
 
             # Classification metrics: read from classification/summary.json produced by engine
             _clf_summary_path = os.path.join(out_dir, "classification", "summary.json")

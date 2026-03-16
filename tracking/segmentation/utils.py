@@ -83,10 +83,14 @@ def expand_bbox(bbox: Tuple[float, float, float, float], pad_fraction: float, im
 
 
 def crop_with_bbox(image: np.ndarray, bbox: BoundingBox) -> np.ndarray:
-    x0 = int(round(bbox.x))
-    y0 = int(round(bbox.y))
-    x1 = int(round(bbox.x + bbox.w))
-    y1 = int(round(bbox.y + bbox.h))
+    x0 = max(0, int(round(bbox.x)))
+    y0 = max(0, int(round(bbox.y)))
+    x1 = min(image.shape[1], int(round(bbox.x + bbox.w)))
+    y1 = min(image.shape[0], int(round(bbox.y + bbox.h)))
+    if x1 <= x0 or y1 <= y0:
+        # Degenerate crop — return an empty ROI with correct channel count
+        ch = image.shape[2:] if image.ndim > 2 else ()
+        return np.empty((0, 0) + ch, dtype=image.dtype)
     return image[y0:y1, x0:x1]
 
 

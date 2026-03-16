@@ -50,18 +50,21 @@ def summarise_classification(
     metrics["f1_positive"] = float(f1[0]) if len(f1) else 0.0
     metrics["support_positive"] = float(support[0]) if len(support) else 0.0
     try:
-        cm = confusion_matrix(y_true, y_pred)
-        metrics["tn"] = float(cm[0, 0]) if cm.shape == (2, 2) else 0.0
-        metrics["fp"] = float(cm[0, 1]) if cm.shape == (2, 2) else 0.0
-        metrics["fn"] = float(cm[1, 0]) if cm.shape == (2, 2) else 0.0
-        metrics["tp"] = float(cm[1, 1]) if cm.shape == (2, 2) else 0.0
+        # Derive labels dynamically so TP/FP/FN/TN stay consistent with
+        # the ``positive_label`` parameter used for precision/recall/F1.
+        neg_label = 0 if positive_label != 0 else 1
+        cm = confusion_matrix(y_true, y_pred, labels=[neg_label, positive_label])
+        metrics["tn"] = float(cm[0, 0])
+        metrics["fp"] = float(cm[0, 1])
+        metrics["fn"] = float(cm[1, 0])
+        metrics["tp"] = float(cm[1, 1])
     except Exception:
         metrics.update({"tn": 0.0, "fp": 0.0, "fn": 0.0, "tp": 0.0})
     if y_prob is not None:
         try:
             metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
         except Exception:
-            metrics["roc_auc"] = 0.0
+            metrics["roc_auc"] = float("nan")  # not computable (single-class fold)
     # Friendly short-key aliases
     metrics["precision"] = metrics["precision_positive"]
     metrics["recall"] = metrics["recall_positive"]
