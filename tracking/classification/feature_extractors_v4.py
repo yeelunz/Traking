@@ -15,6 +15,7 @@ from ..core.registry import register_feature_extractor
 from .interfaces import TrajectoryFeatureExtractor
 from .texture_backbone import TextureBackboneWrapper
 from .feature_extractors_v3pro import _extract_mean_roi_rgb
+from .trajectory_filter import smooth_trajectory_2d as _smooth_trajectory_2d
 
 
 TAB_V4_MOTION_KEYS: List[str] = [
@@ -76,7 +77,11 @@ def _compute_motion_tab_v4(samples: Sequence[FramePrediction]) -> Dict[str, floa
 
     ordered = sorted(samples, key=lambda s: float(s.frame_index))
     frames = np.asarray([float(s.frame_index) for s in ordered], dtype=np.float64)
-    centers = np.asarray([s.center for s in ordered], dtype=np.float64)
+    raw_centers = np.asarray([s.center for s in ordered], dtype=np.float64)
+    try:
+        centers = _smooth_trajectory_2d(raw_centers, frames)
+    except Exception:
+        centers = raw_centers
     n = int(len(ordered))
 
     feat: Dict[str, float] = OrderedDict()

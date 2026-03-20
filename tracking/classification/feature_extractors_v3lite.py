@@ -37,6 +37,7 @@ from .feature_extractors import (
 from .trajectory_filter import (
     multiscale_hampel as _multiscale_hampel,
     bidirectional_savgol as _bidirectional_savgol,
+    smooth_trajectory_2d as _smooth_trajectory_2d,
 )
 
 logger = logging.getLogger(__name__)
@@ -301,7 +302,11 @@ def _compute_motion_lite(
         return zeros
 
     frames = np.asarray([float(s.frame_index) for s in samples], dtype=np.float64)
-    centers = np.asarray([s.center for s in samples], dtype=np.float64)
+    raw_centers = np.asarray([s.center for s in samples], dtype=np.float64)
+    try:
+        centers = _smooth_trajectory_2d(raw_centers, frames)
+    except Exception:
+        centers = raw_centers
     n = len(samples)
 
     feat = OrderedDict()

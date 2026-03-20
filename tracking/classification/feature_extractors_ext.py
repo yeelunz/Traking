@@ -53,6 +53,7 @@ from .feature_extractors import (
 from .trajectory_filter import (
     multiscale_hampel as _multiscale_hampel,
     bidirectional_savgol as _bidirectional_savgol,
+    smooth_trajectory_2d as _smooth_trajectory_2d,
 )
 from .texture_resnet import MaskedROIResNetExtractor, RESNET_FEAT_DIM
 
@@ -375,13 +376,18 @@ def _compute_cts_static_features(
     feat["cts_echo_delta"] = echo_last_mean - echo_first_mean
 
     # ── Nerve displacement ──
-    centers = np.array(
+    raw_centers = np.array(
         [
             (s.bbox[0] + s.bbox[2] / 2.0, s.bbox[1] + s.bbox[3] / 2.0)
             for s in samples
         ],
         dtype=np.float64,
     )
+    frame_indices = np.asarray([float(s.frame_index) for s in samples], dtype=np.float64)
+    try:
+        centers = _smooth_trajectory_2d(raw_centers, frame_indices)
+    except Exception:
+        centers = raw_centers
     if len(centers) > 1:
         disp_vec = centers[-1] - centers[0]
         net_disp = float(np.linalg.norm(disp_vec))
@@ -1560,13 +1566,18 @@ def _compute_cts_static_features_v2(
         feat["cts_flat_grad_std"] = 0.0
 
     # ── Displacement from median position ──
-    centers = np.array(
+    raw_centers = np.array(
         [
             (s.bbox[0] + s.bbox[2] / 2.0, s.bbox[1] + s.bbox[3] / 2.0)
             for s in samples
         ],
         dtype=np.float64,
     )
+    frame_indices = np.asarray([float(s.frame_index) for s in samples], dtype=np.float64)
+    try:
+        centers = _smooth_trajectory_2d(raw_centers, frame_indices)
+    except Exception:
+        centers = raw_centers
     median_pos = np.median(centers, axis=0)
     displacements = np.linalg.norm(centers - median_pos, axis=1)
     feat["cts_disp_median_mean"] = float(displacements.mean())
