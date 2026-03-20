@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import csv
+import pickle
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -17,8 +19,329 @@ from .feature_vector import FeatureVectoriser
 from .metrics import summarise_classification
 from . import feature_extractors as _load_feature_extractors  # noqa: F401
 from . import classifiers as _load_classifiers  # noqa: F401
+from . import fusion_modules as _load_fusion_modules  # noqa: F401
+from .fusion_modules import create_fusion_module, is_learnable_fusion_module
 from ..segmentation.dataset import attach_ground_truth_segmentation
 from ..utils.annotations import load_coco_vid
+
+
+_TEXTURE_BACKBONE_FEATURES = {
+    "tab_v3_pro",
+    "tab_v4",
+    "tab_v2",
+    "tab_v2_extend",
+    "tsc_v2",
+    "tsc_v2_extend",
+    "tsc_v3_pro",
+}
+
+
+_EXTRACTOR_STATE_ATTRS = (
+    "_pca_mean",
+    "_pca_components",
+    "_proj_matrix",
+    "_feat_mean",
+    "_feat_std",
+    "_channel_mean",
+    "_channel_std",
+    "_tex_pca_mean",
+    "_tex_pca_components",
+)
+
+
+def _get_feature_extractor_state(feature_extractor) -> Optional[Dict[str, any]]:  # noqa: ANN001
+    getter = getattr(feature_extractor, "get_state", None)
+    if callable(getter):
+        state = getter()
+        if isinstance(state, dict) and state:
+            return state
+
+    state: Dict[str, any] = {}  # noqa: ANN001
+    for attr in _EXTRACTOR_STATE_ATTRS:
+        if hasattr(feature_extractor, attr):
+            value = getattr(feature_extractor, attr)
+            if value is not None:
+                state[attr] = value
+    return state if state else None
+
+
+def _set_feature_extractor_state(feature_extractor, state: Dict[str, any]) -> None:  # noqa: ANN001
+    setter = getattr(feature_extractor, "set_state", None)
+    if callable(setter):
+        setter(state)
+        return
+    for attr, value in (state or {}).items():
+        if hasattr(feature_extractor, attr):
+            setattr(feature_extractor, attr, value)
+
+
+def _save_feature_extractor_state(
+    feature_extractor,
+    model_dir: str,
+    logger: Callable[[str], None],
+) -> Optional[str]:
+    state = _get_feature_extractor_state(feature_extractor)
+    if not state:
+        return None
+    out_path = os.path.join(model_dir, "feature_extractor_state.pkl")
+    payload = {
+        "extractor_class": feature_extractor.__class__.__name__,
+        "state": state,
+    }
+    with open(out_path, "wb") as f:
+        pickle.dump(payload, f)
+    logger(f"[Classification] Saved feature extractor state: {out_path}")
+    return out_path
+
+
+def _try_load_feature_extractor_state(
+    feature_extractor,
+    config: Dict[str, any],  # noqa: ANN001
+    logger: Callable[[str], None],
+) -> Optional[str]:
+    path = str((config or {}).get("feature_extractor_state_path", "")).strip()
+    if not path:
+        return None
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"feature_extractor_state_path not found: {path}")
+    with open(path, "rb") as f:
+        payload = pickle.load(f)
+    state = payload.get("state") if isinstance(payload, dict) else None
+    if not isinstance(state, dict):
+        raise RuntimeError("Invalid feature extractor state payload.")
+    _set_feature_extractor_state(feature_extractor, state)
+    logger(f"[Classification] Loaded feature extractor state: {path}")
+    return path
+
+
+def _crop_roi_safe(frame, bbox, pad_ratio: float = 0.15):
+    import cv2  # noqa: PLC0415
+
+    if frame is None or bbox is None or len(bbox) != 4:
+        return None
+    h_img, w_img = frame.shape[:2]
+    x, y, w, h = map(float, bbox)
+    if w <= 1.0 or h <= 1.0:
+        return None
+
+    pad_ratio = max(0.0, float(pad_ratio))
+    pw = w * pad_ratio
+    ph = h * pad_ratio
+    x1 = int(max(0, min(w_img - 1, round(x - pw))))
+    y1 = int(max(0, min(h_img - 1, round(y - ph))))
+    x2 = int(max(x1 + 1, min(w_img, round(x + w + pw))))
+    y2 = int(max(y1 + 1, min(h_img, round(y + h + ph))))
+    roi = frame[y1:y2, x1:x2]
+    if roi is None or roi.size == 0:
+        return None
+    return cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+
+
+def _ensure_texture_pretrain_ckpt(
+    *,
+    classification_cfg: Dict[str, any],  # noqa: ANN001
+    feature_cfg: Dict[str, any],  # noqa: ANN001
+    dataset_root: str,
+    train_videos: Dict[str, List[FramePrediction]],
+    labels: Dict[str, int],
+    results_dir: str,
+    logger: Callable[[str], None],
+) -> Dict[str, any]:  # noqa: ANN001
+    feature_name = str((feature_cfg or {}).get("name", "")).strip().lower()
+    params = dict((feature_cfg or {}).get("params") or {})
+
+    if feature_name not in _TEXTURE_BACKBONE_FEATURES:
+        return feature_cfg
+
+    mode = str(params.get("texture_mode", "")).strip().lower()
+
+    if mode != "pretrain":
+        return feature_cfg
+
+    ckpt = params.get("texture_pretrain_ckpt")
+    if isinstance(ckpt, str) and ckpt.strip() and os.path.exists(ckpt):
+        return feature_cfg
+
+    logger(
+        "[Classification] texture_mode=pretrain detected without valid checkpoint; "
+        "auto-running Stage-1 texture pretraining (with cache)."
+    )
+    tp_cfg = dict((classification_cfg or {}).get("texture_pretrain") or {})
+    if "embedding_dim" in tp_cfg:
+        embedding_dim = int(tp_cfg.get("embedding_dim", 32))
+    elif "texture_dim" in params:
+        embedding_dim = int(params.get("texture_dim", 32))
+    elif feature_name == "tab_v3_pro":
+        embedding_dim = 10
+    elif feature_name == "tab_v4":
+        embedding_dim = 10
+    elif feature_name == "tsc_v3_pro":
+        embedding_dim = 3
+    elif feature_name == "tab_v2":
+        embedding_dim = 66
+    elif feature_name == "tab_v2_extend":
+        embedding_dim = 90
+    elif feature_name == "tsc_v2":
+        embedding_dim = int(params.get("tex_pca_dim", 8))
+    elif feature_name == "tsc_v2_extend":
+        embedding_dim = int(params.get("tex_pca_dim", 8))
+    else:
+        embedding_dim = 32
+
+    backbone = str(params.get("texture_backbone", tp_cfg.get("backbone", "convnext_tiny")))
+    input_size = int(tp_cfg.get("input_size", params.get("texture_image_size", 96)))
+    max_frames_per_video = int(tp_cfg.get("max_frames_per_video", 16))
+    val_ratio = float(tp_cfg.get("val_ratio", 0.2))
+    roi_pad_ratio = float(tp_cfg.get("roi_pad_ratio", 0.15))
+
+    auto_root = Path(results_dir) / "classification" / "texture_pretrain_auto"
+    roi_dir = auto_root / "roi_images"
+    roi_dir.mkdir(parents=True, exist_ok=True)
+
+    rows: List[Tuple[str, int, str]] = []  # (subject, label, image_path)
+    for video_path, preds in sorted(train_videos.items(), key=lambda kv: kv[0]):
+        subject = _subject_from_video_path(video_path, dataset_root)
+        if subject not in labels:
+            continue
+        label = int(labels[subject])
+        if not preds:
+            continue
+
+        idx_pick = np.linspace(
+            0,
+            max(0, len(preds) - 1),
+            num=min(max_frames_per_video, len(preds)),
+            dtype=int,
+        )
+        idx_pick = sorted(set(int(v) for v in idx_pick.tolist()))
+
+        try:
+            import cv2  # noqa: PLC0415
+            cap = cv2.VideoCapture(video_path)
+        except Exception:
+            cap = None
+
+        if cap is None or not cap.isOpened():
+            continue
+
+        try:
+            for i in idx_pick:
+                p = preds[i]
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(p.frame_index))
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                roi = _crop_roi_safe(frame, p.bbox, pad_ratio=roi_pad_ratio)
+                if roi is None:
+                    continue
+                fn = f"{subject}__{Path(video_path).stem}__f{int(p.frame_index):06d}.png"
+                out_path = roi_dir / fn
+                cv2.imwrite(str(out_path), cv2.cvtColor(roi, cv2.COLOR_RGB2BGR))
+                rows.append((subject, label, str(out_path.resolve())))
+        finally:
+            cap.release()
+
+    if not rows:
+        raise RuntimeError(
+            "Auto texture pretraining failed: no ROI samples could be generated from training videos."
+        )
+
+    # subject-level split
+    subjects = sorted(set(r[0] for r in rows))
+    rng = np.random.default_rng(int(tp_cfg.get("seed", 42)))
+    rng.shuffle(subjects)
+    n_val = int(round(len(subjects) * val_ratio)) if len(subjects) > 1 else 0
+    n_val = max(0, min(n_val, max(0, len(subjects) - 1)))
+    val_subjects = set(subjects[:n_val])
+
+    train_rows = [r for r in rows if r[0] not in val_subjects]
+    val_rows = [r for r in rows if r[0] in val_subjects]
+
+    manifest_dir = auto_root / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    train_manifest = manifest_dir / "train.csv"
+    val_manifest = manifest_dir / "val.csv"
+
+    with train_manifest.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["image_path", "label"])
+        for _, lbl, img in train_rows:
+            w.writerow([img, lbl])
+
+    with val_manifest.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["image_path", "label"])
+        for _, lbl, img in val_rows:
+            w.writerow([img, lbl])
+
+    pretrain_yaml = auto_root / "texture_pretrain_auto.yaml"
+    pretrain_save = Path(tp_cfg.get("save_path", str(auto_root / "best.pth"))).resolve()
+    cache_dir = Path(tp_cfg.get("cache_dir", "ckpt/texture_pretrain_cache")).resolve()
+    payload = {
+        "texture_pretrain": {
+            "enable": True,
+            "backbone": backbone,
+            "num_classes": int(tp_cfg.get("num_classes", 2)),
+            "embedding_dim": int(tp_cfg.get("embedding_dim", embedding_dim)),
+            "input_size": input_size,
+            "batch_size": int(tp_cfg.get("batch_size", 32)),
+            "epochs": int(tp_cfg.get("epochs", 30)),
+            "lr": float(tp_cfg.get("lr", 1e-4)),
+            "weight_decay": float(tp_cfg.get("weight_decay", 1e-4)),
+            "save_path": str(pretrain_save),
+            "save_backbone_only": bool(tp_cfg.get("save_backbone_only", True)),
+            "optimizer": str(tp_cfg.get("optimizer", "adamw")),
+            "scheduler": str(tp_cfg.get("scheduler", "cosine")),
+            "num_workers": int(tp_cfg.get("num_workers", 0)),
+            "device": str(tp_cfg.get("device", "auto")),
+            "amp": bool(tp_cfg.get("amp", True)),
+            "head_type": str(tp_cfg.get("head_type", "linear")),
+            "hidden_dim": int(tp_cfg.get("hidden_dim", 256)),
+            "dropout": float(tp_cfg.get("dropout", 0.2)),
+            "pretrained_imagenet": bool(tp_cfg.get("pretrained_imagenet", True)),
+            "force_official_pretrained": bool(tp_cfg.get("force_official_pretrained", True)),
+            "cache_enabled": bool(tp_cfg.get("cache_enabled", True)),
+            "cache_dir": str(cache_dir),
+            "train_manifest": str(train_manifest.resolve()),
+            "val_manifest": str(val_manifest.resolve()) if val_rows else None,
+        }
+    }
+
+    with pretrain_yaml.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    try:
+        import yaml as _yaml  # noqa: PLC0415
+
+        with pretrain_yaml.open("w", encoding="utf-8") as f:
+            _yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+    except Exception:
+        pass
+
+    from ..texture_pretrain.train_texture import run_from_config as _run_texture_pretrain  # noqa: PLC0415
+
+    summary = _run_texture_pretrain(str(pretrain_yaml))
+    best_ckpt = str(summary.get("best_ckpt") or "").strip()
+    if not best_ckpt or not os.path.exists(best_ckpt):
+        raise RuntimeError("Auto texture pretraining finished but no valid best_ckpt was produced.")
+
+    params["texture_mode"] = "pretrain"
+    params["texture_pretrain_ckpt"] = best_ckpt
+    _cached = bool(summary.get("cached", False))
+    _epochs = summary.get("epochs")
+    _device = summary.get("device")
+    _best_metric = summary.get("best_metric")
+    logger(
+        "[Classification] Auto texture pretrain summary: "
+        f"cached={_cached}, epochs={_epochs}, device={_device}, best_metric={_best_metric}"
+    )
+    logger(f"[Classification] Auto texture pretrain ready: ckpt={best_ckpt}")
+    if summary.get("cache_key"):
+        logger(f"[Classification] Auto texture pretrain cache_key={summary.get('cache_key')}")
+
+    updated = dict(feature_cfg)
+    updated["params"] = params
+    return updated
 
 
 def _subject_from_video_path(path: str, dataset_root: str | None = None) -> str:
@@ -431,7 +754,81 @@ def _run_subject_classification_impl(
     classifier_cls = CLASSIFIER_REGISTRY.get(classifier_name)
     if classifier_cls is None:
         raise KeyError(f"Unknown classifier: {classifier_name}")
-    classifier = classifier_cls(classifier_cfg.get("params"))
+
+    fusion_cfg = config.get("fusion_module") if isinstance(config.get("fusion_module"), dict) else None
+    fusion_name = str((fusion_cfg or {}).get("name", "")).strip().lower()
+    fusion_learnable = is_learnable_fusion_module(fusion_name) if fusion_name else False
+    differentiable_classifiers = {
+        "mlp",
+        "mlp_head",
+        "mlp_linear_head",
+        "linear_head",
+        "patchtst",
+        "timemachine",
+        "transformer",
+        "fusion_mlp",
+        "fusion_gating_mlp",
+        "v3pro_fusion",
+    }
+
+    clf_params = dict(classifier_cfg.get("params") or {})
+    if fusion_cfg is not None:
+        if fusion_learnable:
+            classifier_name_lc = str(classifier_name).strip().lower()
+            if classifier_name_lc not in differentiable_classifiers:
+                raise RuntimeError(
+                    "Learnable fusion module requires a differentiable classifier. "
+                    f"Got fusion_module={fusion_name}, classifier={classifier_name}."
+                )
+            clf_params["fusion_module"] = fusion_cfg
+            logger(
+                "[Classification] Learnable fusion_module is enabled and passed to downstream differentiable classifier."
+            )
+        else:
+            # Non-learnable fusion (e.g., concat) runs as an independent transform stage in engine.
+            pass
+
+    classifier = classifier_cls(clf_params if clf_params else None)
+
+    def _detect_backend_used() -> Optional[str]:
+        name_lc = str(classifier_name).strip().lower()
+        if "tabpfn" in name_lc:
+            try:
+                if bool(getattr(classifier, "_fallback", False)):
+                    fb_name = str(getattr(classifier, "_fallback_name", "")).strip() or "unknown"
+                    return f"fallback_{fb_name}"
+            except Exception:
+                pass
+            return "tabpfn_2_5"
+        return None
+
+    def _validate_tabpfn_backend(train_info_obj: Optional[Dict[str, Any]], *, loaded_from_cache: bool) -> Optional[str]:
+        name_lc = str(classifier_name).strip().lower()
+        if "tabpfn" not in name_lc:
+            return None
+
+        backend = None
+        if isinstance(train_info_obj, dict):
+            raw_backend = train_info_obj.get("backend")
+            if isinstance(raw_backend, str) and raw_backend.strip():
+                backend = raw_backend.strip()
+        if backend is None:
+            backend = _detect_backend_used()
+
+        require_native_backend = bool((classifier_cfg.get("params") or {}).get("require_native_backend", True))
+        if backend is not None and backend.lower().startswith("fallback_"):
+            msg = (
+                f"[Classification] TabPFN is running with fallback backend ({backend}) "
+                f"({'cache load' if loaded_from_cache else 'training time'})."
+            )
+            if require_native_backend:
+                raise RuntimeError(
+                    msg
+                    + " Please install/configure TabPFN correctly (including gated model access), "
+                      "or set classifier.params.require_native_backend=false to allow fallback explicitly."
+                )
+            logger(msg + " Proceeding because require_native_backend=false.")
+        return backend
 
     legacy_level = config.get("target_level", None)
     if legacy_level is not None:
@@ -503,7 +900,7 @@ def _run_subject_classification_impl(
         # Allow explicit gt_traj_params in config to override even the above defaults
         _gt_traj_cfg.update(_gt_traj_override)
         _gt_bbox_strategy = str(
-            (config.get("trajectory_filter", {}) or {}).get("bbox_strategy", "independent")
+            (config.get("trajectory_filter", {}) or {}).get("bbox_strategy", "none")
         )
         _gt_bbox_params = dict(
             (config.get("trajectory_filter", {}) or {}).get("bbox_params", {}) or {}
@@ -565,6 +962,28 @@ def _run_subject_classification_impl(
     except Exception as _gt_err:
         logger(f"[Classification] WARNING: GT trajectory smoothing failed ({_gt_err}); using raw GT bboxes")
 
+    # Auto bootstrap for texture pretrain mode:
+    # if the selected feature extractor uses texture backbone in pretrain mode
+    # and no checkpoint is provided, run Stage-1 automatically (with cache).
+    try:
+        feature_cfg = _ensure_texture_pretrain_ckpt(
+            classification_cfg=config,
+            feature_cfg=feature_cfg,
+            dataset_root=dataset_root,
+            train_videos=train_videos,
+            labels=labels,
+            results_dir=results_dir,
+            logger=logger,
+        )
+        feature_extractor = feature_cls(feature_cfg.get("params"))
+    except Exception as _auto_pretrain_err:
+        raise RuntimeError(
+            "Failed to auto-prepare texture pretrain checkpoint for feature extractor "
+            f"'{feature_name}': {_auto_pretrain_err}"
+        ) from _auto_pretrain_err
+
+    _loaded_fe_state_path = _try_load_feature_extractor_state(feature_extractor, config, logger)
+
     train_features, train_owner, train_sources = _prepare_entity_features(
         feature_extractor,
         train_videos,
@@ -581,6 +1000,13 @@ def _run_subject_classification_impl(
     vectoriser = _build_vectoriser(feature_extractor, level)
     X_train = vectoriser.transform(train_features[e] for e in train_entities)
     y_train = np.asarray([labels[train_owner[e]] for e in train_entities], dtype=np.int64)
+
+    engine_fusion = None
+    if fusion_cfg is not None and not fusion_learnable:
+        engine_fusion = create_fusion_module(fusion_cfg)
+        if engine_fusion is not None:
+            X_train = engine_fusion.fit_transform(X_train, y_train)
+
     logger(f"[Classification] X_train shape={X_train.shape}, n_entities={len(train_entities)}, n_feat_keys={len(list(vectoriser.keys))}")
 
     # ── Threshold calibration via Youden's Index ─────────────────────────────
@@ -637,6 +1063,12 @@ def _run_subject_classification_impl(
         logger(f"[Classification] Cache hit – loading classifier from: {cached_classifier_path}")
         try:
             classifier.load(cached_classifier_path)
+            cached_backend = _validate_tabpfn_backend(None, loaded_from_cache=True)
+            if cached_backend is not None:
+                train_info = {
+                    "backend": cached_backend,
+                    "loaded_from_cache": True,
+                }
             # Copy to current experiment's dir so artifacts are self-contained
             if os.path.abspath(cached_classifier_path) != os.path.abspath(model_path):
                 import shutil
@@ -650,6 +1082,7 @@ def _run_subject_classification_impl(
             except ImportError:
                 pass
             train_info = classifier.fit(X_train, y_train)
+            _validate_tabpfn_backend(train_info, loaded_from_cache=False)
             try:
                 from tracking.classification.classifiers_ext import set_progress_logger
                 set_progress_logger(None)
@@ -667,6 +1100,7 @@ def _run_subject_classification_impl(
         except ImportError:
             pass
         train_info = classifier.fit(X_train, y_train)
+        _validate_tabpfn_backend(train_info, loaded_from_cache=False)
         try:
             from tracking.classification.classifiers_ext import set_progress_logger
             set_progress_logger(None)  # revert to print
@@ -713,6 +1147,10 @@ def _run_subject_classification_impl(
 
     X_test = vectoriser.transform(test_features[e] for e in test_entities)
     y_test = np.asarray([labels[test_owner[e]] for e in test_entities], dtype=np.int64)
+
+    if engine_fusion is not None:
+        X_test = engine_fusion.transform(X_test)
+
     logger(f"[Classification] X_train shape: {X_train.shape}, X_test shape: {X_test.shape}, n_feat_keys: {len(list(vectoriser.keys))}")
 
     logger(f"[Classification] Evaluating classifier on {len(test_entities)} entities")
@@ -761,6 +1199,8 @@ def _run_subject_classification_impl(
     with open(os.path.join(model_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
+    fe_state_path = _save_feature_extractor_state(feature_extractor, model_dir, logger)
+
     artefacts = {
         "target_level": level,
         "train_entities": list(train_entities),
@@ -775,6 +1215,8 @@ def _run_subject_classification_impl(
         "threshold_used": round(decision_threshold, 6),
         "youden_j": round(youden_j_val, 6) if youden_j_val is not None else None,
         "threshold_n_loo_predictions": n_loo_predictions,
+        "feature_extractor_state_file": os.path.basename(fe_state_path) if fe_state_path else None,
+        "feature_extractor_state_source": _loaded_fe_state_path,
     }
     with open(os.path.join(model_dir, "artefacts.json"), "w", encoding="utf-8") as f:
         json.dump(artefacts, f, ensure_ascii=False, indent=2)

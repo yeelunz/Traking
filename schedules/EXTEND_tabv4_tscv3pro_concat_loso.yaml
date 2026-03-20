@@ -1,26 +1,16 @@
 queue:
   # ═══════════════════════════════════════════════════════════════════════════
-  # 00  共用錨點定義 (不執行任何實驗)
-  # ═══════════════════════════════════════════════════════════════════════════
-  # 資料：dataset/merged（含患病 001–005 與正常 n001–n007）
-  # 分割策略：Non-LOSO（subject_level 8:2 隨機分割）
-  # 前處理：Global CLAHE（無 LOG_DR）
-  # 偵測器：YOLOv11l
-  # 分割模型：MedNeXt-B
-  # 分類：video level
-  #   表格特徵 (tab_v2) → Random Forest / TabPFN v2
-  #   時序特徵 (time_series, 18ch×128) → MultiRocket / PatchTST
+  # 00  共用錨點定義（EXTEND / LOSO / tab_v4+tsc_v3_pro）
   # ═══════════════════════════════════════════════════════════════════════════
   - label: "00_defs"
     config:
       seed: 42
 
-      # ── 資料集：Non-LOSO（subject_level 隨機 8:2 分割）──────────────────────────
-      dataset: &dataset_merged_noloso
+      dataset: &dataset_merged_loso
         root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend"
         split:
-          method: subject_level
-          loso: false
+          method: loso
+          loso: true
           ratios: [0.8, 0.2]
           k_fold: 1
 
@@ -43,7 +33,6 @@ queue:
       trajectory_filter: &trajectory_filter_defaults
         bbox_strategy: none
 
-      # ── ROI 偵測器：YOLOv11l ─────────────────────────────────────────────────────────────────
       detector: &detector_yolo11l
         weights: models/detection/yolo26l.pt
         conf: 0.05
@@ -62,12 +51,10 @@ queue:
         include_empty_frames: false
         force_cpu_if_no_cuda: true
 
-      # ── 前處理：Global CLAHE（tileGridSize=[1,1] = 單一大區塊，等效全域）────────
       clahe_global: &clahe_global
         clipLimit: 2.0
         tileGridSize: [1, 1]
 
-      # ── 分割模型：MedNeXt-B ──────────────────────────────────────────────────
       segmentation_mednext: &seg_mednext
         model:
           name: mednext
@@ -98,34 +85,35 @@ queue:
         train: true
         inference_checkpoint: null
 
-      # ── 標籤檔 ────────────────────────────────────────────────────────────────
       label_file: &label_file
         "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend\\ann.txt"
 
-      # ── 特徵提取器：表格式（Motion 31D + CTS Static 35D + ResNet Texture PCA 66D）
-      fe_mts: &fe_mts
-        name: tab_v2
-        params:
-          resnet_device: auto
-          aggregate_stats: ["mean", "std", "min", "max"]
+      fusion_concat: &fusion_concat
+        name: concat
+        params: {}
 
-      # ── 特徵提取器：時序式（18ch × 128 steps：10 幾何 + 8 ResNet 紋理 PCA）───────
-      fe_ts: &fe_ts
-        name: tsc_v2
+      fe_tab_v4_pretrain: &fe_tab_v4_pretrain
+        name: tab_v4
         params:
+          texture_mode: pretrain
+          pretrained_backbone: true
+          n_texture_frames: 5
+          texture_image_size: 96
+          roi_pad_ratio: 0.15
+
+      fe_tsc_v3pro_pretrain: &fe_tsc_v3pro_pretrain
+        name: tsc_v3_pro
+        params:
+          texture_mode: pretrain
+          pretrained_backbone: true
+          n_steps: 256
           frame_w: 640.0
           frame_h: 480.0
-          resnet_device: auto
-          tex_pca_dim: 8
+          interp_method: cubic
 
-      # ══════════════════════════════════════════════════════════════════════════
-      #  分類設定錨點
-      # ══════════════════════════════════════════════════════════════════════════
-
-      # ─ Random Forest（tab_v2 → 132D）──────────────────────────
-      clf_mts_rf: &clf_mts_rf
+      clf_tabv4_rf_concat: &clf_tabv4_rf_concat
         enabled: true
-        feature_extractor: *fe_mts
+        feature_extractor: *fe_tab_v4_pretrain
         classifier:
           name: random_forest
           params:
@@ -135,30 +123,46 @@ queue:
             class_weight: balanced
             random_state: 42
             n_jobs: -1
+        fusion_module: *fusion_concat
         segmentation:
-          enabled: true   # masks provided by main pipeline seg stage (e.g. MedNeXt)
+          enabled: true
         label_file: *label_file
         level: video
 
-      # ─ MultiRocket（time_series → 18ch × 128 steps）──────────────────────────
-      clf_ts_multirocket: &clf_ts_multirocket
+      clf_tabv4_tabpfn_concat: &clf_tabv4_tabpfn_concat
         enabled: true
-        feature_extractor: *fe_ts
+        feature_extractor: *fe_tab_v4_pretrain
+        classifier:
+          name: tabpfn_v2
+          params:
+            n_ensemble_configurations: 32
+            device: cpu
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tscv3pro_multirocket_concat: &clf_tscv3pro_multirocket_concat
+        enabled: true
+        feature_extractor: *fe_tsc_v3pro_pretrain
         classifier:
           name: multirocket
           params:
             n_kernels: 6250
             ridge_alpha: 1.0e-3
             seed: 42
+            n_vars: 12
+            n_steps: 256
+        fusion_module: *fusion_concat
         segmentation:
-          enabled: true   # masks provided by main pipeline seg stage (e.g. MedNeXt)
+          enabled: true
         label_file: *label_file
         level: video
 
-      # ─ PatchTST（time_series → 18ch × 128 steps）─────────────────────────────
-      clf_ts_patchtst: &clf_ts_patchtst
+      clf_tscv3pro_patchtst_concat: &clf_tscv3pro_patchtst_concat
         enabled: true
-        feature_extractor: *fe_ts
+        feature_extractor: *fe_tsc_v3pro_pretrain
         classifier:
           name: patchtst
           params:
@@ -167,33 +171,23 @@ queue:
             d_model: 32
             ridge_alpha: 1.0e-3
             seed: 42
+            n_vars: 12
+            n_steps: 256
+        fusion_module: *fusion_concat
         segmentation:
-          enabled: true   # masks provided by main pipeline seg stage (e.g. MedNeXt)
-        label_file: *label_file
-        level: video
-      # ─ TabPFN v2（tab_v2 → 132D）──────────────────────────────
-      clf_mts_tabpfn: &clf_mts_tabpfn
-        enabled: true
-        feature_extractor: *fe_mts
-        classifier:
-          name: tabpfn_v2
-          params:
-            n_ensemble_configurations: 32
-            device: cpu
-        segmentation:
-          enabled: true   # masks provided by main pipeline seg stage (e.g. MedNeXt)
+          enabled: true
         label_file: *label_file
         level: video
 
   # ═══════════════════════════════════════════════════════════════════════════
-  #  MedNeXt × Random Forest  (01)
+  # 01  tab_v4(pretrain) + Random Forest + concat
   # ═══════════════════════════════════════════════════════════════════════════
-  - label: "01_mednext_mts_rf"
+  - label: "01_tabv4_rf_concat"
     config:
       seed: 42
-      dataset: *dataset_merged_noloso
+      dataset: *dataset_merged_loso
       experiments:
-        - name: "mednext_clahe_global_mts_rf"
+        - name: "mednext_clahe_global_tabv4_rf_concat"
           preproc_scheme: "A"
           pipeline:
             - type: preproc
@@ -203,20 +197,20 @@ queue:
               name: YOLOv11
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
-      classification: *clf_mts_rf
+      classification: *clf_tabv4_rf_concat
       segmentation: *seg_mednext
       output: *output_defaults
       trajectory_filter: *trajectory_filter_defaults
 
   # ═══════════════════════════════════════════════════════════════════════════
-  #  MedNeXt × MultiRocket  (02)
+  # 02  tab_v4(pretrain) + TabPFN + concat
   # ═══════════════════════════════════════════════════════════════════════════
-  - label: "02_mednext_ts_multirocket"
+  - label: "02_tabv4_tabpfn_concat"
     config:
       seed: 42
-      dataset: *dataset_merged_noloso
+      dataset: *dataset_merged_loso
       experiments:
-        - name: "mednext_clahe_global_ts_multirocket"
+        - name: "mednext_clahe_global_tabv4_tabpfn_concat"
           preproc_scheme: "A"
           pipeline:
             - type: preproc
@@ -226,20 +220,20 @@ queue:
               name: YOLOv11
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
-      classification: *clf_ts_multirocket
+      classification: *clf_tabv4_tabpfn_concat
       segmentation: *seg_mednext
       output: *output_defaults
       trajectory_filter: *trajectory_filter_defaults
 
   # ═══════════════════════════════════════════════════════════════════════════
-  #  MedNeXt × PatchTST  (03)
+  # 03  tsc_v3_pro(pretrain) + MultiRocket + concat
   # ═══════════════════════════════════════════════════════════════════════════
-  - label: "03_mednext_ts_patchtst"
+  - label: "03_tscv3pro_multirocket_concat"
     config:
       seed: 42
-      dataset: *dataset_merged_noloso
+      dataset: *dataset_merged_loso
       experiments:
-        - name: "mednext_clahe_global_ts_patchtst"
+        - name: "mednext_clahe_global_tscv3pro_multirocket_concat"
           preproc_scheme: "A"
           pipeline:
             - type: preproc
@@ -249,20 +243,20 @@ queue:
               name: YOLOv11
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
-      classification: *clf_ts_patchtst
+      classification: *clf_tscv3pro_multirocket_concat
       segmentation: *seg_mednext
       output: *output_defaults
       trajectory_filter: *trajectory_filter_defaults
 
   # ═══════════════════════════════════════════════════════════════════════════
-  #  MedNeXt × TabPFN v2  (04)
+  # 04  tsc_v3_pro(pretrain) + PatchTST + concat
   # ═══════════════════════════════════════════════════════════════════════════
-  - label: "04_mednext_mts_tabpfn"
+  - label: "04_tscv3pro_patchtst_concat"
     config:
       seed: 42
-      dataset: *dataset_merged_noloso
+      dataset: *dataset_merged_loso
       experiments:
-        - name: "mednext_clahe_global_mts_tabpfn"
+        - name: "mednext_clahe_global_tscv3pro_patchtst_concat"
           preproc_scheme: "A"
           pipeline:
             - type: preproc
@@ -272,7 +266,7 @@ queue:
               name: YOLOv11
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
-      classification: *clf_mts_tabpfn
+      classification: *clf_tscv3pro_patchtst_concat
       segmentation: *seg_mednext
       output: *output_defaults
       trajectory_filter: *trajectory_filter_defaults

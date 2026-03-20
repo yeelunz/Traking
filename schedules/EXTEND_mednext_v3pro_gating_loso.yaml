@@ -1,0 +1,148 @@
+queue:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 00  共用錨點定義（v3pro / LOSO）
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "00_defs"
+    config:
+      seed: 42
+
+      dataset: &dataset_merged_loso
+        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend"
+        split:
+          method: loso
+          loso: true
+          ratios: [0.8, 0.2]
+          k_fold: 1
+
+      experiments: []
+
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+
+      output: &output_defaults
+        results_root: results
+
+      trajectory_filter: &trajectory_filter_defaults
+        bbox_strategy: none
+
+      detector: &detector_yolo11l
+        weights: models/detection/yolo26l.pt
+        conf: 0.05
+        iou: 0.5
+        imgsz: 640
+        device: cuda
+        classes: null
+        max_det: 100
+        fallback_last_prediction: true
+        train_enabled: true
+        epochs: 30
+        batch: 8
+        lr0: 0.01
+        patience: 50
+        workers: 0
+        include_empty_frames: false
+        force_cpu_if_no_cuda: true
+
+      clahe_global: &clahe_global
+        clipLimit: 2.0
+        tileGridSize: [1, 1]
+
+      segmentation_mednext: &seg_mednext
+        model:
+          name: mednext
+          params:
+            in_channels: 3
+            classes: 1
+            model_id: "B"
+            kernel_size: 3
+            deep_supervision: false
+            dim: "2d"
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 30
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-05
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      label_file: &label_file
+        "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend\\ann.txt"
+
+      # v3pro 非 TSC extractor（13D motion + 10D static + compact texture vector）
+      fe_v3pro: &fe_v3pro
+        name: tab_v3_pro
+        params:
+          n_texture_frames: 5
+          texture_image_size: 96
+          roi_pad_ratio: 0.15
+
+      # v3pro fusion classifier（fusion_mlp + attention_gating，v3pro_fusion 為相容別名）
+      clf_v3pro_gating: &clf_v3pro_gating
+        enabled: true
+        feature_extractor: *fe_v3pro
+        classifier:
+          name: fusion_mlp
+          params:
+            motion_dim: 13
+            static_dim: 10
+            texture_image_size: 96
+            fusion_mode: attention_gating
+            fusion_dim: 32
+            pretrained_backbone: true
+            backbone_trainable: true
+            epochs: 40
+            batch_size: 16
+            lr: 1.0e-4
+            weight_decay: 1.0e-4
+            dropout: 0.2
+            val_ratio: 0.2
+            patience: 8
+            seed: 42
+            device: auto
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 01  MedNeXt × v3pro (attention_gating)
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "01_mednext_v3pro_gating"
+    config:
+      seed: 42
+      dataset: *dataset_merged_loso
+      experiments:
+        - name: "mednext_clahe_global_v3pro_gating"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_global
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_v3pro_gating
+      segmentation: *seg_mednext
+      output: *output_defaults
+      trajectory_filter: *trajectory_filter_defaults

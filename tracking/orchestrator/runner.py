@@ -36,6 +36,7 @@ from ..models import mixformerv2  # noqa: F401
 from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
+from .pipeline_validator import enforce_or_collect_warnings
 import traceback as _tb
 
 
@@ -247,6 +248,17 @@ class PipelineRunner:
                 pass
 
     def run(self):
+        # Validate pipeline design compatibility before any training starts.
+        # This catches learnable feature blocks paired with non-differentiable classifiers.
+        _warnings = enforce_or_collect_warnings(self.cfg)
+        for _msg in _warnings:
+            self._log(_msg)
+            if self._logger is None:
+                try:
+                    print(_msg)
+                except Exception:
+                    pass
+
         # Only need reproducible dataset splits, not full deterministic ops (which can break CuBLAS).
         set_seed(self.seed, deterministic=False)
         dm = COCOJsonDatasetManager(self.dataset_root)
@@ -1133,7 +1145,10 @@ class PipelineRunner:
                     rng = random.Random(self.seed)
                     vids = train_vids[:]
                     rng.shuffle(vids)
-                    fold_size = max(1, len(vids) // k_fold)
+                    # Round-robin allocation for even fold sizes
+                    fold_bins: list[list[str]] = [[] for _ in range(k_fold)]
+                    for _rr_idx, _rr_v in enumerate(vids):
+                        fold_bins[_rr_idx % k_fold].append(_rr_v)
                     fold_summaries = []
                     fold_iter = range(k_fold)
                     if tqdm is not None:
@@ -1141,8 +1156,8 @@ class PipelineRunner:
                     for fi in fold_iter:
                         phase_key = f"kfold-{fi+1}"
                         self._progress('kfold_fold', fi + 1, k_fold, {'exp': exp_name})
-                        val_vids = vids[fi * fold_size:(fi + 1) * fold_size]
-                        trn_vids = [v for v in vids if v not in val_vids]
+                        val_vids = fold_bins[fi]
+                        trn_vids = [v for v in vids if v not in set(val_vids)]
                         val_ds = SimpleDataset(val_vids, dm.ann_by_video)
                         trn_ds = SimpleDataset(trn_vids, dm.ann_by_video)
                         fold_dir = os.path.join(train_root, "detection", f"fold_{fi+1}")
@@ -1158,9 +1173,9 @@ class PipelineRunner:
                                 continue
                             allow_train = getattr(model, "train_enabled", True)
                             should_train_cb = getattr(model, "should_train", None)
-                            if callable(should_train_cb):
+                            if allow_train and callable(should_train_cb):
                                 try:
-                                    allow_train = bool(should_train_cb(trn_ds, val_ds))
+                                    allow_train = allow_train and bool(should_train_cb(trn_ds, val_ds))
                                 except Exception:
                                     pass
                             if not allow_train:
@@ -1345,9 +1360,9 @@ class PipelineRunner:
                         continue
                     allow_train = getattr(model, "train_enabled", True)
                     should_train_cb = getattr(model, "should_train", None)
-                    if callable(should_train_cb):
+                    if allow_train and callable(should_train_cb):
                         try:
-                            allow_train = bool(should_train_cb(train_ds, None))
+                            allow_train = allow_train and bool(should_train_cb(train_ds, None))
                         except Exception:
                             pass
                     if not allow_train:
@@ -1426,11 +1441,11 @@ class PipelineRunner:
                     "trajectory_filter",
                     "trajectory_filter",
                     {
-                        "bbox_strategy": str(traj_filter_cfg.get("bbox_strategy", "hampel_only")),
+                        "bbox_strategy": str(traj_filter_cfg.get("bbox_strategy", "none")),
                         "detector_models": list(test_predictions.keys()),
                     },
                 ) as stage_entry:
-                    _tf_bbox_strategy = str(traj_filter_cfg.get("bbox_strategy", "hampel_only"))
+                    _tf_bbox_strategy = str(traj_filter_cfg.get("bbox_strategy", "none"))
                     _tf_bbox_params = dict(traj_filter_cfg.get("bbox_params", {}) or {})
                     _tf_traj_params = dict(traj_filter_cfg.get("traj_params", {}) or {})
 
@@ -1770,11 +1785,13 @@ class PipelineRunner:
                         if isinstance(val_ratio, (int, float)) and float(val_ratio) > 0.0 and len(train_targets) > 1:
                             vr = max(0.0, min(float(val_ratio), 0.9))
                             val_count = max(1, int(len(train_targets) * vr))
+                            # Clamp val_count so at least 1 video remains for training
+                            val_count = min(val_count, len(train_targets) - 1)
                             rng = random.Random(int(seg_seed))
                             shuffled = train_targets[:]
                             rng.shuffle(shuffled)
                             val_videos = shuffled[:val_count]
-                            train_targets = shuffled[val_count:] or shuffled
+                            train_targets = shuffled[val_count:]
                         stage_entry["train_targets"] = len(train_targets)
                         stage_entry["val_videos"] = len(val_videos) if val_videos else 0
                         self._log(
