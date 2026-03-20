@@ -3,7 +3,7 @@ Dataset root: C:\Users\User\Desktop\code\Traking\dataset\merged
 Classification config: {
   "enabled": true,
   "feature_extractor": {
-    "name": "motion_texture_static",
+    "name": "tab_v2",
     "params": {
       "kalman_process_noise": 0.01,
       "kalman_measurement_noise": 0.1,

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import os
 
 import numpy as np
@@ -15,6 +15,7 @@ except Exception as e:  # pragma: no cover - environment without ultralytics
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
 from ..core.registry import register_model
 from ..utils.init_bbox import resolve_weights_path
+from ..utils.prediction_interpolation import cubic_clip_interpolate_predictions
 
 
 @register_model("YOLOv11")
@@ -34,7 +35,10 @@ class YOLOv11Model(TrackingModel):
         "device": "cuda",     # "cuda" | "cpu"
         "classes": None,        # e.g., [0] for person; None for all
         "max_det": 100,
+        "min_confidence": 0.0,
         "fallback_last_prediction": True,
+        "fallback_missing_interpolation": True,
+        "interpolation_max_gap": 30,
         "train_enabled": True,
         # Training
         "epochs": 5,
@@ -59,7 +63,12 @@ class YOLOv11Model(TrackingModel):
         self.device = str(config.get("device", self.DEFAULT_CONFIG["device"]))
         self.classes = config.get("classes", self.DEFAULT_CONFIG["classes"])  # type: ignore
         self.max_det = int(config.get("max_det", self.DEFAULT_CONFIG["max_det"]))
+        self.min_confidence = float(config.get("min_confidence", self.DEFAULT_CONFIG["min_confidence"]))
         self.fallback_last_prediction = bool(config.get("fallback_last_prediction", self.DEFAULT_CONFIG["fallback_last_prediction"]))
+        self.fallback_missing_interpolation = bool(
+            config.get("fallback_missing_interpolation", self.DEFAULT_CONFIG["fallback_missing_interpolation"])
+        )
+        self.interpolation_max_gap = int(config.get("interpolation_max_gap", self.DEFAULT_CONFIG["interpolation_max_gap"]))
         self.include_empty_frames = bool(config.get("include_empty_frames", self.DEFAULT_CONFIG.get("include_empty_frames", False)))
 
         # --- Training-specific (之前未保存 -> 導致 epochs 等使用預設值) ---
@@ -124,6 +133,63 @@ class YOLOv11Model(TrackingModel):
                 continue
             rgb = p.apply_to_frame(rgb)
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    @staticmethod
+    def _is_valid_bbox(bbox: Optional[Tuple[float, float, float, float]]) -> bool:
+        if bbox is None:
+            return False
+        x, y, w, h = bbox
+        return bool(np.all(np.isfinite([x, y, w, h])) and w >= 2.0 and h >= 2.0)
+
+    def _segment_init_bbox(self, frame_bgr: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
+        import cv2
+
+        if frame_bgr is None or frame_bgr.size == 0:
+            return None
+        try:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return None
+
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, th1 = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, th2 = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        kernel = np.ones((3, 3), np.uint8)
+        th1 = cv2.morphologyEx(th1, cv2.MORPH_OPEN, kernel, iterations=1)
+        th1 = cv2.morphologyEx(th1, cv2.MORPH_CLOSE, kernel, iterations=1)
+        th2 = cv2.morphologyEx(th2, cv2.MORPH_OPEN, kernel, iterations=1)
+        th2 = cv2.morphologyEx(th2, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        def _best_bbox(mask: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return None
+            h_img, w_img = mask.shape[:2]
+            min_area = max(16.0, 0.0002 * float(w_img * h_img))
+            best = None
+            best_area = -1.0
+            for c in contours:
+                area = float(cv2.contourArea(c))
+                if area < min_area:
+                    continue
+                x, y, w, h = cv2.boundingRect(c)
+                if area > best_area:
+                    best_area = area
+                    best = (float(x), float(y), float(w), float(h))
+            return best
+
+        cand1 = _best_bbox(th1)
+        cand2 = _best_bbox(th2)
+        if cand1 is None and cand2 is None:
+            return None
+        if cand1 is None:
+            return cand2
+        if cand2 is None:
+            return cand1
+        area1 = cand1[2] * cand1[3]
+        area2 = cand2[2] * cand2[3]
+        return cand1 if area1 >= area2 else cand2
 
     def train(self, train_dataset, val_dataset=None, seed: int = 0, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """Export dataset to YOLO format (images+labels) and run Ultralytics training.
@@ -399,6 +465,7 @@ class YOLOv11Model(TrackingModel):
             raise RuntimeError(f"Cannot open video: {video_path}")
 
         preds: List[FramePrediction] = []
+        no_data_frames: List[int] = []
         idx = 0
         last_bbox: Optional[tuple] = None
         # small-batch prediction to reduce per-call overhead
@@ -425,8 +492,13 @@ class YOLOv11Model(TrackingModel):
                 )
             except Exception:
                 results_list = []
-            for res, fidx in zip(results_list or [], idx_buf):
+            for local_i, fidx in enumerate(idx_buf):
+                res = None
+                if results_list is not None and local_i < len(results_list):
+                    res = results_list[local_i]
                 bbox_added = False
+                candidate_bbox: Optional[Tuple[float, float, float, float]] = None
+                candidate_score: Optional[float] = None
                 try:
                     boxes = getattr(res, "boxes", None)
                     if boxes is not None and len(boxes) > 0:
@@ -438,20 +510,45 @@ class YOLOv11Model(TrackingModel):
                         h = max(1.0, y2 - y1)
                         score = float(confs[best])
                         bbox = (float(x1), float(y1), float(w), float(h))
-                        preds.append(FramePrediction(int(fidx), bbox, score))
-                        last_bbox = bbox
-                        bbox_added = True
+                        if self._is_valid_bbox(bbox) and score >= float(self.min_confidence):
+                            candidate_bbox = bbox
+                            candidate_score = score
                 except Exception:
                     bbox_added = False
-                if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
+
+                if candidate_bbox is not None:
+                    preds.append(FramePrediction(int(fidx), candidate_bbox, candidate_score))
+                    last_bbox = candidate_bbox
+                    bbox_added = True
+                elif self.fallback_last_prediction and last_bbox is not None:
                     preds.append(
                         FramePrediction(
                             frame_index=int(fidx),
                             bbox=last_bbox,
                             score=None,
                             is_fallback=True,
+                            bbox_source="prev_bbox",
                         )
                     )
+                    bbox_added = True
+                else:
+                    seg_bbox = self._segment_init_bbox(frames_buf[local_i])
+                    if self._is_valid_bbox(seg_bbox):
+                        preds.append(
+                            FramePrediction(
+                                frame_index=int(fidx),
+                                bbox=seg_bbox,  # type: ignore[arg-type]
+                                score=None,
+                                is_fallback=True,
+                                bbox_source="segmentation_init",
+                            )
+                        )
+                        last_bbox = seg_bbox
+                        bbox_added = True
+
+                if not bbox_added:
+                    no_data_frames.append(int(fidx))
+
             frames_buf.clear()
             idx_buf.clear()
         while True:
@@ -467,6 +564,12 @@ class YOLOv11Model(TrackingModel):
         _flush()
 
         cap.release()
+        if self.fallback_missing_interpolation:
+            preds = cubic_clip_interpolate_predictions(
+                preds,
+                max_gap=max(2, int(self.interpolation_max_gap)),
+                interpolated_bbox_source="interpolated_cubic",
+            )
         return preds
 
     def predict_frames(self, video_path: str, frame_indices: List[int]) -> List[FramePrediction]:
@@ -478,6 +581,7 @@ class YOLOv11Model(TrackingModel):
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
         preds: List[FramePrediction] = []
+        no_data_frames: List[int] = []
         last_bbox: Optional[tuple] = None
         try:
             batch_size = int(getattr(self, "inference_batch", 4) or 4)
@@ -502,8 +606,13 @@ class YOLOv11Model(TrackingModel):
                 )
             except Exception:
                 results_list = []
-            for res, fidx in zip(results_list or [], buf_indices):
+            for local_i, fidx in enumerate(buf_indices):
+                res = None
+                if results_list is not None and local_i < len(results_list):
+                    res = results_list[local_i]
                 bbox_added = False
+                candidate_bbox: Optional[Tuple[float, float, float, float]] = None
+                candidate_score: Optional[float] = None
                 try:
                     boxes = getattr(res, "boxes", None)
                     if boxes is not None and len(boxes) > 0:
@@ -515,20 +624,45 @@ class YOLOv11Model(TrackingModel):
                         h = max(1.0, y2 - y1)
                         score = float(confs[best])
                         bbox = (float(x1), float(y1), float(w), float(h))
-                        preds.append(FramePrediction(int(fidx), bbox, score))
-                        last_bbox = bbox
-                        bbox_added = True
+                        if self._is_valid_bbox(bbox) and score >= float(self.min_confidence):
+                            candidate_bbox = bbox
+                            candidate_score = score
                 except Exception:
                     bbox_added = False
-                if not bbox_added and self.fallback_last_prediction and last_bbox is not None:
+
+                if candidate_bbox is not None:
+                    preds.append(FramePrediction(int(fidx), candidate_bbox, candidate_score))
+                    last_bbox = candidate_bbox
+                    bbox_added = True
+                elif self.fallback_last_prediction and last_bbox is not None:
                     preds.append(
                         FramePrediction(
                             frame_index=int(fidx),
                             bbox=last_bbox,
                             score=None,
                             is_fallback=True,
+                            bbox_source="prev_bbox",
                         )
                     )
+                    bbox_added = True
+                else:
+                    seg_bbox = self._segment_init_bbox(buf_frames[local_i])
+                    if self._is_valid_bbox(seg_bbox):
+                        preds.append(
+                            FramePrediction(
+                                frame_index=int(fidx),
+                                bbox=seg_bbox,  # type: ignore[arg-type]
+                                score=None,
+                                is_fallback=True,
+                                bbox_source="segmentation_init",
+                            )
+                        )
+                        last_bbox = seg_bbox
+                        bbox_added = True
+
+                if not bbox_added:
+                    no_data_frames.append(int(fidx))
+
             buf_frames.clear(); buf_indices.clear()
         for idx in sorted(set(int(i) for i in frame_indices)):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
@@ -542,4 +676,10 @@ class YOLOv11Model(TrackingModel):
                 _flush()
         _flush()
         cap.release()
+        if self.fallback_missing_interpolation:
+            preds = cubic_clip_interpolate_predictions(
+                preds,
+                max_gap=max(2, int(self.interpolation_max_gap)),
+                interpolated_bbox_source="interpolated_cubic",
+            )
         return preds

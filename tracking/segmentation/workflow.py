@@ -257,11 +257,11 @@ def _resolve_device(device_hint: str) -> torch.device:
     return torch.device("cpu")
 
 
-def _dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def _dice_loss(logits: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
     probs = torch.sigmoid(logits)
-    num = (probs * target).sum(dim=(1, 2, 3)) * 2.0
-    den = probs.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
-    dice = (num + eps) / (den + eps)
+    num = (probs * target).sum(dim=(1, 2, 3)) * 2.0 + smooth
+    den = probs.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3)) + smooth
+    dice = num / den
     return 1.0 - dice.mean()
 
 

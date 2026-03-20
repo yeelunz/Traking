@@ -89,14 +89,60 @@ class MaskedROIResNetExtractor:
         device: str = "auto",
         batch_size: int = 32,
         input_size: int = 224,
+        pretrain_ckpt: Optional[str] = None,
     ):
         self._device_str = device
         self._batch_size = batch_size
         self._input_size = input_size
+        self._pretrain_ckpt = pretrain_ckpt
         self._model = None
+        self._projection = None
+        self._output_dim = RESNET_FEAT_DIM
         self._device = None
         self._mean = None
         self._std = None
+
+    @staticmethod
+    def _extract_state_dict(payload):
+        if isinstance(payload, dict):
+            for key in ("backbone_state_dict", "backbone", "state_dict", "model"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    return value
+            if any(hasattr(v, "shape") for v in payload.values()):
+                return payload
+        return None
+
+    @staticmethod
+    def _extract_projection_state_dict(payload):
+        if isinstance(payload, dict):
+            for key in ("projection_state_dict", "projection", "proj_state_dict", "proj"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    return value
+        return None
+
+    @staticmethod
+    def _strip_prefixes(state):
+        cleaned = {}
+        for k, v in state.items():
+            key = str(k)
+            for p in ("module.", "backbone.", "model.", "net."):
+                if key.startswith(p):
+                    key = key[len(p):]
+            cleaned[key] = v
+        return cleaned
+
+    @staticmethod
+    def _strip_projection_prefixes(state):
+        cleaned = {}
+        for k, v in state.items():
+            key = str(k)
+            for p in ("module.", "projection.", "proj.", "model."):
+                if key.startswith(p):
+                    key = key[len(p):]
+            cleaned[key] = v
+        return cleaned
 
     # ── Properties ───────────────────────────────────────────────────────
 
@@ -104,6 +150,10 @@ class MaskedROIResNetExtractor:
     def available(self) -> bool:
         """True when torch + torchvision are importable."""
         return _TORCH_OK and _TV_OK
+
+    @property
+    def output_dim(self) -> int:
+        return int(self._output_dim)
 
     # ── Lazy initialization ──────────────────────────────────────────────
 
@@ -143,6 +193,55 @@ class MaskedROIResNetExtractor:
         self._model.to(self._device)
         for p in self._model.parameters():
             p.requires_grad_(False)
+
+        if self._pretrain_ckpt:
+            try:
+                payload = torch.load(self._pretrain_ckpt, map_location="cpu")
+                raw_state = self._extract_state_dict(payload)
+                if raw_state is not None:
+                    state = self._strip_prefixes(raw_state)
+                    self._model.load_state_dict(state, strict=False)
+                    logger.info(
+                        "MaskedROIResNetExtractor: loaded pretrain checkpoint %s",
+                        self._pretrain_ckpt,
+                    )
+                else:
+                    logger.warning(
+                        "MaskedROIResNetExtractor: checkpoint has no state_dict: %s",
+                        self._pretrain_ckpt,
+                    )
+
+                proj_state = self._extract_projection_state_dict(payload)
+                if isinstance(proj_state, dict) and proj_state:
+                    proj_clean = self._strip_projection_prefixes(proj_state)
+                    emb_dim = None
+                    if isinstance(payload, dict) and payload.get("embedding_dim") is not None:
+                        emb_dim = int(payload.get("embedding_dim"))
+                    elif "0.weight" in proj_clean and hasattr(proj_clean["0.weight"], "shape"):
+                        emb_dim = int(proj_clean["0.weight"].shape[0])
+
+                    if emb_dim is not None and emb_dim > 0:
+                        self._projection = _tnn.Sequential(
+                            _tnn.Linear(RESNET_FEAT_DIM, emb_dim),
+                            _tnn.LayerNorm(emb_dim),
+                            _tnn.GELU(),
+                        )
+                        self._projection.load_state_dict(proj_clean, strict=False)
+                        self._projection.eval()
+                        self._projection.to(self._device)
+                        for p in self._projection.parameters():
+                            p.requires_grad_(False)
+                        self._output_dim = emb_dim
+                        logger.info(
+                            "MaskedROIResNetExtractor: loaded projection from pretrain checkpoint (dim=%d)",
+                            emb_dim,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "MaskedROIResNetExtractor: failed to load checkpoint %s (%s)",
+                    self._pretrain_ckpt,
+                    exc,
+                )
 
         self._mean = torch.tensor(
             [0.485, 0.456, 0.406], device=self._device
@@ -202,7 +301,7 @@ class MaskedROIResNetExtractor:
 
         Returns ``np.zeros(512, float32)`` on failure.
         """
-        zeros = np.zeros(RESNET_FEAT_DIM, dtype=np.float32)
+        zeros = np.zeros(self.output_dim, dtype=np.float32)
         if not self.available:
             return zeros
         self._ensure_model()
@@ -215,6 +314,8 @@ class MaskedROIResNetExtractor:
         tensor = (tensor - self._mean) / self._std
         with torch.no_grad():
             feat = self._model(tensor)
+            if self._projection is not None:
+                feat = self._projection(feat)
         return feat.cpu().numpy().flatten().astype(np.float32)
 
     def extract_from_video(
@@ -245,7 +346,7 @@ class MaskedROIResNetExtractor:
             Shape ``(len(samples), 512)``, dtype ``float32``.
         """
         N = len(samples)
-        empty = np.zeros((max(N, 1), RESNET_FEAT_DIM), dtype=np.float32)
+        empty = np.zeros((max(N, 1), self.output_dim), dtype=np.float32)
         if not self.available or N == 0:
             return empty[:N] if N else empty
         self._ensure_model()
@@ -255,7 +356,7 @@ class MaskedROIResNetExtractor:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             logger.warning("Cannot open video: %s", video_path)
-            return np.zeros((N, RESNET_FEAT_DIM), dtype=np.float32)
+            return np.zeros((N, self.output_dim), dtype=np.float32)
 
         try:
             for sample in samples:
@@ -300,7 +401,7 @@ class MaskedROIResNetExtractor:
         tensors = [self._preprocess_patch(patches[i]) for i in valid_indices]
 
         # 3. Batched forward pass
-        features = np.zeros((N, RESNET_FEAT_DIM), dtype=np.float32)
+        features = np.zeros((N, self.output_dim), dtype=np.float32)
         bs = self._batch_size
         for start in range(0, len(tensors), bs):
             end = min(start + bs, len(tensors))
@@ -310,6 +411,8 @@ class MaskedROIResNetExtractor:
             batch = (batch - self._mean) / self._std
             with torch.no_grad():
                 out = self._model(batch)
+                if self._projection is not None:
+                    out = self._projection(out)
             out_np = out.cpu().numpy().astype(np.float32)
             for j, idx in enumerate(batch_indices):
                 features[idx] = out_np[j]

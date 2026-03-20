@@ -12,7 +12,7 @@ reduction strategies:
 | MultiRocket         | ``autoencoder``            | Conv1d autoencoder pre-trained on |
 |                     |                            | TSC data; encoder output is used. |
 +---------------------+----------------------------+-----------------------------------+
-| Tabular (RF, LGBM…) | ``umap`` / ``lda``        | UMAP or sklearn LDA fitted on     |
+| Tabular (RF, LGBM…) | ``umap`` / ``lda`` / ``pls`` | UMAP / sklearn LDA / PLS fitted |
 |                     |                            | training features.                |
 +---------------------+----------------------------+-----------------------------------+
 
@@ -65,9 +65,11 @@ except ImportError:
 _SKLEARN_OK = False
 try:
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as _SklearnLDA
+    from sklearn.cross_decomposition import PLSRegression as _SklearnPLS
     _SKLEARN_OK = True
 except ImportError:
     _SklearnLDA = None  # type: ignore[assignment]
+    _SklearnPLS = None  # type: ignore[assignment]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -202,6 +204,60 @@ class LDAReducer:
     def set_state(self, state: Dict[str, Any]) -> None:
         self._model = state["model"]
         self._fitted = state["fitted"]
+
+
+class PLSReducer:
+    """Partial Least Squares regression for supervised tabular dim reduction.
+
+    Uses ``PLSRegression`` and returns latent X-scores as reduced features.
+    Works for binary / multi-class labels by fitting against numeric targets.
+    """
+
+    def __init__(self, n_components: int = 32):
+        if not _SKLEARN_OK:
+            raise RuntimeError(
+                "scikit-learn is required for PLS dim reduction. "
+                "Install with: pip install scikit-learn"
+            )
+        self.n_components = int(n_components)
+        self._model = _SklearnPLS(n_components=self.n_components)
+        self._fitted = False
+
+    @staticmethod
+    def _to_target(y: np.ndarray) -> np.ndarray:
+        y_arr = np.asarray(y)
+        if y_arr.ndim == 1:
+            return y_arr.reshape(-1, 1).astype(np.float64)
+        return y_arr.astype(np.float64)
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "PLSReducer":
+        X = np.asarray(X, dtype=np.float64)
+        y2 = self._to_target(y)
+        max_nc = max(1, min(X.shape[0], X.shape[1], self.n_components))
+        if max_nc != self.n_components:
+            self._model = _SklearnPLS(n_components=max_nc)
+            self.n_components = max_nc
+        self._model.fit(X, y2)
+        self._fitted = True
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("PLSReducer has not been fitted yet.")
+        X = np.asarray(X, dtype=np.float64)
+        return self._model.transform(X).astype(np.float32)
+
+    def fit_transform(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        self.fit(X, y)
+        return self.transform(X)
+
+    def get_state(self) -> Dict[str, Any]:
+        return {"model": self._model, "fitted": self._fitted, "n_components": self.n_components}
+
+    def set_state(self, state: Dict[str, Any]) -> None:
+        self._model = state["model"]
+        self._fitted = state["fitted"]
+        self.n_components = int(state.get("n_components", self.n_components))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -682,7 +738,7 @@ class ChannelUMAPReducer:
 # Factory helpers
 # ════════════════════════════════════════════════════════════════════════════
 
-_TABULAR_REDUCERS = {"umap", "lda"}
+_TABULAR_REDUCERS = {"umap", "lda", "pls"}
 _TSC_REDUCERS = {"autoencoder", "learned_projection"}
 
 
@@ -694,7 +750,7 @@ def get_tabular_reducer(
 
     Parameters
     ----------
-    name : ``"umap"`` or ``"lda"``
+    name : ``"umap"`` or ``"lda"`` or ``"pls"``
     params : optional dict forwarded to reducer constructor.
     """
     p = params or {}
@@ -711,6 +767,10 @@ def get_tabular_reducer(
         return LDAReducer(
             n_components=int(nc) if nc is not None else None,
             solver=str(p.get("solver", "svd")),
+        )
+    if name == "pls":
+        return PLSReducer(
+            n_components=int(p.get("n_components", 32)),
         )
     raise ValueError(f"Unknown tabular reducer: {name!r}. Choose from {_TABULAR_REDUCERS}")
 

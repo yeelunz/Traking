@@ -29,6 +29,54 @@ def ensure_metrics_available() -> None:
         )
 
 
+def _brier_decomposition(
+    y_true_bin: list[float],
+    y_prob: list[float],
+    *,
+    n_bins: int = 10,
+) -> Dict[str, float]:
+    """Murphy decomposition for binary Brier score.
+
+    BS = Reliability - Resolution + Uncertainty
+    """
+    n = len(y_true_bin)
+    if n == 0 or n != len(y_prob):
+        nan = float("nan")
+        return {
+            "reliability": nan,
+            "resolution": nan,
+            "uncertainty": nan,
+        }
+
+    n_bins = max(1, int(n_bins))
+    clipped = [max(0.0, min(1.0, float(p))) for p in y_prob]
+    o_bar = sum(float(o) for o in y_true_bin) / float(n)
+
+    groups: list[list[int]] = [[] for _ in range(n_bins)]
+    for idx, p in enumerate(clipped):
+        bin_idx = min(int(p * n_bins), n_bins - 1)
+        groups[bin_idx].append(idx)
+
+    reliability = 0.0
+    resolution = 0.0
+    for indices in groups:
+        if not indices:
+            continue
+        nk = float(len(indices))
+        fk = sum(clipped[i] for i in indices) / nk
+        ok = sum(y_true_bin[i] for i in indices) / nk
+        wk = nk / float(n)
+        reliability += wk * (fk - ok) ** 2
+        resolution += wk * (ok - o_bar) ** 2
+
+    uncertainty = o_bar * (1.0 - o_bar)
+    return {
+        "reliability": float(reliability),
+        "resolution": float(resolution),
+        "uncertainty": float(uncertainty),
+    }
+
+
 def summarise_classification(
     y_true,
     y_pred,
@@ -65,6 +113,26 @@ def summarise_classification(
             metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
         except Exception:
             metrics["roc_auc"] = float("nan")  # not computable (single-class fold)
+        try:
+            y_true_bin = [1.0 if int(y) == int(positive_label) else 0.0 for y in y_true]
+            y_prob_list = [float(p) for p in y_prob]
+            if len(y_true_bin) == len(y_prob_list) and len(y_true_bin) > 0:
+                brier = sum((max(0.0, min(1.0, p)) - o) ** 2 for p, o in zip(y_prob_list, y_true_bin)) / float(len(y_true_bin))
+                metrics["brier_score"] = float(brier)
+                dec = _brier_decomposition(y_true_bin, y_prob_list, n_bins=10)
+                metrics["reliability"] = dec["reliability"]
+                metrics["resolution"] = dec["resolution"]
+                metrics["uncertainty"] = dec["uncertainty"]
+            else:
+                metrics["brier_score"] = float("nan")
+                metrics["reliability"] = float("nan")
+                metrics["resolution"] = float("nan")
+                metrics["uncertainty"] = float("nan")
+        except Exception:
+            metrics["brier_score"] = float("nan")
+            metrics["reliability"] = float("nan")
+            metrics["resolution"] = float("nan")
+            metrics["uncertainty"] = float("nan")
     # Friendly short-key aliases
     metrics["precision"] = metrics["precision_positive"]
     metrics["recall"] = metrics["recall_positive"]

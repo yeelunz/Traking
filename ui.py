@@ -654,7 +654,7 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
         classifier_name = self.combo_class_classifier.currentText() if self.combo_class_classifier.count() else ''
         feature_params = dict(self.class_feature_params.get(feature_name, {})) if feature_name else {}
         classifier_params = dict(self.class_classifier_params.get(classifier_name, {})) if classifier_name else {}
-        fallback_feature = feature_name or (self.combo_class_feature.itemText(0) if self.combo_class_feature.count() else 'motion_only')
+        fallback_feature = feature_name or (self.combo_class_feature.itemText(0) if self.combo_class_feature.count() else 'DELETED_motion_only')
         fallback_classifier = classifier_name or (self.combo_class_classifier.itemText(0) if self.combo_class_classifier.count() else 'random_forest')
         class_cfg: Dict[str, Any] = {
             'enabled': class_enabled,

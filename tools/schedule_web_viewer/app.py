@@ -272,14 +272,48 @@ def _build_loso_combined(
     # covers the entire dataset without data leakage — making this the correct way
     # to compute AUC-ROC for a LOSO evaluation.
     roc_auc: Optional[float] = None
+    brier_score: Optional[float] = None
+    reliability: Optional[float] = None
+    resolution: Optional[float] = None
+    uncertainty: Optional[float] = None
     try:
         y_true_all = [p.get("label_true") for p in all_predictions if p.get("label_true") is not None and p.get("prob_positive") is not None]
         y_prob_all = [p.get("prob_positive") for p in all_predictions if p.get("label_true") is not None and p.get("prob_positive") is not None]
+        if len(y_true_all) == len(y_prob_all) and len(y_true_all) > 0:
+            y_true_bin = [1.0 if int(y) == 1 else 0.0 for y in y_true_all]
+            y_prob_clip = [max(0.0, min(1.0, float(p))) for p in y_prob_all]
+            brier_score = float(sum((p - o) ** 2 for p, o in zip(y_prob_clip, y_true_bin)) / float(len(y_true_bin)))
+
+            n = len(y_true_bin)
+            o_bar = sum(y_true_bin) / float(n)
+            n_bins = 10
+            groups: List[List[int]] = [[] for _ in range(n_bins)]
+            for idx, p in enumerate(y_prob_clip):
+                bin_idx = min(int(p * n_bins), n_bins - 1)
+                groups[bin_idx].append(idx)
+            rel = 0.0
+            res = 0.0
+            for indices in groups:
+                if not indices:
+                    continue
+                nk = float(len(indices))
+                fk = sum(y_prob_clip[i] for i in indices) / nk
+                ok = sum(y_true_bin[i] for i in indices) / nk
+                wk = nk / float(n)
+                rel += wk * (fk - ok) ** 2
+                res += wk * (ok - o_bar) ** 2
+            reliability = float(rel)
+            resolution = float(res)
+            uncertainty = float(o_bar * (1.0 - o_bar))
         if len(set(y_true_all)) >= 2:
             from sklearn.metrics import roc_auc_score as _roc_auc_score  # type: ignore
             roc_auc = float(_roc_auc_score(y_true_all, y_prob_all))
     except Exception:
         roc_auc = None
+        brier_score = None
+        reliability = None
+        resolution = None
+        uncertainty = None
 
     mean_threshold: Optional[float] = (
         float(sum(fold_thresholds) / len(fold_thresholds)) if fold_thresholds else None
@@ -295,6 +329,10 @@ def _build_loso_combined(
         "recall_positive": recall,
         "f1_positive": f1,
         "roc_auc": roc_auc,
+        "brier_score": brier_score,
+        "reliability": reliability,
+        "resolution": resolution,
+        "uncertainty": uncertainty,
         "tp": tp,
         "fp": fp,
         "fn": fn,
@@ -661,7 +699,7 @@ class ExperimentIndex:
                 "segmentation": aggregate_preview_dicts(seg_previews),
                 "classification": aggregate_preview_dicts(cls_previews),
             }
-            # Override classification roc_auc with the correctly pooled value
+            # Override classification roc_auc / brier decomposition with correctly pooled values
             # (individual-fold AUC is often null for LOSO with 1 test subject).
             try:
                 _fold_list = [{"exp_id": f.get("id")} for f in fold_public]
@@ -671,6 +709,35 @@ class ExperimentIndex:
                            if p.get("label_true") is not None and p.get("prob_positive") is not None]
                     _yp = [p.get("prob_positive") for p in _pool_preds
                            if p.get("label_true") is not None and p.get("prob_positive") is not None]
+                    if len(_yt) == len(_yp) and len(_yt) > 0:
+                        _yt_bin = [1.0 if int(y) == 1 else 0.0 for y in _yt]
+                        _yp_clip = [max(0.0, min(1.0, float(p))) for p in _yp]
+                        _pooled_brier = float(sum((p - o) ** 2 for p, o in zip(_yp_clip, _yt_bin)) / float(len(_yt_bin)))
+                        _n = len(_yt_bin)
+                        _o_bar = sum(_yt_bin) / float(_n)
+                        _n_bins = 10
+                        _groups: List[List[int]] = [[] for _ in range(_n_bins)]
+                        for _idx, _p in enumerate(_yp_clip):
+                            _bin_idx = min(int(_p * _n_bins), _n_bins - 1)
+                            _groups[_bin_idx].append(_idx)
+                        _rel = 0.0
+                        _res = 0.0
+                        for _indices in _groups:
+                            if not _indices:
+                                continue
+                            _nk = float(len(_indices))
+                            _fk = sum(_yp_clip[i] for i in _indices) / _nk
+                            _ok = sum(_yt_bin[i] for i in _indices) / _nk
+                            _wk = _nk / float(_n)
+                            _rel += _wk * (_fk - _ok) ** 2
+                            _res += _wk * (_ok - _o_bar) ** 2
+                        _unc = float(_o_bar * (1.0 - _o_bar))
+                        if aggregate_preview["classification"] is None:
+                            aggregate_preview["classification"] = {}
+                        aggregate_preview["classification"]["brier_score"] = _pooled_brier
+                        aggregate_preview["classification"]["reliability"] = float(_rel)
+                        aggregate_preview["classification"]["resolution"] = float(_res)
+                        aggregate_preview["classification"]["uncertainty"] = _unc
                     if len(set(_yt)) >= 2:
                         from sklearn.metrics import roc_auc_score as _roc_fn  # noqa: PLC0415
                         _pooled_auc = float(_roc_fn(_yt, _yp))

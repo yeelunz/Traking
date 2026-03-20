@@ -32,3 +32,4 @@ tqdm
 scikit-learn
 xgboost
 lightgbm
+tabpfn>=2.5,<3

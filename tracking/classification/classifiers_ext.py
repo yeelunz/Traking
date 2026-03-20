@@ -2,11 +2,12 @@
 
 提供以下新分類器（配合 classifiers.py 中已有的 RF / LightGBM / SVM）：
 
-表格式（需 motion_texture_static 特徵）：
+表格式（需 tab_v2 特徵）：
   - ``xgboost``   : XGBoost gradient-boosted trees
-  - ``tabpfn_v2`` : TabPFN v2（in-context learning；小樣本高效能）
+    - ``tabpfn_v2`` : TabPFN 2.5（相容舊名稱）
+    - ``tabpfn_2_5`` / ``tabpfn25`` / ``tabpfn2_5`` : TabPFN 2.5
 
-時序式（需 time_series 特徵提取器）：
+時序式（需 tsc_v2 特徵提取器）：
   - ``multirocket``  : MultiRocket — 官方 numba 實作包裝
   - ``patchtst``     : PatchTST  — 忠實 PyTorch 實作（多頭注意力 + RevIN + 多層 Encoder）
   - ``timemachine``  : TimeMachine — 忠實 PyTorch 實作（4 交錯 Mamba + 殘差 + RevIN）
@@ -22,6 +23,7 @@ import logging
 import os
 import pickle
 import sys
+import inspect
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -485,13 +487,16 @@ class XGBoostSubjectClassifier(_PickleSubjectClassifier):
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  TabPFN v2                                                              ║
+# ║  TabPFN 2.5                                                            ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 
 @register_classifier("tabpfn_v2")
+@register_classifier("tabpfn_2_5")
+@register_classifier("tabpfn25")
+@register_classifier("tabpfn2_5")
 class TabPFNV2SubjectClassifier(_PickleSubjectClassifier):
-    """TabPFN v2: in-context learning for small tabular classification.
+    """TabPFN 2.5: in-context learning for small tabular classification.
 
     If ``tabpfn`` is not installed **or** the gated model cannot be
     downloaded (e.g. missing HuggingFace authentication), the classifier
@@ -500,17 +505,24 @@ class TabPFNV2SubjectClassifier(_PickleSubjectClassifier):
     abort.
     """
 
-    name = "TabPFNv2"
+    name = "TabPFN2.5"
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         cfg = params or {}
+        self._cfg = dict(cfg)
         self._fallback: bool = False
         self._fallback_name: str = ""
+        self._finetune_requested: bool = bool(cfg.get("finetune", cfg.get("fine_tune", False)))
+        self._finetune_applied: bool = False
 
         if _TABPFN_OK:
             try:
                 n_ens = int(cfg.get("n_ensemble_configurations", 32))
-                kwargs: Dict[str, Any] = {"n_estimators": n_ens}
+                kwargs: Dict[str, Any] = {}
+                if "n_estimators" in cfg:
+                    kwargs["n_estimators"] = int(cfg.get("n_estimators", n_ens))
+                else:
+                    kwargs["n_estimators"] = n_ens
                 device = cfg.get("device", "cpu")
                 if device:
                     kwargs["device"] = str(device)
@@ -563,6 +575,56 @@ class TabPFNV2SubjectClassifier(_PickleSubjectClassifier):
                     "TabPFN is unavailable and no fallback classifier (xgboost / sklearn) is installed."
                 )
 
+    @staticmethod
+    def _supports_parameter(fn: Any, name: str) -> bool:
+        try:
+            sig = inspect.signature(fn)
+        except Exception:
+            return False
+        for p in sig.parameters.values():
+            if p.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+        return name in sig.parameters
+
+    @staticmethod
+    def _filter_supported_kwargs(fn: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k, v in (kwargs or {}).items():
+            if TabPFNV2SubjectClassifier._supports_parameter(fn, k):
+                out[k] = v
+        return out
+
+    def _build_finetune_fit_kwargs(self) -> Dict[str, Any]:
+        if self._model is None:
+            return {}
+        fit_fn = getattr(self._model, "fit", None)
+        if fit_fn is None:
+            return {}
+
+        kwargs: Dict[str, Any] = {}
+        if self._supports_parameter(fit_fn, "fit_mode"):
+            kwargs["fit_mode"] = str(self._cfg.get("fit_mode", "finetune"))
+        if self._supports_parameter(fit_fn, "finetune"):
+            kwargs["finetune"] = True
+        if self._supports_parameter(fit_fn, "fine_tune"):
+            kwargs["fine_tune"] = True
+
+        optional_keys = (
+            "max_steps",
+            "n_steps",
+            "epochs",
+            "learning_rate",
+            "lr",
+            "batch_size",
+            "weight_decay",
+            "patience",
+        )
+        for key in optional_keys:
+            if key in self._cfg and self._supports_parameter(fit_fn, key):
+                kwargs[key] = self._cfg[key]
+
+        return kwargs
+
     # ── public interface ─────────────────────────────────────────────────
 
     def fit(self, X, y) -> Dict[str, Any]:
@@ -572,9 +634,37 @@ class TabPFNV2SubjectClassifier(_PickleSubjectClassifier):
 
         if self._model is not None and not self._fallback:
             try:
-                self._model.fit(X, y)
+                fit_kwargs: Dict[str, Any] = {}
+                if self._finetune_requested:
+                    fit_kwargs = self._build_finetune_fit_kwargs()
+                    if fit_kwargs:
+                        logger.info("TabPFN fine-tuning enabled with args: %s", sorted(fit_kwargs.keys()))
+                    else:
+                        logger.warning(
+                            "finetune=True requested, but current tabpfn fit API does not expose finetune arguments; using standard fit()."
+                        )
+
+                try:
+                    self._model.fit(X, y, **fit_kwargs)
+                    self._finetune_applied = bool(self._finetune_requested and fit_kwargs)
+                except TypeError as _fit_kw_err:
+                    if self._finetune_requested and fit_kwargs:
+                        logger.warning(
+                            "TabPFN fine-tune kwargs rejected (%s); retrying standard fit().",
+                            _fit_kw_err,
+                        )
+                        self._model.fit(X, y)
+                        self._finetune_applied = False
+                    else:
+                        raise
+
                 self.classes_ = np.unique(y)
-                return {"n_train_samples": len(y), "backend": "tabpfn_v2"}
+                return {
+                    "n_train_samples": len(y),
+                    "backend": "tabpfn_2_5",
+                    "finetune_requested": bool(self._finetune_requested),
+                    "finetune_applied": bool(self._finetune_applied),
+                }
             except Exception as _fit_err:
                 logger.warning(
                     "TabPFN fit failed (%s); switching to fallback classifier.",
@@ -1098,8 +1188,8 @@ class PatchTSTSubjectClassifier(_PickleSubjectClassifier):
       - 可學習位置編碼
       - 分類頭: mean pooling → LayerNorm → Dropout → Linear
 
-    Input X 來自 ``time_series`` 特徵提取器（flat 4608-dim = 18 ch × 256 steps）
-    或 ``time_series_v3lite`` 特徵提取器（flat 3072-dim = 12 ch × 256 steps）。
+    Input X 來自 ``tsc_v2`` 特徵提取器（flat 4608-dim = 18 ch × 256 steps）
+    或 ``tsc_v3_lite`` 特徵提取器（flat 3072-dim = 12 ch × 256 steps）。
 
     透過 ``n_vars`` / ``n_steps`` 指定維度，或由 auto-detection 推斷。
     ``dim_reduction`` 支援 ``"learned_projection"``（end-to-end 時間軸降維）。
@@ -1446,8 +1536,8 @@ class TimeMachineSubjectClassifier(_PickleSubjectClassifier):
       - 分類頭: mean pool → LayerNorm → Dropout → Linear
 
     使用 mamba_ssm.Mamba（若有安裝），否則自動回退至 _SimpleMamba。
-    Input X 來自 ``time_series`` 特徵提取器（flat 2304-dim = 18 ch × 128 steps）
-    或 ``time_series_v3lite`` 特徵提取器（flat 3072-dim = 12 ch × 256 steps）。
+    Input X 來自 ``tsc_v2`` 特徵提取器（flat 2304-dim = 18 ch × 128 steps）
+    或 ``tsc_v3_lite`` 特徵提取器（flat 3072-dim = 12 ch × 256 steps）。
 
     可透過 ``n_vars`` / ``n_steps`` 指定維度，或由 auto-detection 推斷。
     ``dim_reduction`` 支援 ``"learned_projection"``（end-to-end Linear 降維）。

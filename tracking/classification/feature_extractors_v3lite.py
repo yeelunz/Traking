@@ -12,8 +12,8 @@ Design philosophy
 
 Registered names
 ~~~~~~~~~~~~~~~~
-- ``motion_static_lite``    : Non-TSC tabular  (33 D per video)
-- ``time_series_v3lite``    : TSC time-series  (12 ch × 256 = 3 072 D default)
+- ``tab_v3_lite``    : Non-TSC tabular  (33 D per video)
+- ``tsc_v3_lite``    : TSC time-series  (12 ch × 256 = 3 072 D default)
 """
 from __future__ import annotations
 
@@ -188,6 +188,51 @@ def _compute_patch_texture(gray: np.ndarray) -> Dict[str, float]:
         "grad_mean": float(np.mean(grad_mag)),
         "grad_std": float(np.std(grad_mag)),
     }
+
+
+def _pca_fit_transform(
+    X: np.ndarray,
+    target_dim: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n, d = X.shape
+    if d <= target_dim:
+        pad_w = target_dim - d
+        reduced = np.hstack([X, np.zeros((n, pad_w))]) if pad_w > 0 else X.copy()
+        return reduced, np.zeros(d), np.eye(target_dim, d)
+
+    mean = X.mean(axis=0)
+    Xc = X - mean
+    actual = min(target_dim, n, d)
+    try:
+        _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
+        comps = Vt[:actual]
+        reduced = Xc @ comps.T
+    except np.linalg.LinAlgError:
+        comps = np.eye(target_dim, d)
+        reduced = Xc[:, :target_dim]
+
+    if reduced.shape[1] < target_dim:
+        pad = np.zeros((n, target_dim - reduced.shape[1]))
+        reduced = np.hstack([reduced, pad])
+    return reduced, mean, comps
+
+
+def _pca_transform(
+    X: np.ndarray,
+    mean: np.ndarray,
+    components: np.ndarray,
+    target_dim: int,
+) -> np.ndarray:
+    n = X.shape[0]
+    Xc = X - mean
+    try:
+        reduced = Xc @ components.T
+    except (ValueError, np.linalg.LinAlgError):
+        reduced = Xc[:, :target_dim]
+    if reduced.shape[1] < target_dim:
+        pad = np.zeros((n, target_dim - reduced.shape[1]))
+        reduced = np.hstack([reduced, pad])
+    return reduced
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -409,12 +454,17 @@ def _compute_texture_lite(
     if not samples or not video_path:
         return zeros
 
-    # Select evenly spaced sample indices
+    # Select top N highest confidence frames (fallback to time-sorted if no scores)
     n = len(samples)
     if n <= n_sample_frames:
         indices = list(range(n))
     else:
-        indices = [int(round(i)) for i in np.linspace(0, n - 1, n_sample_frames)]
+        scored_indices = sorted(
+            range(n),
+            key=lambda i: getattr(samples[i], "score", 0.0) or 0.0,
+            reverse=True
+        )
+        indices = sorted(scored_indices[:n_sample_frames])
 
     # Read patches and compute per-frame texture
     per_frame: List[Dict[str, float]] = []
@@ -637,11 +687,11 @@ def _extract_ts_channels_lite(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# EXTRACTOR 1 (Non-TSC): motion_static_lite  — 33 D per video
+# EXTRACTOR 1 (Non-TSC): tab_v3_lite  — 33 D per video
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@register_feature_extractor("motion_static_lite")
+@register_feature_extractor("tab_v3_lite")
 class MotionStaticLiteFeatureExtractor(TrajectoryFeatureExtractor):
     """Lightweight non-TSC feature extractor (33 D, no deep learning).
 
@@ -661,6 +711,7 @@ class MotionStaticLiteFeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "aggregate_stats": ["mean", "std", "min", "max"],
         "n_texture_frames": 5,
+        "texture_mode": "freeze",
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -669,10 +720,20 @@ class MotionStaticLiteFeatureExtractor(TrajectoryFeatureExtractor):
             cfg.get("aggregate_stats", ["mean", "std", "min", "max"])
         )
         self._n_tex_frames = int(cfg.get("n_texture_frames", 5))
+        self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
+        if self._texture_mode != "freeze":
+            logger.warning(
+                "tab_v3_lite uses GLCM handcrafted texture; forcing texture_mode=freeze (non-learnable)."
+            )
+            self._texture_mode = "freeze"
         self._video_keys = list(LITE_VIDEO_KEYS)
         self._subject_keys = _build_subject_keys(
             self._video_keys, self._subject_stats
         )
+        self._pca_mean: Optional[np.ndarray] = None
+        self._pca_components: Optional[np.ndarray] = None
+        self._feat_mean: Optional[np.ndarray] = None
+        self._feat_std: Optional[np.ndarray] = None
 
     def feature_order(self, level: str = "video") -> Sequence[str]:
         return (
@@ -706,13 +767,86 @@ class MotionStaticLiteFeatureExtractor(TrajectoryFeatureExtractor):
             video_features, self._video_keys, self._subject_stats
         )
 
+    def finalize_batch(
+        self,
+        features_list: Sequence[Dict[str, float]],
+        *,
+        fit: bool = True,
+    ) -> Sequence[Dict[str, float]]:
+        if not features_list:
+            return []
+
+        X_tex = np.array(
+            [[feat.get(k, 0.0) for k in LITE_TEXTURE_KEYS] for feat in features_list],
+            dtype=np.float64,
+        )
+
+        target = len(LITE_TEXTURE_KEYS)
+        if fit:
+            reduced, self._pca_mean, self._pca_components = _pca_fit_transform(X_tex, target)
+        else:
+            if self._pca_mean is None or self._pca_components is None:
+                raise RuntimeError(
+                    "GLCM texture PCA state is not fitted. finalize_batch(fit=True) must run first."
+                )
+            reduced = _pca_transform(X_tex, self._pca_mean, self._pca_components, target)
+
+        out: List[Dict[str, float]] = []
+        for i, feat in enumerate(features_list):
+            new_feat = OrderedDict((k, float(feat.get(k, 0.0))) for k in self._video_keys)
+            for j, key in enumerate(LITE_TEXTURE_KEYS):
+                new_feat[key] = float(reduced[i, j])
+            out.append(new_feat)
+
+        mats = np.array(
+            [[feat.get(k, 0.0) for k in self._video_keys] for feat in out],
+            dtype=np.float64,
+        )
+        if fit:
+            self._feat_mean = mats.mean(axis=0)
+            self._feat_std = mats.std(axis=0)
+            self._feat_std = np.where(self._feat_std < 1e-9, 1.0, self._feat_std)
+        else:
+            if self._feat_mean is None or self._feat_std is None:
+                raise RuntimeError(
+                    "tab_v3_lite global z-score is not fitted. finalize_batch(fit=True) must run first."
+                )
+
+        mats = (mats - self._feat_mean) / self._feat_std
+        np.nan_to_num(mats, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+        standardized: List[Dict[str, float]] = []
+        for i in range(len(out)):
+            row = OrderedDict()
+            for j, k in enumerate(self._video_keys):
+                row[k] = float(mats[i, j])
+            standardized.append(row)
+        return standardized
+
+    def get_state(self) -> Dict[str, Any]:
+        return {
+            "pca_mean": self._pca_mean,
+            "pca_components": self._pca_components,
+            "feat_mean": self._feat_mean,
+            "feat_std": self._feat_std,
+            "video_keys": list(self._video_keys),
+        }
+
+    def set_state(self, state: Dict[str, Any]) -> None:
+        if not isinstance(state, dict):
+            raise ValueError("tab_v3_lite state must be a dict")
+        self._pca_mean = state.get("pca_mean")
+        self._pca_components = state.get("pca_components")
+        self._feat_mean = state.get("feat_mean")
+        self._feat_std = state.get("feat_std")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-# EXTRACTOR 2 (TSC): time_series_v3lite  — 12 ch × 256 = 3,072 D (default)
+# EXTRACTOR 2 (TSC): tsc_v3_lite  — 12 ch × 256 = 3,072 D (default)
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@register_feature_extractor("time_series_v3lite")
+@register_feature_extractor("tsc_v3_lite")
 class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
     """Lightweight TSC time-series feature extractor (no deep learning).
 
@@ -750,6 +884,7 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
         "frame_h": 480.0,
         "interp_method": "cubic",
         "n_steps": N_TS_STEPS_LITE,        # default 256; set to 128 for compat
+        "texture_mode": "freeze",
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -758,6 +893,12 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
         self._frame_h = float(cfg.get("frame_h", 480.0))
         self._interp_method = str(cfg.get("interp_method", "cubic"))
         self._n_steps = int(cfg.get("n_steps", N_TS_STEPS_LITE))
+        self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
+        if self._texture_mode != "freeze":
+            logger.warning(
+                "tsc_v3_lite uses GLCM handcrafted texture; forcing texture_mode=freeze (non-learnable)."
+            )
+            self._texture_mode = "freeze"
 
         self._n_channels = N_TS_CHANNELS_LITE
         self._flat_len = self._n_channels * self._n_steps
@@ -765,6 +906,8 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
         self._subject_keys = self._video_keys
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
+        self._tex_pca_mean: Optional[np.ndarray] = None
+        self._tex_pca_components: Optional[np.ndarray] = None
 
     def feature_order(self, level: str = "video") -> Sequence[str]:
         return self._video_keys
@@ -828,6 +971,18 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
             vec = np.array([feat.get(k, 0.0) for k in self._video_keys], dtype=np.float64)
             mats[i] = vec.reshape(self._n_channels, self._n_steps)
 
+        # GLCM texture channels are non-learnable -> PCA route.
+        tex = mats[:, 9:12, :].transpose(0, 2, 1).reshape(-1, 3)
+        if fit:
+            tex_red, self._tex_pca_mean, self._tex_pca_components = _pca_fit_transform(tex, 3)
+        else:
+            if self._tex_pca_mean is None or self._tex_pca_components is None:
+                raise RuntimeError(
+                    "GLCM texture PCA state is not fitted. finalize_batch(fit=True) must run first."
+                )
+            tex_red = _pca_transform(tex, self._tex_pca_mean, self._tex_pca_components, 3)
+        mats[:, 9:12, :] = tex_red.reshape(len(features_list), self._n_steps, 3).transpose(0, 2, 1)
+
         if fit:
             # global stats per channel across all training videos and timesteps
             self._channel_mean = mats.mean(axis=(0, 2))
@@ -853,3 +1008,22 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
                 cleaned[k] = float(flat[j])
             result.append(cleaned)
         return result
+
+    def get_state(self) -> Dict[str, Any]:
+        return {
+            "channel_mean": self._channel_mean,
+            "channel_std": self._channel_std,
+            "tex_pca_mean": self._tex_pca_mean,
+            "tex_pca_components": self._tex_pca_components,
+            "n_channels": self._n_channels,
+            "n_steps": self._n_steps,
+            "video_keys": list(self._video_keys),
+        }
+
+    def set_state(self, state: Dict[str, Any]) -> None:
+        if not isinstance(state, dict):
+            raise ValueError("tsc_v3_lite state must be a dict")
+        self._channel_mean = state.get("channel_mean")
+        self._channel_std = state.get("channel_std")
+        self._tex_pca_mean = state.get("tex_pca_mean")
+        self._tex_pca_components = state.get("tex_pca_components")

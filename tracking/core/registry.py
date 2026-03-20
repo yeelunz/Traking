@@ -6,6 +6,7 @@ MODEL_REGISTRY: Dict[str, Any] = {}
 EVAL_REGISTRY: Dict[str, Any] = {}
 FEATURE_EXTRACTOR_REGISTRY: Dict[str, Any] = {}
 CLASSIFIER_REGISTRY: Dict[str, Any] = {}
+FUSION_MODULE_REGISTRY: Dict[str, Any] = {}
 SEGMENTATION_MODEL_REGISTRY: Dict[str, Any] = {}
 
 
@@ -44,6 +45,14 @@ def register_feature_extractor(name: str):
 def register_classifier(name: str):
     def deco(cls):
         CLASSIFIER_REGISTRY[name] = cls
+        cls.registry_name = name
+        return cls
+    return deco
+
+
+def register_fusion_module(name: str):
+    def deco(cls):
+        FUSION_MODULE_REGISTRY[name] = cls
         cls.registry_name = name
         return cls
     return deco

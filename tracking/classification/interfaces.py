@@ -43,3 +43,18 @@ class SubjectClassifier(Protocol):
 
     def load(self, path: str) -> None:
         """Load classifier state from disk (optional)."""
+
+
+class FusionModule(Protocol):
+    """Independent feature-fusion module used between extractor and classifier."""
+
+    name: str
+
+    def fit(self, X, y=None) -> "FusionModule":  # noqa: ANN001
+        """Optional fit step for fusion module state."""
+
+    def transform(self, X):  # noqa: ANN001
+        """Transform features before classification."""
+
+    def fit_transform(self, X, y=None):  # noqa: ANN001
+        """Fit + transform shortcut used during training."""

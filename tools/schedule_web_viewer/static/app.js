@@ -51,6 +51,10 @@ const CLASSIFICATION_SUMMARY_FIELDS = [
   { label: 'Recall', key: 'recall_positive', percent: true },
   { label: 'F1', key: 'f1_positive', percent: true },
   { label: 'ROC AUC', key: 'roc_auc', percent: true, allowNull: true },
+  { label: 'Brier Score', key: 'brier_score', decimals: 4 },
+  { label: 'Reliability', key: 'reliability', decimals: 4 },
+  { label: 'Resolution', key: 'resolution', decimals: 4 },
+  { label: 'Uncertainty', key: 'uncertainty', decimals: 4 },
   { label: 'Threshold', key: 'threshold_used', decimals: 4, chartExclude: true },
   { label: "Youden's J", key: 'youden_j', decimals: 4, chartExclude: true },
 ];
@@ -599,7 +603,8 @@ function renderLosoFoldTable(folds) {
     { label: 'Seg Centroid', format: (f) => formatWithStd(foldPreviewMetric(f, 'segmentation', 'centroid_mean'), foldPreviewMetric(f, 'segmentation', 'centroid_std')) },
     { label: 'Cls Acc', format: (f) => formatPercent(foldPreviewMetric(f, 'classification', 'accuracy')) },
     { label: 'Cls F1', format: (f) => formatPercent(foldPreviewMetric(f, 'classification', 'f1_positive')) },
-    { label: 'Cls AUC', format: (f) => formatNumber(foldPreviewMetric(f, 'classification', 'roc_auc'), 4) }
+    { label: 'Cls AUC', format: (f) => formatNumber(foldPreviewMetric(f, 'classification', 'roc_auc'), 4) },
+    { label: 'Cls Brier', format: (f) => formatNumber(foldPreviewMetric(f, 'classification', 'brier_score'), 4) }
   ];
   const thead = '<tr>' + columns.map((c) => `<th>${c.label}</th>`).join('') + '</tr>';
   const tbody = folds
@@ -901,6 +906,7 @@ function renderGroupOverview() {
           <div class="compare-metric"><label>Seg IoU</label><span>${formatPercent(previewMetric(exp, 'segmentation', 'iou_mean'))}</span></div>
           <div class="compare-metric"><label>Cls Acc</label><span>${formatPercent(previewMetric(exp, 'classification', 'accuracy'))}</span></div>
           <div class="compare-metric"><label>Cls F1</label><span>${formatPercent(previewMetric(exp, 'classification', 'f1_positive'))}</span></div>
+          <div class="compare-metric"><label>Cls Brier</label><span>${formatNumber(previewMetric(exp, 'classification', 'brier_score'), 4)}</span></div>
         </div>`;
       card.addEventListener('click', () => selectExperiment(exp.id));
       if (state.current && state.current.id === exp.id) {
@@ -969,6 +975,11 @@ function renderGroupOverview() {
         label: 'Cls AUC',
         key: 'cls_auc',
         format: (exp) => formatNumber(previewMetric(exp, 'classification', 'roc_auc'), 4)
+      },
+      {
+        label: 'Cls Brier',
+        key: 'cls_brier',
+        format: (exp) => formatNumber(previewMetric(exp, 'classification', 'brier_score'), 4)
       }
     ];
     const thead = '<tr>' + columns.map((c) => `<th>${c.label}</th>`).join('') + '</tr>';
@@ -1029,6 +1040,7 @@ function buildCards(metrics) {
     entries.push({ label: 'Cls F1', value: formatPercent(classification.f1_positive) });
     const aucVal = classification.roc_auc;
     entries.push({ label: 'Cls ROC AUC', value: (aucVal !== undefined && aucVal !== null) ? formatNumber(aucVal, 4) : 'N/A' });
+    entries.push({ label: 'Cls Brier', value: formatNumber(classification.brier_score, 4) });
   }
   entries.forEach((item) => {
     const div = document.createElement('div');

@@ -573,8 +573,8 @@ classification:
 | 名稱 | 說明 |
 |------|------|
 | `basic` | 基本 bbox 特徵（質心、大小、速度等） |
-| `motion_only` | 運動特徵（含卡爾曼平滑）：位移統計、曲率、角度變化、面積動態 |
-| `motion_texture` | 運動特徵 + 灰階直方圖紋理 |
+| `DELETED_motion_only` | 運動特徵（含卡爾曼平滑）：位移統計、曲率、角度變化、面積動態 |
+| `DELETED_motion_texture` | 運動特徵 + 灰階直方圖紋理 |
 | `texture_hybrid` | 運動 + 紋理描述子（梯度/灰階直方圖 + GLCM + LBP） |
 | `backbone_texture` | CNN 骨幹嵌入（MobileNetV2/ResNet34/DenseNet121/EfficientNetB2）+ 隨機投影降維 |
 

@@ -1,0 +1,25 @@
+texture_pretrain:
+  enable: true
+  backbone: convnext_tiny
+  num_classes: 2
+  input_size: 224
+  batch_size: 32
+  epochs: 30
+  lr: 1e-4
+  weight_decay: 1e-4
+  save_path: ckpt/convnext_tex_pretrain.pth
+  save_backbone_only: true
+  optimizer: adamw
+  scheduler: cosine
+  num_workers: 4
+  device: auto
+  amp: true
+  head_type: linear
+  hidden_dim: 256
+  dropout: 0.2
+  pretrained_imagenet: true
+  force_official_pretrained: true
+  cache_enabled: true
+  cache_dir: ckpt/texture_pretrain_cache
+  train_manifest: data/texture_pretrain/train.csv
+  val_manifest: data/texture_pretrain/val.csv

@@ -1,0 +1,17 @@
+{
+  "cache_key": "1313748e74189fd125c45596",
+  "identity": {
+    "schema": "texture_pretrain_cache_v1",
+    "backbone": "convnext_tiny",
+    "num_classes": 2,
+    "input_size": 96,
+    "head_type": "linear",
+    "hidden_dim": 256,
+    "dropout": 0.2,
+    "pretrained_imagenet": true,
+    "train_manifest_sha256": "a84d36e609d6112a5677d94a61f51327bc7b72ae7a84553b7ae5b5f381842277",
+    "val_manifest_sha256": "c1b75405dd6e6e42bbb1ea12ca651757b8b7b5222ff4a360f9aed5a099dbf86f"
+  },
+  "best_ckpt": "C:\\Users\\User\\Desktop\\code\\Traking\\results\\2026-03-20_11-09-58_schedule_5exp\\2026-03-20_11-46-20_mednext_clahe_global_tabv4_rf_concat_loso_n006\\classification\\texture_pretrain_auto\\best.pth",
+  "cache_ckpt": "C:\\Users\\User\\Desktop\\code\\Traking\\ckpt\\texture_pretrain_cache\\1313748e74189fd125c45596.pth"
+}

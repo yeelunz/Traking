@@ -84,6 +84,11 @@ def _global_standardize_feature_dicts(
         mean = X.mean(axis=0)
         std = X.std(axis=0)
         std = np.where(std < 1e-9, 1.0, std)
+        # Bypass z-score for deep network texture features (ResNet PCA)
+        for i, k in enumerate(keys):
+            if "resnet_pca" in k or "tex_pca" in k:
+                mean[i] = 0.0
+                std[i] = 1.0
     else:
         if mean is None or std is None:
             raise RuntimeError(
@@ -707,19 +712,70 @@ def _pca_transform(
     return reduced
 
 
+def _resolve_texture_reduce_method(texture_mode: str) -> str:
+    mode = str(texture_mode or "freeze").strip().lower()
+    if mode == "freeze":
+        return "pca"
+    if mode in {"learnable", "pretrain"}:
+        return "projection"
+    return "pca"
+
+
+def _projection_fit_transform(
+    X: np.ndarray,
+    target_dim: int,
+    *,
+    seed: int = 42,
+) -> Tuple[np.ndarray, np.ndarray]:
+    n, d = X.shape
+    if d <= target_dim:
+        pad_w = target_dim - d
+        reduced = np.hstack([X, np.zeros((n, pad_w))]) if pad_w > 0 else X.copy()
+        mat = np.eye(d, target_dim, dtype=np.float64)
+        return reduced, mat
+
+    rng = np.random.default_rng(int(seed) + d * 1009 + target_dim * 917)
+    mat = rng.standard_normal((d, target_dim), dtype=np.float64)
+    norm = np.sqrt(np.sum(mat * mat, axis=0, keepdims=True))
+    mat = mat / np.where(norm < 1e-12, 1.0, norm)
+    reduced = X @ mat
+    return reduced, mat
+
+
+def _projection_transform(
+    X: np.ndarray,
+    proj_mat: np.ndarray,
+    target_dim: int,
+) -> np.ndarray:
+    n, _ = X.shape
+    try:
+        reduced = X @ proj_mat
+    except (ValueError, np.linalg.LinAlgError):
+        reduced = X[:, :target_dim]
+    if reduced.shape[1] < target_dim:
+        pad = np.zeros((n, target_dim - reduced.shape[1]))
+        reduced = np.hstack([reduced, pad])
+    return reduced
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Singleton ResNet extractor (lazy, shared between both FE classes)
 # ═════════════════════════════════════════════════════════════════════════════
 
-_resnet_extractor: Optional[MaskedROIResNetExtractor] = None
+_resnet_extractors: Dict[Tuple[str, str], MaskedROIResNetExtractor] = {}
 
 
-def _get_resnet_extractor(device: str = "auto") -> MaskedROIResNetExtractor:
+def _get_resnet_extractor(
+    device: str = "auto",
+    pretrain_ckpt: Optional[str] = None,
+) -> MaskedROIResNetExtractor:
     """Return (and lazily create) a module-level ResNet extractor singleton."""
-    global _resnet_extractor
-    if _resnet_extractor is None:
-        _resnet_extractor = MaskedROIResNetExtractor(device=device)
-    return _resnet_extractor
+    key = (str(device), str(pretrain_ckpt or ""))
+    ext = _resnet_extractors.get(key)
+    if ext is None:
+        ext = MaskedROIResNetExtractor(device=device, pretrain_ckpt=pretrain_ckpt)
+        _resnet_extractors[key] = ext
+    return ext
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -727,7 +783,7 @@ def _get_resnet_extractor(device: str = "auto") -> MaskedROIResNetExtractor:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@register_feature_extractor("motion_texture_static")
+@register_feature_extractor("tab_v2")
 class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
     """Motion + CTS-Static + ResNet Texture (PCA) for tabular classifiers.
 
@@ -749,15 +805,32 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "resnet_device": "auto",
         "aggregate_stats": ["mean", "std", "min", "max"],
+        "texture_mode": "freeze",  # freeze | learnable | pretrain
+        "texture_backbone": "resnet18",
+        "texture_pretrain_ckpt": None,
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         cfg = params or {}
         # Legacy Kalman params accepted but ignored
         self._resnet_device = str(cfg.get("resnet_device", "auto"))
+        self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
+        self._texture_backbone = str(cfg.get("texture_backbone", "resnet18")).lower()
+        self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
+        self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
         self._subject_stats = list(
             cfg.get("aggregate_stats", ["mean", "std", "min", "max"])
         )
+
+        if self._texture_backbone not in {"resnet18", "resnet-18"}:
+            logger.warning(
+                "tab_v2 currently supports only resnet18 backbone; got %s. Fallback to resnet18.",
+                self._texture_backbone,
+            )
+        if self._texture_mode not in {"freeze", "learnable", "pretrain"}:
+            logger.warning("Unknown texture_mode=%s, fallback to freeze", self._texture_mode)
+            self._texture_mode = "freeze"
+            self._texture_reduce_method = "pca"
 
         self._motion_keys = list(MOTION_FEATURE_KEYS)          # 31
         self._static_keys = list(CTS_STATIC_FEATURE_KEYS)      # 35
@@ -778,6 +851,7 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
         # PCA state (fitted in finalize_batch)
         self._pca_mean: Optional[np.ndarray] = None
         self._pca_components: Optional[np.ndarray] = None
+        self._proj_matrix: Optional[np.ndarray] = None
         self._feat_mean: Optional[np.ndarray] = None
         self._feat_std: Optional[np.ndarray] = None
 
@@ -837,13 +911,11 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
         *,
         fit: bool = True,
     ) -> Sequence[Dict[str, float]]:
-        """Batch PCA on ResNet texture features.
+        """Batch texture reduction on ResNet texture features.
 
-        When ``fit=True`` (training set), PCA is fitted and the state is
-        stored.  When ``fit=False`` (test/validation), only
-        ``pca.transform()`` is used — **PCA parameters are never re-fitted
-        on non-training data**.  If PCA state is missing at transform time
-        a ``RuntimeError`` is raised instead of silently re-fitting.
+        Routing rule:
+        - texture_mode=freeze   -> PCA reduction
+        - texture_mode in {learnable, pretrain} -> projection reduction
         """
         raw_vecs, indices = [], []
         for i, feat in enumerate(features_list):
@@ -857,20 +929,31 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
         X_raw = np.array(raw_vecs, dtype=np.float64)
         target = self._tex_target
 
-        if fit:
-            reduced, self._pca_mean, self._pca_components = _pca_fit_transform(
-                X_raw, target
-            )
-        else:
-            if self._pca_mean is None or self._pca_components is None:
-                raise RuntimeError(
-                    "PCA state is not available.  finalize_batch(fit=True) must "
-                    "be called on the training set before finalize_batch(fit=False) "
-                    "is called on the test/validation set."
+        if self._texture_reduce_method == "pca":
+            if fit:
+                reduced, self._pca_mean, self._pca_components = _pca_fit_transform(
+                    X_raw, target
                 )
-            reduced = _pca_transform(
-                X_raw, self._pca_mean, self._pca_components, target
-            )
+            else:
+                if self._pca_mean is None or self._pca_components is None:
+                    raise RuntimeError(
+                        "PCA state is not available.  finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False) "
+                        "is called on the test/validation set."
+                    )
+                reduced = _pca_transform(
+                    X_raw, self._pca_mean, self._pca_components, target
+                )
+        else:
+            if fit:
+                reduced, self._proj_matrix = _projection_fit_transform(X_raw, target, seed=42)
+            else:
+                if self._proj_matrix is None:
+                    raise RuntimeError(
+                        "Projection state is not available. finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False)."
+                    )
+                reduced = _projection_transform(X_raw, self._proj_matrix, target)
 
         result = list(features_list)
         for idx, row_idx in enumerate(indices):
@@ -896,12 +979,13 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
         video_path: Optional[str],
     ) -> List[float]:
         """Extract ResNet features for first + last frame → flat list (1024)."""
-        raw_dim = RESNET_FEAT_DIM * 2  # 512 × 2
+        pre_ckpt = self._texture_pretrain_ckpt if self._texture_mode == "pretrain" else None
+        resnet = _get_resnet_extractor(self._resnet_device, pretrain_ckpt=pre_ckpt)
+        raw_dim = int(getattr(resnet, "output_dim", RESNET_FEAT_DIM)) * 2
         zeros = [0.0] * raw_dim
         if not samples or not video_path:
             return zeros
 
-        resnet = _get_resnet_extractor(self._resnet_device)
         if not resnet.available:
             logger.warning(
                 "ResNet unavailable; returning zero texture for %s", video_path
@@ -923,7 +1007,7 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@register_feature_extractor("time_series")
+@register_feature_extractor("tsc_v2")
 class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
     """Per-frame multivariate time-series features with ResNet texture channels.
 
@@ -954,6 +1038,9 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         "frame_h": 480.0,
         "resnet_device": "auto",
         "tex_pca_dim": N_TEX_PCA_TS,
+        "texture_mode": "freeze",  # freeze | learnable | pretrain
+        "texture_backbone": "resnet18",
+        "texture_pretrain_ckpt": None,
         # Temporal interpolation method for sparse annotations.
         # "cubic" (default, C2 continuity) or "linear" (fallback).
         "interp_method": "cubic",
@@ -965,7 +1052,21 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         self._frame_h = float(cfg.get("frame_h", 480.0))
         self._resnet_device = str(cfg.get("resnet_device", "auto"))
         self._tex_pca_dim = int(cfg.get("tex_pca_dim", N_TEX_PCA_TS))
+        self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
+        self._texture_backbone = str(cfg.get("texture_backbone", "resnet18")).lower()
+        self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
+        self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
         self._interp_method: str = str(cfg.get("interp_method", "cubic"))
+
+        if self._texture_backbone not in {"resnet18", "resnet-18"}:
+            logger.warning(
+                "tsc_v2 currently supports only resnet18 backbone; got %s. Fallback to resnet18.",
+                self._texture_backbone,
+            )
+        if self._texture_mode not in {"freeze", "learnable", "pretrain"}:
+            logger.warning("Unknown texture_mode=%s, fallback to freeze", self._texture_mode)
+            self._texture_mode = "freeze"
+            self._texture_reduce_method = "pca"
 
         self._flat_len = N_TS_VARS * N_TS_STEPS
         self._video_keys = [f"ts_{i:04d}" for i in range(self._flat_len)]
@@ -974,6 +1075,7 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         # PCA state for ResNet texture (fitted in finalize_batch)
         self._pca_mean: Optional[np.ndarray] = None
         self._pca_components: Optional[np.ndarray] = None
+        self._proj_matrix: Optional[np.ndarray] = None
         # Global channel-wise scaler state (fitted on training set only)
         self._channel_mean: Optional[np.ndarray] = None
         self._channel_std: Optional[np.ndarray] = None
@@ -1048,12 +1150,11 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         *,
         fit: bool = True,
     ) -> Sequence[Dict[str, float]]:
-        """Batch PCA on per-frame ResNet texture → fill channels 10–17.
+        """Batch texture reduction on per-frame ResNet texture → fill channels 10–17.
 
-        When ``fit=True`` (training set), PCA is fitted globally across all
-        training frames and the state is stored.  When ``fit=False``
-        (test/validation), only ``pca.transform()`` is used — **PCA
-        parameters are never re-fitted on non-training data**.
+        Routing rule:
+        - texture_mode=freeze   -> PCA reduction
+        - texture_mode in {learnable, pretrain} -> projection reduction
         """
         raw_mats, indices = [], []
         for i, feat in enumerate(features_list):
@@ -1069,20 +1170,31 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         all_frames = np.vstack(raw_mats)  # (total_frames, 512)
         target = self._tex_pca_dim
 
-        if fit:
-            reduced_all, self._pca_mean, self._pca_components = (
-                _pca_fit_transform(all_frames, target)
-            )
-        else:
-            if self._pca_mean is None or self._pca_components is None:
-                raise RuntimeError(
-                    "PCA state is not available.  finalize_batch(fit=True) must "
-                    "be called on the training set before finalize_batch(fit=False) "
-                    "is called on the test/validation set."
+        if self._texture_reduce_method == "pca":
+            if fit:
+                reduced_all, self._pca_mean, self._pca_components = (
+                    _pca_fit_transform(all_frames, target)
                 )
-            reduced_all = _pca_transform(
-                all_frames, self._pca_mean, self._pca_components, target
-            )
+            else:
+                if self._pca_mean is None or self._pca_components is None:
+                    raise RuntimeError(
+                        "PCA state is not available.  finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False) "
+                        "is called on the test/validation set."
+                    )
+                reduced_all = _pca_transform(
+                    all_frames, self._pca_mean, self._pca_components, target
+                )
+        else:
+            if fit:
+                reduced_all, self._proj_matrix = _projection_fit_transform(all_frames, target, seed=42)
+            else:
+                if self._proj_matrix is None:
+                    raise RuntimeError(
+                        "Projection state is not available. finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False)."
+                    )
+                reduced_all = _projection_transform(all_frames, self._proj_matrix, target)
 
         # Split back per video and inject into flat TS dict
         result = list(features_list)
@@ -1141,6 +1253,9 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
             self._channel_mean = mats.mean(axis=(0, 2))
             self._channel_std = mats.std(axis=(0, 2))
             self._channel_std = np.where(self._channel_std < 1e-9, 1.0, self._channel_std)
+            # Bypass z-score for deep network texture features
+            self._channel_mean[N_GEO_VARS:] = 0.0
+            self._channel_std[N_GEO_VARS:] = 1.0
         else:
             if self._channel_mean is None or self._channel_std is None:
                 raise RuntimeError(
@@ -1176,13 +1291,15 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         (not positions into the *samples* list).  For each resampled frame we
         locate the nearest annotated sample to obtain a valid crop bbox.
 
-        Returns ``(N_TS_STEPS, RESNET_FEAT_DIM)`` float32.
+        Returns ``(N_TS_STEPS, resnet_output_dim)`` float32.
         """
-        result = np.zeros((N_TS_STEPS, RESNET_FEAT_DIM), dtype=np.float32)
+        pre_ckpt = self._texture_pretrain_ckpt if self._texture_mode == "pretrain" else None
+        resnet = _get_resnet_extractor(self._resnet_device, pretrain_ckpt=pre_ckpt)
+        out_dim = int(getattr(resnet, "output_dim", RESNET_FEAT_DIM))
+        result = np.zeros((N_TS_STEPS, out_dim), dtype=np.float32)
         if not video_path or not samples or len(resample_frame_idx) == 0:
             return result
 
-        resnet = _get_resnet_extractor(self._resnet_device)
         if not resnet.available:
             return result
 
@@ -1692,7 +1809,7 @@ def _extract_ts_geo_channels_v2(
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@register_feature_extractor("motion_texture_static_v2")
+@register_feature_extractor("tab_v2_extend")
 class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
     """V2 motion + CTS-static + ResNet texture for tabular classifiers.
 
@@ -1710,15 +1827,32 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "resnet_device": "auto",
         "aggregate_stats": ["mean", "std", "min", "max"],
+        "texture_mode": "freeze",  # freeze | learnable | pretrain
+        "texture_backbone": "resnet18",
+        "texture_pretrain_ckpt": None,
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         cfg = params or {}
         # Legacy Kalman params accepted but ignored
         self._resnet_device = str(cfg.get("resnet_device", "auto"))
+        self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
+        self._texture_backbone = str(cfg.get("texture_backbone", "resnet18")).lower()
+        self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
+        self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
         self._subject_stats = list(
             cfg.get("aggregate_stats", ["mean", "std", "min", "max"])
         )
+
+        if self._texture_backbone not in {"resnet18", "resnet-18"}:
+            logger.warning(
+                "tab_v2_extend currently supports only resnet18 backbone; got %s. Fallback to resnet18.",
+                self._texture_backbone,
+            )
+        if self._texture_mode not in {"freeze", "learnable", "pretrain"}:
+            logger.warning("Unknown texture_mode=%s, fallback to freeze", self._texture_mode)
+            self._texture_mode = "freeze"
+            self._texture_reduce_method = "pca"
 
         self._motion_keys = list(MOTION_FEATURE_KEYS)               # 31
         self._static_keys = list(CTS_STATIC_V2_FEATURE_KEYS)        # 59
@@ -1739,6 +1873,7 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
         # PCA state
         self._pca_mean: Optional[np.ndarray] = None
         self._pca_components: Optional[np.ndarray] = None
+        self._proj_matrix: Optional[np.ndarray] = None
         self._feat_mean: Optional[np.ndarray] = None
         self._feat_std: Optional[np.ndarray] = None
 
@@ -1807,20 +1942,31 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
         X_raw = np.array(raw_vecs, dtype=np.float64)
         target = self._tex_target
 
-        if fit:
-            reduced, self._pca_mean, self._pca_components = _pca_fit_transform(
-                X_raw, target
-            )
-        else:
-            if self._pca_mean is None or self._pca_components is None:
-                raise RuntimeError(
-                    "PCA state is not available.  finalize_batch(fit=True) must "
-                    "be called on the training set before finalize_batch(fit=False) "
-                    "is called on the test/validation set."
+        if self._texture_reduce_method == "pca":
+            if fit:
+                reduced, self._pca_mean, self._pca_components = _pca_fit_transform(
+                    X_raw, target
                 )
-            reduced = _pca_transform(
-                X_raw, self._pca_mean, self._pca_components, target
-            )
+            else:
+                if self._pca_mean is None or self._pca_components is None:
+                    raise RuntimeError(
+                        "PCA state is not available.  finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False) "
+                        "is called on the test/validation set."
+                    )
+                reduced = _pca_transform(
+                    X_raw, self._pca_mean, self._pca_components, target
+                )
+        else:
+            if fit:
+                reduced, self._proj_matrix = _projection_fit_transform(X_raw, target, seed=42)
+            else:
+                if self._proj_matrix is None:
+                    raise RuntimeError(
+                        "Projection state is not available. finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False)."
+                    )
+                reduced = _projection_transform(X_raw, self._proj_matrix, target)
 
         result = list(features_list)
         for idx, row_idx in enumerate(indices):
@@ -1845,12 +1991,13 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
         samples: Sequence[FramePrediction],
         video_path: Optional[str],
     ) -> List[float]:
-        raw_dim = RESNET_FEAT_DIM * 2
+        pre_ckpt = self._texture_pretrain_ckpt if self._texture_mode == "pretrain" else None
+        resnet = _get_resnet_extractor(self._resnet_device, pretrain_ckpt=pre_ckpt)
+        raw_dim = int(getattr(resnet, "output_dim", RESNET_FEAT_DIM)) * 2
         zeros = [0.0] * raw_dim
         if not samples or not video_path:
             return zeros
 
-        resnet = _get_resnet_extractor(self._resnet_device)
         if not resnet.available:
             logger.warning(
                 "ResNet unavailable; returning zero texture for %s", video_path
@@ -1872,7 +2019,7 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@register_feature_extractor("time_series_v2")
+@register_feature_extractor("tsc_v2_extend")
 class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
     """V2 per-frame multivariate time-series features.
 
@@ -1909,6 +2056,9 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
         "frame_h": 480.0,
         "resnet_device": "auto",
         "tex_pca_dim": N_TEX_PCA_TS_V2,
+        "texture_mode": "freeze",  # freeze | learnable | pretrain
+        "texture_backbone": "resnet18",
+        "texture_pretrain_ckpt": None,
         "interp_method": "cubic",
     }
 
@@ -1918,7 +2068,21 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
         self._frame_h = float(cfg.get("frame_h", 480.0))
         self._resnet_device = str(cfg.get("resnet_device", "auto"))
         self._tex_pca_dim = int(cfg.get("tex_pca_dim", N_TEX_PCA_TS_V2))
+        self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
+        self._texture_backbone = str(cfg.get("texture_backbone", "resnet18")).lower()
+        self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
+        self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
         self._interp_method: str = str(cfg.get("interp_method", "cubic"))
+
+        if self._texture_backbone not in {"resnet18", "resnet-18"}:
+            logger.warning(
+                "tsc_v2_extend currently supports only resnet18 backbone; got %s. Fallback to resnet18.",
+                self._texture_backbone,
+            )
+        if self._texture_mode not in {"freeze", "learnable", "pretrain"}:
+            logger.warning("Unknown texture_mode=%s, fallback to freeze", self._texture_mode)
+            self._texture_mode = "freeze"
+            self._texture_reduce_method = "pca"
 
         self._flat_len = N_TS_VARS_V2 * N_TS_STEPS_V2
         self._video_keys = [f"ts2_{i:04d}" for i in range(self._flat_len)]
@@ -1926,6 +2090,7 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
 
         self._pca_mean: Optional[np.ndarray] = None
         self._pca_components: Optional[np.ndarray] = None
+        self._proj_matrix: Optional[np.ndarray] = None
 
     def feature_order(self, level: str = "video") -> Sequence[str]:
         return self._video_keys
@@ -2006,20 +2171,31 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
         all_frames = np.vstack(raw_mats)
         target = self._tex_pca_dim
 
-        if fit:
-            reduced_all, self._pca_mean, self._pca_components = (
-                _pca_fit_transform(all_frames, target)
-            )
-        else:
-            if self._pca_mean is None or self._pca_components is None:
-                raise RuntimeError(
-                    "PCA state is not available.  finalize_batch(fit=True) must "
-                    "be called on the training set before finalize_batch(fit=False) "
-                    "is called on the test/validation set."
+        if self._texture_reduce_method == "pca":
+            if fit:
+                reduced_all, self._pca_mean, self._pca_components = (
+                    _pca_fit_transform(all_frames, target)
                 )
-            reduced_all = _pca_transform(
-                all_frames, self._pca_mean, self._pca_components, target
-            )
+            else:
+                if self._pca_mean is None or self._pca_components is None:
+                    raise RuntimeError(
+                        "PCA state is not available.  finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False) "
+                        "is called on the test/validation set."
+                    )
+                reduced_all = _pca_transform(
+                    all_frames, self._pca_mean, self._pca_components, target
+                )
+        else:
+            if fit:
+                reduced_all, self._proj_matrix = _projection_fit_transform(all_frames, target, seed=42)
+            else:
+                if self._proj_matrix is None:
+                    raise RuntimeError(
+                        "Projection state is not available. finalize_batch(fit=True) must "
+                        "be called on the training set before finalize_batch(fit=False)."
+                    )
+                reduced_all = _projection_transform(all_frames, self._proj_matrix, target)
 
         result = list(features_list)
         offset = 0
@@ -2073,6 +2249,9 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
             self._channel_mean = mats.mean(axis=(0, 2))
             self._channel_std = mats.std(axis=(0, 2))
             self._channel_std = np.where(self._channel_std < 1e-9, 1.0, self._channel_std)
+            # Bypass z-score for deep network texture features
+            self._channel_mean[N_GEO_VARS_V2:] = 0.0
+            self._channel_std[N_GEO_VARS_V2:] = 1.0
         else:
             if self._channel_mean is None or self._channel_std is None:
                 raise RuntimeError(
@@ -2106,11 +2285,13 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
 
         Reuses the same nearest-neighbour lookup logic as V1.
         """
-        result = np.zeros((N_TS_STEPS_V2, RESNET_FEAT_DIM), dtype=np.float32)
+        pre_ckpt = self._texture_pretrain_ckpt if self._texture_mode == "pretrain" else None
+        resnet = _get_resnet_extractor(self._resnet_device, pretrain_ckpt=pre_ckpt)
+        out_dim = int(getattr(resnet, "output_dim", RESNET_FEAT_DIM))
+        result = np.zeros((N_TS_STEPS_V2, out_dim), dtype=np.float32)
         if not video_path or not samples or len(resample_frame_idx) == 0:
             return result
 
-        resnet = _get_resnet_extractor(self._resnet_device)
         if not resnet.available:
             return result
 

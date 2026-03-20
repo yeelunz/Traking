@@ -64,10 +64,10 @@ def _build_extractor(name: str, params=None):
 
 class TestMotionOnly:
     def test_registered(self):
-        assert "motion_only" in FEATURE_EXTRACTOR_REGISTRY
+        assert "DELETED_motion_only" in FEATURE_EXTRACTOR_REGISTRY
 
     def test_video_feature_keys(self):
-        ext = _build_extractor("motion_only")
+        ext = _build_extractor("DELETED_motion_only")
         samples = _dummy_predictions()
         feats = ext.extract_video(samples)
         video_keys = ext.feature_order("video")
@@ -75,18 +75,18 @@ class TestMotionOnly:
         assert all(np.isfinite(v) for v in feats.values())
 
     def test_empty_samples(self):
-        ext = _build_extractor("motion_only")
+        ext = _build_extractor("DELETED_motion_only")
         feats = ext.extract_video([])
         assert all(v == 0.0 for v in feats.values())
 
     def test_single_sample(self):
-        ext = _build_extractor("motion_only")
+        ext = _build_extractor("DELETED_motion_only")
         feats = ext.extract_video(_dummy_predictions(1))
         assert feats["num_points"] == 1.0
         assert feats["path_length"] == 0.0
 
     def test_subject_aggregation(self):
-        ext = _build_extractor("motion_only")
+        ext = _build_extractor("DELETED_motion_only")
         v1 = ext.extract_video(_dummy_predictions(4))
         v2 = ext.extract_video(_dummy_predictions(6))
         agg = ext.aggregate_subject([v1, v2])
@@ -111,10 +111,10 @@ class TestMotionOnly:
 
 class TestMotionTexture:
     def test_registered(self):
-        assert "motion_texture" in FEATURE_EXTRACTOR_REGISTRY
+        assert "DELETED_motion_texture" in FEATURE_EXTRACTOR_REGISTRY
 
     def test_video_feature_keys_with_raw(self, tmp_path):
-        ext = _build_extractor("motion_texture", {"texture_patch_size": 32})
+        ext = _build_extractor("DELETED_motion_texture", {"texture_patch_size": 32})
         video_path = _make_temp_video(str(tmp_path))
         samples = _dummy_predictions()
         feats = ext.extract_video(samples, video_path=video_path)
@@ -122,7 +122,7 @@ class TestMotionTexture:
         assert "_raw_texture_vec" in feats
 
     def test_finalize_batch_removes_raw(self, tmp_path):
-        ext = _build_extractor("motion_texture", {"texture_patch_size": 32})
+        ext = _build_extractor("DELETED_motion_texture", {"texture_patch_size": 32})
         video_path = _make_temp_video(str(tmp_path))
         s1 = _dummy_predictions(4)
         s2 = _dummy_predictions(6)
@@ -137,7 +137,7 @@ class TestMotionTexture:
 
     def test_pca_reuse(self, tmp_path):
         """After fit=True, fit=False should use stored PCA."""
-        ext = _build_extractor("motion_texture", {"texture_patch_size": 32})
+        ext = _build_extractor("DELETED_motion_texture", {"texture_patch_size": 32})
         video_path = _make_temp_video(str(tmp_path))
         samples = _dummy_predictions(5)
         train_feats = [ext.extract_video(samples, video_path=video_path) for _ in range(3)]
@@ -150,7 +150,7 @@ class TestMotionTexture:
         assert "_raw_texture_vec" not in test_out[0]
 
     def test_subject_aggregation(self, tmp_path):
-        ext = _build_extractor("motion_texture", {"texture_patch_size": 32})
+        ext = _build_extractor("DELETED_motion_texture", {"texture_patch_size": 32})
         video_path = _make_temp_video(str(tmp_path))
         f1 = ext.extract_video(_dummy_predictions(4), video_path=video_path)
         f2 = ext.extract_video(_dummy_predictions(5), video_path=video_path)
@@ -161,13 +161,13 @@ class TestMotionTexture:
         assert agg["video_count"] == pytest.approx(2.0)
 
     def test_no_video_path_texture_zeros(self):
-        ext = _build_extractor("motion_texture")
+        ext = _build_extractor("DELETED_motion_texture")
         feats = ext.extract_video(_dummy_predictions(3), video_path=None)
         raw_vec = feats.get("_raw_texture_vec", [])
         assert all(v == 0.0 for v in raw_vec)
 
     def test_csa_features_present(self, tmp_path):
-        ext = _build_extractor("motion_texture")
+        ext = _build_extractor("DELETED_motion_texture")
         video_path = _make_temp_video(str(tmp_path))
         feats = ext.extract_video(_dummy_predictions(5), video_path=video_path)
         assert feats.get("csa_first_area", 0.0) > 0
