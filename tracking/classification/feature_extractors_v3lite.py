@@ -575,7 +575,9 @@ def _extract_ts_channels_lite(
     eq_diam_sparse = eq_diams
     aspect_sparse = bboxes[:, 2] / (bboxes[:, 3] + 1e-9)
 
-    # ── Hampel on seg-derived channels only (not pre-smoothed upstream) ──
+    # ── Hampel on sparse channels (include centroid for classification path) ──
+    cx_sparse = _condition_sparse(cx_sparse)
+    cy_sparse = _condition_sparse(cy_sparse)
     csa_sparse = _condition_sparse(csa_sparse)
     eq_diam_sparse = _condition_sparse(eq_diam_sparse)
 
@@ -618,7 +620,9 @@ def _extract_ts_channels_lite(
     homogeneity_full = _interp_channel(t_known, tex_homogeneity, t_all, interp_method)
     gray_full = _interp_channel(t_known, tex_gray, t_all, interp_method)
 
-    # ── Post-interpolation S-G smoothing (seg + texture channels) ──
+    # ── Post-interpolation S-G smoothing (include centroid channels) ──
+    cx_full = _condition_dense(cx_full)
+    cy_full = _condition_dense(cy_full)
     csa_full = _condition_dense(csa_full)
     eq_diam_full = _condition_dense(eq_diam_full)
     contrast_full = _condition_dense(contrast_full)

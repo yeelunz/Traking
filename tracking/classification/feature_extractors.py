@@ -178,14 +178,10 @@ def _compute_motion_features(
     Parameters ``kalman_process_noise`` and ``kalman_measurement_noise``
     are kept in the signature for backward compatibility but are **ignored**.
 
-    NOTE (2025-06): Upstream trajectory filtering (multi-scale Hampel + bidi
-    S-G via ``trajectory_filter.filter_detections``) is now applied to **both**
-    test predictions and ground-truth training trajectories *before* they are
-    passed to the feature extractor.  Re-smoothing here would cause
-    double-smoothing (over-attenuation of legitimate high-frequency dynamics)
-    and would also re-introduce Hampel on GT trajectories that were explicitly
-    designed to bypass outlier removal.  Therefore the centroids are used
-    as-is from the input FramePrediction objects.
+    NOTE: For classification feature stability, centroid channels are
+    conditioned again in this stage using Hampel + bidirectional S-G.  This
+    stage operates on the sequence consumed by the classifier and remains
+    independent from detection-time trajectory conditioning.
     """
     zeros = OrderedDict((k, 0.0) for k in MOTION_FEATURE_KEYS)
     if not samples:
@@ -196,9 +192,11 @@ def _compute_motion_features(
     bboxes = np.asarray([s.bbox for s in samples], dtype=np.float64)
     areas = bboxes[:, 2] * bboxes[:, 3]
 
-    # Upstream trajectory_filter already applied appropriate smoothing;
-    # use pre-smoothed centroids directly (no double-smoothing).
-    centers = raw_centers
+    # Classification-stage centroid conditioning (Hampel + S-G).
+    try:
+        centers = _smooth_trajectory_2d(raw_centers, frames)
+    except Exception:
+        centers = raw_centers
 
     n = len(samples)
     duration = float(frames[-1] - frames[0]) if n > 1 else 0.0

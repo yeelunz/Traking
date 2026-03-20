@@ -610,12 +610,9 @@ def _extract_ts_geo_channels(
     t_known = frame_indices.astype(np.float64)
 
     # ── Pre-interpolation: Hampel filter on sparse known values ──────────
-    # Channels 0-4, 9 (cx, cy, bw, bh, area, flatness) are already smoothed
-    # by upstream trajectory_filter (Hampel+S-G for test, S-G for GT).
-    # Re-applying Hampel would cause double-smoothing and over-attenuation
-    # of legitimate high-frequency dynamics.  Only seg-derived channels
-    # (circularity, eq_diam) genuinely benefit from outlier removal here.
-    _HAMPEL_CHANNELS = {6, 7}  # circularity, eq_diam only (seg-derived, not pre-smoothed)
+    # Classification path uses a dedicated centroid conditioning stage to
+    # stabilize downstream motion-feature distribution.
+    _HAMPEL_CHANNELS = {0, 1, 6, 7}  # cx, cy, circularity, eq_diam
     for ch in _HAMPEL_CHANNELS:
         if ch < N_GEO_VARS and ch != SPEED_CH:
             sparse[:, ch] = _condition_sparse_channel(sparse[:, ch])
@@ -629,9 +626,7 @@ def _extract_ts_geo_channels(
         )
 
     # ── Post-interpolation: Savitzky-Golay smoothing on dense timeline ───
-    # Only seg-derived channels need post-interpolation smoothing.
-    # Positional/size channels (0-4, 9) are already smoothed upstream.
-    _SG_CHANNELS = {5, 6, 7}  # seg_area, circularity, eq_diam
+    _SG_CHANNELS = {0, 1, 5, 6, 7}  # cx, cy, seg_area, circularity, eq_diam
     for ch in _SG_CHANNELS:
         if ch < N_GEO_VARS and ch != SPEED_CH:
             timeline[:, ch] = _condition_dense_channel(timeline[:, ch])
@@ -1675,8 +1670,7 @@ def _extract_ts_geo_channels_v2(
         sparse[i, 9] = float(bw / (bh + 1e-9))
 
     # ── Hampel on sparse data ──
-    # Only seg-derived channels (not pre-smoothed by upstream trajectory_filter)
-    _HAMPEL_CHS = {6, 7}  # circularity, eq_diam
+    _HAMPEL_CHS = {0, 1, 6, 7}  # cx, cy, circularity, eq_diam
     for ch in _HAMPEL_CHS:
         if ch < N_GEO_VARS and ch != SPEED_CH:
             sparse[:, ch] = _condition_sparse_channel(sparse[:, ch])
@@ -1695,8 +1689,7 @@ def _extract_ts_geo_channels_v2(
         )
 
     # ── Savitzky-Golay on dense timeline ──
-    # Only seg-derived channels that weren't pre-smoothed upstream
-    _SG_CHS = {5, 6, 7}  # seg_area, circularity, eq_diam
+    _SG_CHS = {0, 1, 5, 6, 7}  # cx, cy, seg_area, circularity, eq_diam
     for ch in _SG_CHS:
         if ch < N_GEO_VARS and ch != SPEED_CH:
             timeline[:, ch] = _condition_dense_channel(timeline[:, ch])
