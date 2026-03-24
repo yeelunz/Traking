@@ -200,6 +200,7 @@
             <div class="section-header">
               <h3>Classification 結果</h3>
             </div>
+            <p id="classification-summary-explain" class="hint"></p>
             <div id="classification-threshold-panel" class="threshold-panel hidden">
               <div class="threshold-card">
                 <div class="threshold-card-header">
@@ -240,17 +241,48 @@
                     <div><label>F1</label><span id="classification-threshold-f1">—</span></div>
                   </div>
                 </div>
+                <!-- 全域固定 0.5 對照 -->
+                <div class="threshold-row-label">對照分析 (Global threshold=0.500)</div>
+                <div class="threshold-grid">
+                  <div class="threshold-main">
+                    <span class="threshold-label">固定值</span>
+                    <strong id="classification-threshold-global-value">0.500</strong>
+                    <small id="classification-threshold-global-sample">全部 predictions 單一閾值重算</small>
+                  </div>
+                  <div class="threshold-metrics">
+                    <div><label>Acc</label><span id="classification-threshold-global-acc">—</span></div>
+                    <div><label>Precision</label><span id="classification-threshold-global-precision">—</span></div>
+                    <div><label>Recall</label><span id="classification-threshold-global-recall">—</span></div>
+                    <div><label>F1</label><span id="classification-threshold-global-f1">—</span></div>
+                  </div>
+                </div>
                 <p id="classification-threshold-note" class="threshold-note"></p>
               </div>
             </div>
             <div class="grid summary-grid">
               <div>
-                <div class="summary-header"><h4>分類彙總</h4></div>
+                <div class="summary-header"><h4>分類彙總（主報告值）</h4></div>
                 <table id="classification-summary-table" class="summary-table"></table>
               </div>
               <div>
                 <div class="summary-header"><h4>混淆矩陣</h4></div>
                 <div id="confusion-matrix" class="confusion-matrix-container"></div>
+              </div>
+            </div>
+            <div id="classification-feature-importance" class="hidden" style="margin-top:1rem;">
+              <div class="summary-header">
+                <h4>特徵重要度（Top/Bottom 10）</h4>
+              </div>
+              <p id="classification-fi-meta" class="hint"></p>
+              <div class="grid summary-grid">
+                <div>
+                  <div class="summary-header"><h4>Top 10 重要特徵</h4></div>
+                  <table id="classification-fi-top-table" class="summary-table"></table>
+                </div>
+                <div>
+                  <div class="summary-header"><h4>Top 10 不重要特徵</h4></div>
+                  <table id="classification-fi-bottom-table" class="summary-table"></table>
+                </div>
               </div>
             </div>
             <div class="chart-header" style="margin-top:1rem;">
@@ -291,12 +323,12 @@
             </div>
             <div class="voting-combos-header">
               <h4>子集組合排行</h4>
-              <span class="voting-combos-hint">取最多 3 個模態組合，多數決投票</span>
+              <span class="voting-combos-hint">取最多 3 個模態組合，多數決投票（僅顯示 Top 10）</span>
             </div>
             <table id="voting-combos-table" class="voting-combos-table"></table>
             <div class="voting-combos-header">
               <h4>子集組合排行（Soft voting）</h4>
-              <span class="voting-combos-hint">以模態機率平均後做二元判定</span>
+              <span class="voting-combos-hint">以模態機率平均後做二元判定（僅顯示 Top 10）</span>
             </div>
             <table id="voting-soft-combos-table" class="voting-combos-table"></table>
           </section>

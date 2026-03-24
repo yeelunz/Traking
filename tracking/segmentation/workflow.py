@@ -79,6 +79,34 @@ _AUTO_MASK_SUPPORT = all(
 AUTO_MASK_RUNTIME_AVAILABLE = _AUTO_MASK_SUPPORT
 
 
+def _build_empty_segmentation_from_bbox(
+    bbox_raw: Sequence[float],
+    frame_shape: Sequence[int],
+) -> SegmentationData:
+    frame_h = float(frame_shape[0]) if len(frame_shape) > 0 else 0.0
+    frame_w = float(frame_shape[1]) if len(frame_shape) > 1 else 0.0
+    try:
+        x, y, w, h = map(float, bbox_raw)
+    except Exception:
+        x, y, w, h = 0.0, 0.0, frame_w, frame_h
+    if frame_w > 0.0 and frame_h > 0.0:
+        x = max(0.0, min(x, frame_w - 1.0))
+        y = max(0.0, min(y, frame_h - 1.0))
+        w = max(0.0, min(w, frame_w - x))
+        h = max(0.0, min(h, frame_h - y))
+    area = float(max(w * h, 0.0))
+    perimeter = float(max(2.0 * (w + h), 0.0))
+    eq_diam = float(math.sqrt(max(4.0 * area / math.pi, 0.0))) if area > 0.0 else 0.0
+    stats = MaskStats(
+        area_px=area,
+        bbox=(x, y, w, h),
+        centroid=(x + (w / 2.0), y + (h / 2.0)),
+        perimeter_px=perimeter,
+        equivalent_diameter_px=eq_diam,
+    )
+    return SegmentationData(mask_path=None, stats=stats, roi_bbox=(x, y, w, h), centroid_error_px=None)
+
+
 @dataclass
 class SegmentationConfig:
     model_name: str = "unetpp"
@@ -743,6 +771,10 @@ class SegmentationWorkflow:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open video for segmentation inference: {video_path}")
+        fallback_frame_shape = (
+            int(max(1, round(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1))),
+            int(max(1, round(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1))),
+        )
         model_to_restore = getattr(self, "model", None)
         restore_training_state: Optional[bool] = None
         if not self.using_auto_mask and model_to_restore is not None:
@@ -805,6 +837,11 @@ class SegmentationWorkflow:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
                     ok, frame = cap.read()
                     if not ok or frame is None:
+                        if pred is not None and pred.segmentation is None:
+                            pred.segmentation = _build_empty_segmentation_from_bbox(
+                                getattr(pred, "bbox", (0.0, 0.0, 0.0, 0.0)),
+                                fallback_frame_shape,
+                            )
                         continue
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
                     frame_h, frame_w = frame.shape[:2]
@@ -1057,6 +1094,11 @@ class SegmentationWorkflow:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                     ok, frame = cap.read()
                     if not ok or frame is None:
+                        if pred.segmentation is None:
+                            pred.segmentation = _build_empty_segmentation_from_bbox(
+                                getattr(pred, "bbox", (0.0, 0.0, 0.0, 0.0)),
+                                fallback_frame_shape,
+                            )
                         continue
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
 

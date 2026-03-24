@@ -17,6 +17,7 @@ NON_DIFFERENTIABLE_CLASSIFIERS = {
     "tabpfn25",
     "tabpfn2_5",
     "multirocket",
+    "limix",
 }
 
 # Known learnable classifier families (used for explicit detection hints).
@@ -26,6 +27,7 @@ LEARNABLE_CLASSIFIERS = {
     "fusion_gating_mlp",
     "patchtst",
     "timemachine",
+    "timesnet",
     "mlp_linear_head",
     "mlp_head",
     "mlp",

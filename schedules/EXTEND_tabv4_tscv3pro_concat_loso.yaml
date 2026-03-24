@@ -143,6 +143,25 @@ queue:
         label_file: *label_file
         level: video
 
+      clf_tabv4_limix_concat: &clf_tabv4_limix_concat
+        enabled: true
+        feature_extractor: *fe_tab_v4_pretrain
+        classifier:
+          name: limix
+          params:
+            model_path: ckpt/limix/LimiX-16M.ckpt
+            inference_config_path: libs/LimiX/config/cls_default_noretrieval.json
+            device: cpu
+            mix_precision: false
+            softmax_temperature: 0.9
+            outlier_remove_std: 12.0
+            seed: 42
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
       clf_tscv3pro_multirocket_concat: &clf_tscv3pro_multirocket_concat
         enabled: true
         feature_extractor: *fe_tsc_v3pro_pretrain
@@ -170,6 +189,32 @@ queue:
             stride: 8
             d_model: 32
             ridge_alpha: 1.0e-3
+            seed: 42
+            n_vars: 12
+            n_steps: 256
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tscv3pro_timesnet_concat: &clf_tscv3pro_timesnet_concat
+        enabled: true
+        feature_extractor: *fe_tsc_v3pro_pretrain
+        classifier:
+          name: timesnet
+          params:
+            e_layers: 2
+            d_model: 32
+            d_ff: 64
+            top_k: 3
+            num_kernels: 6
+            dropout: 0.1
+            epochs: 80
+            lr: 1.0e-3
+            weight_decay: 1.0e-3
+            batch_size: 64
+            patience: 15
             seed: 42
             n_vars: 12
             n_steps: 256
@@ -249,9 +294,32 @@ queue:
       trajectory_filter: *trajectory_filter_defaults
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # 04  tsc_v3_pro(pretrain) + PatchTST + concat
+  # 04  tab_v4(pretrain) + LimiX + concat
   # ═══════════════════════════════════════════════════════════════════════════
-  - label: "04_tscv3pro_patchtst_concat"
+  - label: "04_tabv4_limix_concat"
+    config:
+      seed: 42
+      dataset: *dataset_merged_loso
+      experiments:
+        - name: "mednext_clahe_global_tabv4_limix_concat"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_global
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_tabv4_limix_concat
+      segmentation: *seg_mednext
+      output: *output_defaults
+      trajectory_filter: *trajectory_filter_defaults
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 05  tsc_v3_pro(pretrain) + PatchTST + concat
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "05_tscv3pro_patchtst_concat"
     config:
       seed: 42
       dataset: *dataset_merged_loso
@@ -267,6 +335,29 @@ queue:
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
       classification: *clf_tscv3pro_patchtst_concat
+      segmentation: *seg_mednext
+      output: *output_defaults
+      trajectory_filter: *trajectory_filter_defaults
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 06  tsc_v3_pro(pretrain) + TimesNet + concat
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "06_tscv3pro_timesnet_concat"
+    config:
+      seed: 42
+      dataset: *dataset_merged_loso
+      experiments:
+        - name: "mednext_clahe_global_tscv3pro_timesnet_concat"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_global
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_tscv3pro_timesnet_concat
       segmentation: *seg_mednext
       output: *output_defaults
       trajectory_filter: *trajectory_filter_defaults

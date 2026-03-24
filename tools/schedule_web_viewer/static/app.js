@@ -49,6 +49,7 @@ const CLASSIFICATION_SUMMARY_FIELDS = [
   { label: 'Balanced Acc', key: 'balanced_accuracy', percent: true },
   { label: 'Precision', key: 'precision_positive', percent: true },
   { label: 'Recall', key: 'recall_positive', percent: true },
+  { label: 'Specificity', key: 'specificity', percent: true, allowNull: true, chartExclude: true },
   { label: 'F1', key: 'f1_positive', percent: true },
   { label: 'ROC AUC', key: 'roc_auc', percent: true, allowNull: true },
   { label: 'Brier Score', key: 'brier_score', decimals: 4 },
@@ -1225,8 +1226,15 @@ function renderClassificationThresholdSuggestion(predictions, summary) {
   const precision = document.getElementById('classification-threshold-precision');
   const recall = document.getElementById('classification-threshold-recall');
   const f1 = document.getElementById('classification-threshold-f1');
+  const globalAcc = document.getElementById('classification-threshold-global-acc');
+  const globalPrecision = document.getElementById('classification-threshold-global-precision');
+  const globalRecall = document.getElementById('classification-threshold-global-recall');
+  const globalF1 = document.getElementById('classification-threshold-global-f1');
   const note = document.getElementById('classification-threshold-note');
-  if (!panel || !basis || !value || !sample || !acc || !precision || !recall || !f1 || !note) return;
+  if (
+    !panel || !basis || !value || !sample || !acc || !precision || !recall || !f1 || !note
+    || !globalAcc || !globalPrecision || !globalRecall || !globalF1
+  ) return;
 
   const rows = normalizeClassificationPredictions(predictions);
   const suggestion = suggestClassificationThreshold(predictions);
@@ -1290,8 +1298,13 @@ function renderClassificationThresholdSuggestion(predictions, summary) {
   // Compare note
   const compareThresh = trainThreshold ?? 0.5;
   const baseline = classificationMetricsAtThreshold(rows, compareThresh);
+  const globalBaseline = classificationMetricsAtThreshold(rows, 0.5);
+  globalAcc.textContent = formatPercent(globalBaseline.accuracy);
+  globalPrecision.textContent = formatPercent(globalBaseline.precision);
+  globalRecall.textContent = formatPercent(globalBaseline.recall);
+  globalF1.textContent = formatPercent(globalBaseline.f1);
   const baseLabel = trainThreshold != null ? `訓練閾值=${Number(trainThreshold).toFixed(3)}` : 'threshold=0.500';
-  note.textContent = `${baseLabel} 時：Acc ${formatPercent(baseline.accuracy)}，Precision ${formatPercent(baseline.precision)}，Recall ${formatPercent(baseline.recall)}，F1 ${formatPercent(baseline.f1)}。`;
+  note.textContent = `${baseLabel} 時：Acc ${formatPercent(baseline.accuracy)}，Precision ${formatPercent(baseline.precision)}，Recall ${formatPercent(baseline.recall)}，F1 ${formatPercent(baseline.f1)}。以上皆為 pooled predictions 重新切閾值後的結果。`;
 }
 
 function renderTrajectoryFilterSection(tf) {
@@ -1330,6 +1343,7 @@ function renderTrajectoryFilterSection(tf) {
 function renderClassificationSection(classification) {
   const section = document.getElementById('classification-section');
   const thresholdPanel = document.getElementById('classification-threshold-panel');
+  const explain = document.getElementById('classification-summary-explain');
   if (!section) return;
   // For LOSO aggregate, use combined (summed) data which has integer TP/FP/FN/TN
   // and overall accuracy computed from all predictions. Fall back to summary for
@@ -1341,7 +1355,9 @@ function renderClassificationSection(classification) {
 
   if (!summary) {
     section.classList.add('hidden');
+    renderFeatureImportanceSection(null);
     if (thresholdPanel) thresholdPanel.classList.add('hidden');
+    if (explain) explain.textContent = '';
     // Destroy any lingering chart
     if (state.classificationChart && state.classificationChart.destroy) {
       state.classificationChart.destroy();
@@ -1351,12 +1367,37 @@ function renderClassificationSection(classification) {
   }
   section.classList.remove('hidden');
 
+  // Ensure specificity is always available for the summary table, even when
+  // old summary.json files do not explicitly store it.
+  const summaryForDisplay = { ...(summary || {}) };
+  if (summaryForDisplay.specificity == null) {
+    const tn = Number(summaryForDisplay.tn);
+    const fp = Number(summaryForDisplay.fp);
+    if (Number.isFinite(tn) && Number.isFinite(fp) && (tn + fp) > 0) {
+      summaryForDisplay.specificity = tn / (tn + fp);
+    }
+  }
+
+  if (explain) {
+    const isCombined = Boolean(combined);
+    const th = summary?.threshold_used;
+    const method = summary?.threshold_method;
+    const methodText = method ? String(method) : 'unknown';
+    const thText = (th !== null && th !== undefined) ? Number(th).toFixed(3) : 'N/A';
+    if (isCombined) {
+      explain.textContent = `分類彙總使用 LOSO 各 fold 的原始預測結果加總（主報告值），不是用單一閾值重算。Threshold 分析區塊則是把 pooled predictions 以單一閾值重算（例如訓練閾值平均 ${thText}，method=${methodText}，或固定 0.500）。`;
+    } else {
+      explain.textContent = `本實驗主報告值來自 summary.json（訓練/推論流程輸出）。Threshold 分析區塊為同一批 predictions 的事後單一閾值重算（訓練閾值 ${thText}，method=${methodText}，或固定 0.500）。`;
+    }
+  }
+
   // Summary table
-  renderSummaryTable('classification-summary-table', summary, CLASSIFICATION_SUMMARY_FIELDS);
+  renderSummaryTable('classification-summary-table', summaryForDisplay, CLASSIFICATION_SUMMARY_FIELDS);
+  renderFeatureImportanceSection(classification?.feature_importance);
   renderClassificationThresholdSuggestion(predictions, summary);
 
   // Confusion matrix
-  renderConfusionMatrix('confusion-matrix', summary);
+  renderConfusionMatrix('confusion-matrix', summaryForDisplay);
 
   // Predictions table
   renderPredictionsTable('classification-predictions-table', predictions);
@@ -1438,6 +1479,47 @@ function renderPredictionsTable(tableId, predictions) {
     </tr>`;
   }).join('');
   table.innerHTML = header + rows;
+}
+
+function renderFeatureImportanceSection(featureImportance) {
+  const panel = document.getElementById('classification-feature-importance');
+  const topTable = document.getElementById('classification-fi-top-table');
+  const bottomTable = document.getElementById('classification-fi-bottom-table');
+  const meta = document.getElementById('classification-fi-meta');
+  if (!panel || !topTable || !bottomTable || !meta) return;
+
+  const topRows = featureImportance?.top || [];
+  const bottomRows = featureImportance?.bottom || [];
+  if (!topRows.length && !bottomRows.length) {
+    panel.classList.add('hidden');
+    topTable.innerHTML = '';
+    bottomTable.innerHTML = '';
+    meta.textContent = '';
+    return;
+  }
+
+  panel.classList.remove('hidden');
+  const metaInfo = featureImportance?.meta || {};
+  if (metaInfo.mode === 'loso_mean') {
+    const used = metaInfo.folds_used ?? '—';
+    const total = metaInfo.folds_total ?? '—';
+    meta.textContent = `LOSO 平均特徵重要度（folds used: ${used}/${total}）`;
+  } else {
+    meta.textContent = '單次實驗特徵重要度';
+  }
+
+  const renderRows = (rows) => {
+    const header = '<tr><th>#</th><th>Feature</th><th>Importance</th></tr>';
+    const body = rows.slice(0, 10).map((row, idx) => {
+      const feature = escapeHtml(row?.feature ?? '');
+      const value = Number(row?.importance ?? 0);
+      return `<tr><td>${idx + 1}</td><td>${feature}</td><td>${formatNumber(value, 6)}</td></tr>`;
+    }).join('');
+    return header + body;
+  };
+
+  topTable.innerHTML = topRows.length ? renderRows(topRows) : '<tr><td>無資料</td></tr>';
+  bottomTable.innerHTML = bottomRows.length ? renderRows(bottomRows) : '<tr><td>無資料</td></tr>';
 }
 
 function buildClassificationProbChart(canvasId, chartRef, predictions) {
@@ -1970,9 +2052,10 @@ function buildSoftVotingAnalysisFromPredictions(predictions) {
     }
   }
   softTopCombos.sort((a, b) => ((b.accuracy ?? 0) - (a.accuracy ?? 0)) || (b.correct - a.correct));
+  const softTop10 = softTopCombos.slice(0, 10);
   return {
     soft_five_voting: softFive,
-    soft_top_combos: softTopCombos,
+    soft_top_combos: softTop10,
   };
 }
 
@@ -2013,14 +2096,15 @@ function renderVotingResultBlock(container, voting, options = {}) {
 
 function renderVotingCombosTable(table, combos, options = {}) {
   if (!table) return;
-  if (!combos || !combos.length) {
+  const topCombos = (combos || []).slice(0, 10);
+  if (!topCombos.length) {
     table.innerHTML = '<tr><td>無資料</td></tr>';
     return;
   }
-  const maxComboAcc = Math.max(0.001, ...combos.map((c) => c.accuracy ?? 0));
+  const maxComboAcc = Math.max(0.001, ...topCombos.map((c) => c.accuracy ?? 0));
   const detailHeader = options.soft ? '各受試者平均機率' : '各受試者詳情';
   const thead = `<tr><th></th><th>組合</th><th>準確率</th><th>正確 / 總數</th><th>${detailHeader}</th></tr>`;
-  const tbody = combos.map((c, idx) => {
+  const tbody = topCombos.map((c, idx) => {
     const rank = idx + 1;
     const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : 'rank-other';
     const badge = `<span class="rank-badge ${rankClass}">${rank}</span>`;

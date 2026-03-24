@@ -586,7 +586,7 @@ def filter_detections(
     heights: np.ndarray,
     scores: np.ndarray,
     *,
-    bbox_strategy: str = "hampel_only",
+    bbox_strategy: str = "none",
     bbox_params: Optional[Dict[str, Any]] = None,
     traj_params: Optional[Dict[str, Any]] = None,
     skip_hampel: bool = False,
@@ -599,7 +599,8 @@ def filter_detections(
     cx, cy : (N,) float — centroid x, y
     widths, heights : (N,) float — bbox w, h
     scores : (N,) float — detection scores
-    bbox_strategy : one of ``"independent"`` / ``"fixed_global_roi"`` / ``"area_constraint"``
+    bbox_strategy : one of ``"none"`` / ``"hampel_only"`` / ``"independent"`` /
+        ``"fixed_global_roi"`` / ``"area_constraint"``
     bbox_params : keyword args dict forwarded to bbox filter
     traj_params : keyword args dict for smooth_trajectory_2d
     skip_hampel : bool

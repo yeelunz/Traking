@@ -42,6 +42,41 @@ def test_decision_tree_classifier(toy_dataset):
     assert proba.shape == (X.shape[0], len(np.unique(y)))
 
 
+def test_tree_importance_aligned_to_original_dimension():
+    X = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.2, 0.2, 0.0],
+            [0.8, 0.8, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    y = np.array([0, 0, 1, 1, 0, 1], dtype=np.int64)
+    clf = _build_classifier(
+        "random_forest",
+        {
+            "n_estimators": 50,
+            "random_state": 42,
+            "class_weight": None,
+            "tabular_preprocess": {
+                "enabled": True,
+                "imputer": "median",
+                "corr_threshold": 0.98,
+                "corr_min_features_keep": 1,
+            },
+        },
+    )
+    summary = clf.fit(X, y)
+    importances = summary.get("feature_importances", [])
+    assert isinstance(importances, list)
+    assert len(importances) == X.shape[1]
+    meta = summary.get("feature_importances_meta", {})
+    assert meta.get("aligned_to_input") is True
+
+
 def test_svm_classifier(toy_dataset):
     X, y = toy_dataset
     clf = _build_classifier(

@@ -1,0 +1,18 @@
+{
+  "cache_key": "32e792c91a0d912a14589795",
+  "identity": {
+    "schema": "texture_pretrain_cache_v1",
+    "backbone": "convnext_tiny",
+    "num_classes": 2,
+    "embedding_dim": 3,
+    "input_size": 96,
+    "head_type": "linear",
+    "hidden_dim": 256,
+    "dropout": 0.2,
+    "pretrained_imagenet": true,
+    "train_manifest_sha256": "f5b3a37f23660e4db887e66cc0e57d7e3460ed00dca4f24d71c893417d94aa18",
+    "val_manifest_sha256": "453651bffe0df766c578fcde8ee5b8a4978fd4b5c4e042d9f7d7d8a5fc3313db"
+  },
+  "best_ckpt": "C:\\Users\\User\\Desktop\\code\\Traking\\ckpt\\texture_pretrain_cache\\auto_data\\tsc_v3_pro_a4d7010be2dcc516612a57d0\\best.pth",
+  "cache_ckpt": "C:\\Users\\User\\Desktop\\code\\Traking\\ckpt\\texture_pretrain_cache\\32e792c91a0d912a14589795.pth"
+}

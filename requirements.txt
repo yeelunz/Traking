@@ -32,4 +32,11 @@ tqdm
 scikit-learn
 xgboost
 lightgbm
-tabpfn>=2.5,<3
+tabpfn>=6.4.1
+tabpfn-extensions[interpretability]>=0.2.2
+pandas
+scipy
+huggingface-hub
+kditransform
+hyperopt
+setuptools<81

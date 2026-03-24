@@ -43,8 +43,13 @@ classification:
     name: basic
     params: {}
   classifier:
-    name: random_forest
-    params: {}
+    name: limix
+    params:
+      model_path: ckpt/limix/LimiX-16M.ckpt
+      inference_config_path: libs/LimiX/config/cls_default_noretrieval.json
+      device: auto
+      mix_precision: true
+      softmax_temperature: 0.9
 segmentation:
   model:
     name: unetpp

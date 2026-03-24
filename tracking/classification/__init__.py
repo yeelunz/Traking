@@ -19,6 +19,7 @@ from . import feature_extractors_v3pro  # noqa: F401
 from . import feature_extractors_v4  # noqa: F401
 from . import feature_extractors_v3pro_tsc  # noqa: F401
 from . import classifiers_v3pro  # noqa: F401
+from . import classifiers_limix  # noqa: F401
 
 # Differentiable tabular heads (MLP / Linear head)
 from . import classifiers_nn  # noqa: F401
@@ -41,6 +42,7 @@ __all__ = [
     "feature_extractors_v4",
     "feature_extractors_v3pro_tsc",
     "classifiers_v3pro",
+    "classifiers_limix",
     "classifiers_nn",
     "fusion_modules",
     "dim_reduction",

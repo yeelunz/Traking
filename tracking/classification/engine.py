@@ -4,6 +4,7 @@ import json
 import os
 import csv
 import pickle
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -14,11 +15,13 @@ from ..core.interfaces import FramePrediction
 from ..core.registry import (
     CLASSIFIER_REGISTRY,
     FEATURE_EXTRACTOR_REGISTRY,
+    PREPROC_REGISTRY,
 )
 from .feature_vector import FeatureVectoriser
 from .metrics import summarise_classification
 from . import feature_extractors as _load_feature_extractors  # noqa: F401
 from . import classifiers as _load_classifiers  # noqa: F401
+from . import classifiers_limix as _load_classifiers_limix  # noqa: F401
 from . import fusion_modules as _load_fusion_modules  # noqa: F401
 from .fusion_modules import create_fusion_module, is_learnable_fusion_module
 from ..segmentation.dataset import attach_ground_truth_segmentation
@@ -34,6 +37,84 @@ _TEXTURE_BACKBONE_FEATURES = {
     "tsc_v2_extend",
     "tsc_v3_pro",
 }
+
+
+def _normalise_subject_token(token: Optional[str]) -> Optional[str]:
+    if token is None:
+        return None
+    cleaned = str(token).strip()
+    if not cleaned:
+        return None
+    digits = []
+    for ch in cleaned:
+        if ch.isdigit():
+            digits.append(ch)
+        else:
+            break
+    if digits:
+        return "".join(digits)
+    return cleaned
+
+
+def _infer_texture_embedding_dim(feature_name: str, params: Dict[str, Any], tp_cfg: Dict[str, Any]) -> int:
+    if "embedding_dim" in tp_cfg:
+        return int(tp_cfg.get("embedding_dim", 32))
+    if "texture_dim" in params:
+        return int(params.get("texture_dim", 32))
+
+    if feature_name == "tab_v3_pro":
+        try:
+            from .feature_extractors_v3pro import MotionStaticV3ProFeatureExtractor
+
+            default_cfg = dict(getattr(MotionStaticV3ProFeatureExtractor, "DEFAULT_CONFIG", {}) or {})
+            return int(default_cfg.get("texture_dim", 10))
+        except Exception:
+            return 10
+    if feature_name == "tab_v4":
+        try:
+            from .feature_extractors_v4 import TAB_V4_TOTAL_DIM, TAB_V4_MOTION_KEYS, TAB_V4_STATIC_KEYS
+
+            return int(TAB_V4_TOTAL_DIM - len(TAB_V4_MOTION_KEYS) - len(TAB_V4_STATIC_KEYS))
+        except Exception:
+            return 11
+    if feature_name == "tsc_v3_pro":
+        try:
+            from .feature_extractors_v3pro_tsc import N_TEX_CHANNELS_V3PRO
+
+            return int(N_TEX_CHANNELS_V3PRO)
+        except Exception:
+            return 3
+    if feature_name == "tab_v2":
+        try:
+            from .feature_extractors import MOTION_FEATURE_KEYS
+            from .feature_extractors_ext import CTS_STATIC_FEATURE_KEYS
+
+            return int(len(MOTION_FEATURE_KEYS) + len(CTS_STATIC_FEATURE_KEYS))
+        except Exception:
+            return 66
+    if feature_name == "tab_v2_extend":
+        try:
+            from .feature_extractors import MOTION_FEATURE_KEYS
+            from .feature_extractors_ext import CTS_STATIC_V2_FEATURE_KEYS
+
+            return int(len(MOTION_FEATURE_KEYS) + len(CTS_STATIC_V2_FEATURE_KEYS))
+        except Exception:
+            return 90
+    if feature_name == "tsc_v2":
+        try:
+            from .feature_extractors_ext import N_TEX_PCA_TS
+
+            return int(params.get("tex_pca_dim", N_TEX_PCA_TS))
+        except Exception:
+            return int(params.get("tex_pca_dim", 8))
+    if feature_name == "tsc_v2_extend":
+        try:
+            from .feature_extractors_ext import N_TEX_PCA_TS_V2
+
+            return int(params.get("tex_pca_dim", N_TEX_PCA_TS_V2))
+        except Exception:
+            return int(params.get("tex_pca_dim", 8))
+    return 32
 
 
 _EXTRACTOR_STATE_ATTRS = (
@@ -114,9 +195,150 @@ def _try_load_feature_extractor_state(
     return path
 
 
-def _crop_roi_safe(frame, bbox, pad_ratio: float = 0.15):
-    import cv2  # noqa: PLC0415
+def _resolve_feature_names(feature_keys: Sequence[str], n_features: int) -> List[str]:
+    keys = list(feature_keys or [])
+    if len(keys) == int(n_features):
+        return keys
+    return [f"f_{i:04d}" for i in range(int(n_features))]
 
+
+def _positive_class_probabilities(classifier, X):  # noqa: ANN001
+    prob_matrix = classifier.predict_proba(X)
+    class_indices = getattr(classifier, "classes_", None)
+    if class_indices is None and hasattr(classifier, "_model"):
+        class_indices = getattr(getattr(classifier, "_model"), "classes_", None)
+    if class_indices is not None and 1 in class_indices:
+        pos_idx = int(np.where(class_indices == 1)[0][0])
+    else:
+        pos_idx = 1 if prob_matrix.shape[1] > 1 else 0
+    return np.asarray(prob_matrix[:, pos_idx], dtype=np.float64)
+
+
+def _compute_permutation_feature_importance(
+    classifier,
+    X,
+    y,
+    feature_names: Sequence[str],
+    *,
+    max_features: int = 96,
+    max_samples: int = 256,
+    random_state: int = 42,
+) -> Optional[Dict[str, Any]]:  # noqa: ANN401
+    Xn = np.asarray(X, dtype=np.float32)
+    yn = np.asarray(y, dtype=np.int64)
+    if Xn.ndim != 2 or Xn.shape[0] == 0 or Xn.shape[1] == 0:
+        return None
+
+    rng = np.random.default_rng(int(random_state))
+
+    if Xn.shape[0] > int(max_samples):
+        picked_rows = rng.choice(Xn.shape[0], size=int(max_samples), replace=False)
+        X_eval = Xn[picked_rows]
+        y_eval = yn[picked_rows]
+    else:
+        X_eval = Xn
+        y_eval = yn
+
+    feat_names = _resolve_feature_names(feature_names, X_eval.shape[1])
+    if X_eval.shape[1] > int(max_features):
+        var = np.var(X_eval, axis=0)
+        keep_idx = np.argsort(var)[-int(max_features):]
+        keep_idx = np.sort(keep_idx)
+    else:
+        keep_idx = np.arange(X_eval.shape[1])
+
+    try:
+        base_probs = _positive_class_probabilities(classifier, X_eval)
+    except Exception:
+        return None
+
+    base_pred = (base_probs >= 0.5).astype(np.int64)
+    base_acc = float(np.mean(base_pred == y_eval))
+
+    scored: List[Dict[str, Any]] = []
+    for j in keep_idx.tolist():
+        X_perm = X_eval.copy()
+        X_perm[:, j] = X_perm[rng.permutation(X_perm.shape[0]), j]
+        try:
+            perm_probs = _positive_class_probabilities(classifier, X_perm)
+        except Exception:
+            continue
+        perm_pred = (perm_probs >= 0.5).astype(np.int64)
+        perm_acc = float(np.mean(perm_pred == y_eval))
+        scored.append(
+            {
+                "feature_index": int(j),
+                "feature_name": str(feat_names[j]),
+                "importance": float(base_acc - perm_acc),
+                "base_accuracy": base_acc,
+                "permuted_accuracy": perm_acc,
+            }
+        )
+
+    scored.sort(key=lambda r: r["importance"], reverse=True)
+    return {
+        "method": "permutation_accuracy_drop",
+        "base_accuracy": base_acc,
+        "n_samples_evaluated": int(X_eval.shape[0]),
+        "n_features_total": int(X_eval.shape[1]),
+        "n_features_evaluated": int(len(scored)),
+        "importances": scored,
+    }
+
+
+def _collect_feature_importance_payload(
+    *,
+    classifier,
+    train_info: Optional[Dict[str, Any]],
+    X_eval,
+    y_eval,
+    feature_names: Sequence[str],
+    logger: Callable[[str], None],
+) -> Optional[Dict[str, Any]]:
+    payload: Dict[str, Any] = {}
+
+    if isinstance(train_info, dict) and isinstance(train_info.get("feature_importances"), list):
+        values = [float(v) for v in train_info.get("feature_importances", [])]
+        names = _resolve_feature_names(feature_names, len(values))
+        rows = [
+            {
+                "feature_index": int(i),
+                "feature_name": str(names[i]),
+                "importance": float(values[i]),
+            }
+            for i in range(len(values))
+        ]
+        rows.sort(key=lambda r: r["importance"], reverse=True)
+        payload["model_reported"] = {
+            "method": "model_reported",
+            "importances": rows,
+        }
+
+    getter = getattr(classifier, "get_feature_importance", None)
+    if callable(getter):
+        try:
+            custom = getter(X_eval, y_eval, feature_names=_resolve_feature_names(feature_names, np.asarray(X_eval).shape[1]))
+            if isinstance(custom, dict) and custom:
+                payload["classifier_specific"] = custom
+        except Exception as exc:  # noqa: BLE001
+            logger(f"[Classification] Warning: classifier-specific feature importance failed: {exc}")
+
+    try:
+        perm = _compute_permutation_feature_importance(
+            classifier,
+            X_eval,
+            y_eval,
+            feature_names=_resolve_feature_names(feature_names, np.asarray(X_eval).shape[1]),
+        )
+        if perm:
+            payload["model_agnostic"] = perm
+    except Exception as exc:  # noqa: BLE001
+        logger(f"[Classification] Warning: permutation feature importance failed: {exc}")
+
+    return payload or None
+
+
+def _crop_roi_safe(frame, bbox, pad_ratio: float = 0.15):
     if frame is None or bbox is None or len(bbox) != 4:
         return None
     h_img, w_img = frame.shape[:2]
@@ -134,7 +356,99 @@ def _crop_roi_safe(frame, bbox, pad_ratio: float = 0.15):
     roi = frame[y1:y2, x1:x2]
     if roi is None or roi.size == 0:
         return None
-    return cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    return roi
+
+
+def _apply_preprocs_frame_like_segmentation(frame: np.ndarray, preprocs: Sequence[Any]) -> np.ndarray:
+    import cv2  # noqa: PLC0415
+
+    if frame.ndim == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if not preprocs:
+        return frame
+    if frame.ndim == 2:
+        out = frame
+        for p in preprocs:
+            out = p.apply_to_frame(out)
+        return out
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    for p in preprocs:
+        rgb = p.apply_to_frame(rgb)
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+def _build_runtime_preprocs(classification_cfg: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
+    runtime = dict((classification_cfg or {}).get("runtime_preprocessing") or {})
+    scheme_raw = runtime.get("scheme", "A")
+    scheme = str(scheme_raw).strip().upper()
+    if scheme in {"GLOBAL", "A"}:
+        scheme = "A"
+    elif scheme in {"ROI", "B"}:
+        scheme = "B"
+    elif scheme in {"HYBRID", "C"}:
+        scheme = "C"
+    else:
+        scheme = "A"
+
+    step_defs = runtime.get("preproc_steps") or []
+    if isinstance(step_defs, (str, bytes)) or not isinstance(step_defs, Sequence):
+        return [], []
+
+    global_preprocs: List[Any] = []
+    roi_preprocs: List[Any] = []
+    for step in step_defs:
+        if not isinstance(step, dict):
+            continue
+        name = step.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        cls = PREPROC_REGISTRY.get(name)
+        if cls is None:
+            continue
+        params = step.get("params", {})
+        if scheme == "A":
+            global_preprocs.append(cls(params))
+        elif scheme == "B":
+            roi_preprocs.append(cls(params))
+        else:
+            # Scheme C follows segmentation runtime behavior:
+            # detector keeps global preprocs, but segmentation (and texture-pretrain
+            # ROI extraction that mirrors segmentation) crops from RAW then applies
+            # ROI preprocs. Therefore classification-side ROI generation should not
+            # apply any global preprocs here.
+            roi_preprocs.append(cls(params))
+    return global_preprocs, roi_preprocs
+
+
+def _build_texture_pretrain_auto_root(
+    *,
+    cache_dir: Path,
+    dataset_root: str,
+    feature_name: str,
+    train_videos: Dict[str, List[FramePrediction]],
+    backbone: str,
+    input_size: int,
+    max_frames_per_video: int,
+    val_ratio: float,
+    roi_pad_ratio: float,
+    seed: int,
+) -> Path:
+    identity = {
+        "schema": "texture_pretrain_auto_data_v1",
+        "dataset_root": str(Path(dataset_root).resolve()),
+        "feature_name": str(feature_name),
+        "train_videos": sorted(str(v) for v in train_videos.keys()),
+        "backbone": str(backbone),
+        "input_size": int(input_size),
+        "max_frames_per_video": int(max_frames_per_video),
+        "val_ratio": float(val_ratio),
+        "roi_pad_ratio": float(roi_pad_ratio),
+        "seed": int(seed),
+    }
+    packed = json.dumps(identity, ensure_ascii=False, sort_keys=True)
+    key = hashlib.sha256(packed.encode("utf-8")).hexdigest()[:24]
+    return cache_dir / "auto_data" / f"{feature_name}_{key}"
 
 
 def _ensure_texture_pretrain_ckpt(
@@ -167,26 +481,7 @@ def _ensure_texture_pretrain_ckpt(
         "auto-running Stage-1 texture pretraining (with cache)."
     )
     tp_cfg = dict((classification_cfg or {}).get("texture_pretrain") or {})
-    if "embedding_dim" in tp_cfg:
-        embedding_dim = int(tp_cfg.get("embedding_dim", 32))
-    elif "texture_dim" in params:
-        embedding_dim = int(params.get("texture_dim", 32))
-    elif feature_name == "tab_v3_pro":
-        embedding_dim = 10
-    elif feature_name == "tab_v4":
-        embedding_dim = 10
-    elif feature_name == "tsc_v3_pro":
-        embedding_dim = 3
-    elif feature_name == "tab_v2":
-        embedding_dim = 66
-    elif feature_name == "tab_v2_extend":
-        embedding_dim = 90
-    elif feature_name == "tsc_v2":
-        embedding_dim = int(params.get("tex_pca_dim", 8))
-    elif feature_name == "tsc_v2_extend":
-        embedding_dim = int(params.get("tex_pca_dim", 8))
-    else:
-        embedding_dim = 32
+    embedding_dim = _infer_texture_embedding_dim(feature_name, params, tp_cfg)
 
     backbone = str(params.get("texture_backbone", tp_cfg.get("backbone", "convnext_tiny")))
     input_size = int(tp_cfg.get("input_size", params.get("texture_image_size", 96)))
@@ -194,11 +489,25 @@ def _ensure_texture_pretrain_ckpt(
     val_ratio = float(tp_cfg.get("val_ratio", 0.2))
     roi_pad_ratio = float(tp_cfg.get("roi_pad_ratio", 0.15))
 
-    auto_root = Path(results_dir) / "classification" / "texture_pretrain_auto"
+    tp_seed = int(tp_cfg.get("seed", 42))
+    cache_dir = Path(tp_cfg.get("cache_dir", "ckpt/texture_pretrain_cache")).resolve()
+    auto_root = _build_texture_pretrain_auto_root(
+        cache_dir=cache_dir,
+        dataset_root=dataset_root,
+        feature_name=feature_name,
+        train_videos=train_videos,
+        backbone=backbone,
+        input_size=input_size,
+        max_frames_per_video=max_frames_per_video,
+        val_ratio=val_ratio,
+        roi_pad_ratio=roi_pad_ratio,
+        seed=tp_seed,
+    )
     roi_dir = auto_root / "roi_images"
     roi_dir.mkdir(parents=True, exist_ok=True)
 
     rows: List[Tuple[str, int, str]] = []  # (subject, label, image_path)
+    runtime_global_preprocs, runtime_roi_preprocs = _build_runtime_preprocs(classification_cfg)
     for video_path, preds in sorted(train_videos.items(), key=lambda kv: kv[0]):
         subject = _subject_from_video_path(video_path, dataset_root)
         if subject not in labels:
@@ -231,12 +540,26 @@ def _ensure_texture_pretrain_ckpt(
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     continue
-                roi = _crop_roi_safe(frame, p.bbox, pad_ratio=roi_pad_ratio)
+
+                frame_for_crop = frame
+                if runtime_global_preprocs:
+                    frame_for_crop = _apply_preprocs_frame_like_segmentation(frame_for_crop, runtime_global_preprocs)
+
+                seg = getattr(p, "segmentation", None)
+                seg_roi_bbox = getattr(seg, "roi_bbox", None) if seg is not None else None
+                use_bbox = tuple(seg_roi_bbox) if seg_roi_bbox is not None else p.bbox
+                pad = 0.0 if seg_roi_bbox is not None else roi_pad_ratio
+
+                roi = _crop_roi_safe(frame_for_crop, use_bbox, pad_ratio=pad)
                 if roi is None:
                     continue
+
+                if runtime_roi_preprocs:
+                    roi = _apply_preprocs_frame_like_segmentation(roi, runtime_roi_preprocs)
+
                 fn = f"{subject}__{Path(video_path).stem}__f{int(p.frame_index):06d}.png"
                 out_path = roi_dir / fn
-                cv2.imwrite(str(out_path), cv2.cvtColor(roi, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(str(out_path), roi)
                 rows.append((subject, label, str(out_path.resolve())))
         finally:
             cap.release()
@@ -276,7 +599,6 @@ def _ensure_texture_pretrain_ckpt(
 
     pretrain_yaml = auto_root / "texture_pretrain_auto.yaml"
     pretrain_save = Path(tp_cfg.get("save_path", str(auto_root / "best.pth"))).resolve()
-    cache_dir = Path(tp_cfg.get("cache_dir", "ckpt/texture_pretrain_cache")).resolve()
     payload = {
         "texture_pretrain": {
             "enable": True,
@@ -359,7 +681,9 @@ def _subject_from_video_path(path: str, dataset_root: str | None = None) -> str:
             parts = Path(rel).parts
             if len(parts) > 1:
                 # e.g. "n001/D.avi" → subject = "n001"
-                return parts[0]
+                subject = _normalise_subject_token(parts[0])
+                if subject:
+                    return subject
         except Exception:
             pass
 
@@ -374,8 +698,10 @@ def _subject_from_video_path(path: str, dataset_root: str | None = None) -> str:
     if digits:
         return "".join(digits)
     if "_" in stem:
-        return stem.split("_")[0]
-    return stem
+        prefix = _normalise_subject_token(stem.split("_")[0])
+        if prefix:
+            return prefix
+    return _normalise_subject_token(stem) or stem
 
 
 def _annotation_to_predictions(annotation: Dict[str, any]) -> List[FramePrediction]:  # noqa: ANN001
@@ -546,6 +872,35 @@ def _filter_entities(
             continue
         kept.append(entity)
     return kept
+
+
+def _exclude_loso_subjects(
+    train_entities: Sequence[str],
+    entity_to_subject: Dict[str, str],
+    blocked_subjects: Sequence[str],
+) -> Tuple[List[str], int, List[str]]:
+    blocked = {
+        _normalise_subject_token(str(token))
+        for token in blocked_subjects
+        if token is not None and _normalise_subject_token(str(token))
+    }
+    if not blocked:
+        return list(train_entities), 0, []
+
+    kept = [
+        entity
+        for entity in train_entities
+        if _normalise_subject_token(entity_to_subject.get(entity)) not in blocked
+    ]
+    removed = int(len(train_entities) - len(kept))
+    overlap = sorted(
+        {
+            _normalise_subject_token(entity_to_subject.get(entity))
+            for entity in kept
+            if _normalise_subject_token(entity_to_subject.get(entity)) in blocked
+        }
+    )
+    return kept, removed, [str(v) for v in overlap if v is not None]
 
 
 def _find_youden_threshold(
@@ -749,8 +1104,8 @@ def _run_subject_classification_impl(
         raise KeyError(f"Unknown feature extractor: {feature_name}")
     feature_extractor = feature_cls(feature_cfg.get("params"))
 
-    classifier_cfg = config.get("classifier", {"name": "random_forest", "params": {}})
-    classifier_name = classifier_cfg.get("name", "random_forest")
+    classifier_cfg = config.get("classifier", {"name": "limix", "params": {}})
+    classifier_name = classifier_cfg.get("name", "limix")
     classifier_cls = CLASSIFIER_REGISTRY.get(classifier_name)
     if classifier_cls is None:
         raise KeyError(f"Unknown classifier: {classifier_name}")
@@ -992,6 +1347,42 @@ def _run_subject_classification_impl(
         dataset_root=dataset_root,
     )
     train_entities = _filter_entities(train_features, train_owner, labels, logger)
+
+    runtime_ctx = dict((config or {}).get("runtime_context") or {})
+    heldout_subject_raw = runtime_ctx.get("loso_subject")
+    heldout_subject = _normalise_subject_token(str(heldout_subject_raw)) if heldout_subject_raw is not None else None
+
+    loso_test_subjects_raw = runtime_ctx.get("loso_test_subjects")
+    loso_test_subjects: set[str] = set()
+    if isinstance(loso_test_subjects_raw, (list, tuple, set)):
+        for token in loso_test_subjects_raw:
+            norm = _normalise_subject_token(str(token)) if token is not None else None
+            if norm:
+                loso_test_subjects.add(norm)
+    elif loso_test_subjects_raw is not None:
+        norm = _normalise_subject_token(str(loso_test_subjects_raw))
+        if norm:
+            loso_test_subjects.add(norm)
+    if heldout_subject:
+        loso_test_subjects.add(heldout_subject)
+
+    if loso_test_subjects:
+        train_entities, removed_n, overlap = _exclude_loso_subjects(
+            train_entities,
+            train_owner,
+            sorted(loso_test_subjects),
+        )
+        if removed_n > 0:
+            logger(
+                f"[Classification] LOSO guard removed {removed_n} training entit(ies) "
+                f"for held-out subject(s)={sorted(loso_test_subjects)}."
+            )
+        if overlap:
+            raise RuntimeError(
+                "LOSO leakage detected: train entities still include test subject(s): "
+                + ", ".join(str(v) for v in overlap)
+            )
+
     if not train_entities:
         raise RuntimeError(
             "No training entities with labels available for classification stage."
@@ -1120,15 +1511,15 @@ def _run_subject_classification_impl(
         raise RuntimeError("Classification source_model not found in tracking predictions")
 
     if seg_enabled:
+        total_test_frames = sum(len(preds) for preds in test_predictions[source_model].values())
         missing_masks = sum(
             1 for _video, preds in test_predictions[source_model].items() for pred in preds if pred.segmentation is None
         )
         if missing_masks:
-            # Warn but do not abort – frames without masks will contribute zero
-            # CTS static features, which is acceptable for a partial prediction.
+            ratio = (float(missing_masks) / float(max(total_test_frames, 1))) * 100.0
             logger(
-                f"[Classification] Warning: {missing_masks} test frame(s) are missing "
-                "segmentation masks from the main pipeline. CTS/TS static features will be partial for those frames."
+                f"[Classification] Warning: {missing_masks}/{total_test_frames} test frame(s) ({ratio:.1f}%) are missing "
+                "segmentation masks from the main pipeline. CTS/TS static features may be partial for those frames."
             )
 
     test_features, test_owner, test_sources = _prepare_entity_features(
@@ -1157,15 +1548,7 @@ def _run_subject_classification_impl(
     y_pred_default = classifier.predict(X_test)
     prob_positive: List[float] = []
     try:
-        prob_matrix = classifier.predict_proba(X_test)
-        class_indices = getattr(classifier, "classes_", None)
-        if class_indices is None and hasattr(classifier, "_model"):
-            class_indices = getattr(getattr(classifier, "_model"), "classes_", None)
-        if class_indices is not None and 1 in class_indices:
-            pos_idx = int(np.where(class_indices == 1)[0][0])
-        else:
-            pos_idx = 1 if prob_matrix.shape[1] > 1 else 0
-        prob_positive = prob_matrix[:, pos_idx].tolist()
+        prob_positive = _positive_class_probabilities(classifier, X_test).tolist()
     except Exception:
         prob_positive = [0.0 for _ in y_pred_default]
 
@@ -1199,6 +1582,23 @@ def _run_subject_classification_impl(
     with open(os.path.join(model_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
+    fi_feature_names = _resolve_feature_names(list(vectoriser.keys), X_test.shape[1])
+    feature_importance_payload = _collect_feature_importance_payload(
+        classifier=classifier,
+        train_info=train_info,
+        X_eval=X_test,
+        y_eval=y_test,
+        feature_names=fi_feature_names,
+        logger=logger,
+    )
+    fi_file_basename: Optional[str] = None
+    if feature_importance_payload is not None:
+        fi_file_basename = "feature_importance.json"
+        fi_path = os.path.join(model_dir, fi_file_basename)
+        with open(fi_path, "w", encoding="utf-8") as f:
+            json.dump(feature_importance_payload, f, ensure_ascii=False, indent=2)
+        logger(f"[Classification] Saved feature importance: {fi_path}")
+
     fe_state_path = _save_feature_extractor_state(feature_extractor, model_dir, logger)
 
     artefacts = {
@@ -1215,6 +1615,7 @@ def _run_subject_classification_impl(
         "threshold_used": round(decision_threshold, 6),
         "youden_j": round(youden_j_val, 6) if youden_j_val is not None else None,
         "threshold_n_loo_predictions": n_loo_predictions,
+        "feature_importance_file": fi_file_basename,
         "feature_extractor_state_file": os.path.basename(fe_state_path) if fe_state_path else None,
         "feature_extractor_state_source": _loaded_fe_state_path,
     }

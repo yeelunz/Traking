@@ -3,6 +3,7 @@ import os
 import json
 import time
 import hashlib
+import copy
 from datetime import datetime
 from contextlib import contextmanager
 from typing import Dict, Any, List, Callable, Optional, Sequence
@@ -315,6 +316,25 @@ class PipelineRunner:
                 except Exception:
                     continue
             return names
+
+        def _dataset_subjects(dataset: Any) -> List[str]:
+            subjects: set[str] = set()
+            try:
+                total = len(dataset)
+            except Exception:
+                total = 0
+            for idx in range(int(total)):
+                try:
+                    item = dataset[idx]
+                    vp = item.get("video_path") if isinstance(item, dict) else getattr(item, "video_path", None)
+                    if not vp:
+                        continue
+                    subj = dm.video_subjects.get(vp) or dm._derive_subject(vp)  # type: ignore[attr-defined]
+                    if subj:
+                        subjects.add(str(subj))
+                except Exception:
+                    continue
+            return sorted(subjects)
 
         loso_folds: List[Dict[str, Any]] = []
         if loso_enabled:
@@ -1442,12 +1462,30 @@ class PipelineRunner:
                     "trajectory_filter",
                     {
                         "bbox_strategy": str(traj_filter_cfg.get("bbox_strategy", "none")),
+                        "filter_bbox_size": bool(traj_filter_cfg.get("filter_bbox_size", False)),
+                        "skip_hampel": bool(traj_filter_cfg.get("skip_hampel", True)),
                         "detector_models": list(test_predictions.keys()),
                     },
                 ) as stage_entry:
-                    _tf_bbox_strategy = str(traj_filter_cfg.get("bbox_strategy", "none"))
+                    _tf_bbox_strategy = str(traj_filter_cfg.get("bbox_strategy", "hampel_only"))
                     _tf_bbox_params = dict(traj_filter_cfg.get("bbox_params", {}) or {})
                     _tf_traj_params = dict(traj_filter_cfg.get("traj_params", {}) or {})
+                    _tf_skip_hampel = bool(traj_filter_cfg.get("skip_hampel", False))
+                    _tf_filter_bbox_size = bool(traj_filter_cfg.get("filter_bbox_size", False))
+                    if not _tf_bbox_params:
+                        _tf_bbox_params = {
+                            "macro_ratio": 0.06,
+                            "micro_hw": 2,
+                        }
+                    if not _tf_traj_params:
+                        _tf_traj_params = {
+                            "sg_window": 5,
+                            "sg_polyorder": 2,
+                            "macro_ratio": 0.06,
+                            "micro_hw": 2,
+                            "macro_sigma": 3.0,
+                            "micro_sigma": 3.0,
+                        }
 
                     _tf_metrics_all: Dict[str, Dict[str, Dict[str, Any]]] = {}
                     _tf_filtered: Dict[str, Dict[str, list]] = {}
@@ -1501,7 +1539,12 @@ class PipelineRunner:
                                 bbox_strategy=_tf_bbox_strategy,
                                 bbox_params=_tf_bbox_params,
                                 traj_params=_tf_traj_params,
+                                skip_hampel=_tf_skip_hampel,
                             )
+
+                            if not _tf_filter_bbox_size:
+                                _tf_result["widths"] = _tf_w.copy()
+                                _tf_result["heights"] = _tf_h.copy()
 
                             # After-filtering metrics
                             _tf_after = _compute_traj_metrics(
@@ -1577,6 +1620,8 @@ class PipelineRunner:
                             "bbox_strategy": _tf_bbox_strategy,
                             "bbox_params": _tf_bbox_params,
                             "traj_params": _tf_traj_params,
+                            "skip_hampel": _tf_skip_hampel,
+                            "filter_bbox_size": _tf_filter_bbox_size,
                         },
                     }
                     _tf_summary_path = os.path.join(_tf_out_dir, "summary.json")
@@ -2139,14 +2184,38 @@ class PipelineRunner:
                             _clf_cached_entry.get("checkpoint")
                             if isinstance(_clf_cached_entry, dict) else None
                         )
+                        _runtime_preproc_steps: List[Dict[str, Any]] = []
+                        for _step in exp.get("pipeline", []) or []:
+                            if not isinstance(_step, dict):
+                                continue
+                            if _step.get("type") != "preproc":
+                                continue
+                            _runtime_preproc_steps.append(
+                                {
+                                    "name": _step.get("name"),
+                                    "params": _step.get("params", {}),
+                                }
+                            )
+                        _clf_cfg_runtime = copy.deepcopy(clf_cfg)
+                        _fold_test_subjects = _dataset_subjects(test_ds)
+                        _clf_cfg_runtime["runtime_context"] = {
+                            "split_method": "loso" if loso_enabled else method,
+                            "loso_subject": subject,
+                            "loso_test_subjects": _fold_test_subjects,
+                            "fold": fold_idx + 1,
+                        }
+                        _clf_cfg_runtime["runtime_preprocessing"] = {
+                            "scheme": scheme,
+                            "preproc_steps": _runtime_preproc_steps,
+                        }
                         _clf_result = run_subject_classification(
-                            clf_cfg,
+                            _clf_cfg_runtime,
                             self.dataset_root,
                             train_ds,
                             test_predictions,
                             out_dir,
                             self._log,
-                            split_method=method,
+                            split_method=("loso" if loso_enabled else method),
                             cached_classifier_path=_clf_cached_ckpt,
                         )
                         if isinstance(_clf_result, dict):

@@ -199,6 +199,8 @@ def _compute_voting_analysis(predictions: List[Dict]) -> Dict:
             soft_top_combos.append(soft_result)
     top_combos.sort(key=lambda x: (x["accuracy"] or 0, x["correct"]), reverse=True)
     soft_top_combos.sort(key=lambda x: (x["accuracy"] or 0, x["correct"]), reverse=True)
+    top_combos = top_combos[:10]
+    soft_top_combos = soft_top_combos[:10]
 
     return {
         "modalities": effective_modalities,
@@ -262,6 +264,7 @@ def _build_loso_combined(
     accuracy = (tp + tn) / total
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
@@ -327,6 +330,7 @@ def _build_loso_combined(
         "balanced_accuracy": balanced,
         "precision_positive": precision,
         "recall_positive": recall,
+        "specificity": specificity,
         "f1_positive": f1,
         "roc_auc": roc_auc,
         "brier_score": brier_score,
@@ -344,6 +348,159 @@ def _build_loso_combined(
         "threshold_n_loo_predictions": total_loo_predictions or None,
     }
     return combined_summary, all_predictions
+
+
+def _to_float_list(values: Any) -> Optional[List[float]]:
+    if not isinstance(values, list):
+        return None
+    out: List[float] = []
+    for value in values:
+        try:
+            out.append(float(value))
+        except Exception:
+            out.append(0.0)
+    return out
+
+
+def _aligned_feature_importances(
+    feature_keys: Sequence[str],
+    train_info: Optional[Dict[str, Any]],
+) -> Optional[List[float]]:
+    if not feature_keys or not isinstance(train_info, dict):
+        return None
+
+    values = _to_float_list(train_info.get("feature_importances"))
+    if values is None:
+        return None
+
+    n_keys = len(feature_keys)
+    if len(values) == n_keys:
+        return values
+
+    keep_indices_raw = train_info.get("feature_importances_keep_indices")
+    reduced_raw = train_info.get("feature_importances_reduced")
+    keep_indices = (
+        [int(v) for v in keep_indices_raw]
+        if isinstance(keep_indices_raw, list)
+        else None
+    )
+    reduced_values = _to_float_list(reduced_raw)
+
+    if isinstance(keep_indices, list) and keep_indices:
+        source_values = reduced_values if (reduced_values is not None and len(reduced_values) == len(keep_indices)) else values
+        if len(source_values) == len(keep_indices):
+            full = [0.0] * n_keys
+            for idx, val in zip(keep_indices, source_values):
+                if 0 <= idx < n_keys:
+                    full[idx] = float(val)
+            return full
+
+    # Legacy fallback: truncate / zero-pad by index.
+    full = [0.0] * n_keys
+    upto = min(len(values), n_keys)
+    for i in range(upto):
+        full[i] = float(values[i])
+    return full
+
+
+def _build_feature_importance_view(
+    keys: Sequence[str],
+    importances: Sequence[float],
+    *,
+    top_n: int = 10,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not keys or not importances:
+        return None
+    pairs = [
+        {"feature": str(k), "importance": float(v)}
+        for k, v in zip(keys, importances)
+    ]
+    if not pairs:
+        return None
+    desc = sorted(pairs, key=lambda item: item["importance"], reverse=True)
+    asc = sorted(pairs, key=lambda item: item["importance"])
+    return {
+        "top": desc[:top_n],
+        "bottom": asc[:top_n],
+        "meta": meta or {},
+    }
+
+
+def _single_feature_importance_view(artefacts: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(artefacts, dict):
+        return None
+    feature_keys = artefacts.get("feature_keys")
+    train_info = artefacts.get("train_info")
+    if not isinstance(feature_keys, list):
+        return None
+    aligned = _aligned_feature_importances(feature_keys, train_info)
+    if aligned is None:
+        return None
+    return _build_feature_importance_view(
+        feature_keys,
+        aligned,
+        top_n=10,
+        meta={"mode": "single", "source": "artefacts.train_info.feature_importances"},
+    )
+
+
+def _loso_feature_importance_view(
+    fold_entries: List[Dict[str, Any]],
+    entries: Dict[str, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    fold_maps: List[Dict[str, float]] = []
+    key_order: List[str] = []
+    key_seen: set[str] = set()
+    total_folds = 0
+    used_folds = 0
+
+    for fold in fold_entries:
+        raw_id = fold.get("exp_id")
+        if not raw_id:
+            continue
+        total_folds += 1
+        raw_entry = entries.get(raw_id)
+        if not raw_entry:
+            continue
+        exp_path = Path(raw_entry["path"])
+        art = load_json(exp_path / "classification" / "artefacts.json") or {}
+        feature_keys = art.get("feature_keys")
+        if not isinstance(feature_keys, list) or not feature_keys:
+            continue
+        aligned = _aligned_feature_importances(feature_keys, art.get("train_info"))
+        if aligned is None:
+            continue
+        fmap = {str(k): float(v) for k, v in zip(feature_keys, aligned)}
+        fold_maps.append(fmap)
+        used_folds += 1
+        for key in feature_keys:
+            key_str = str(key)
+            if key_str not in key_seen:
+                key_seen.add(key_str)
+                key_order.append(key_str)
+
+    if not fold_maps or not key_order or used_folds <= 0:
+        return None
+
+    mean_values: List[float] = []
+    for key in key_order:
+        total = 0.0
+        for fmap in fold_maps:
+            total += float(fmap.get(key, 0.0))
+        mean_values.append(total / float(used_folds))
+
+    return _build_feature_importance_view(
+        key_order,
+        mean_values,
+        top_n=10,
+        meta={
+            "mode": "loso_mean",
+            "source": "mean_over_loso_folds",
+            "folds_used": used_folds,
+            "folds_total": total_folds,
+        },
+    )
 
 
 def load_json(path: Path) -> Optional[Dict]:
@@ -396,6 +553,18 @@ def trajectory_filter_summary_metrics(exp_path: Path) -> Optional[Dict]:
     if not summary_path.exists():
         return None
     return load_json(summary_path)
+
+
+def filtered_detection_summary_metrics(exp_path: Path) -> Optional[Dict]:
+    """Load post-filter detection summary from trajectory-filter outputs.
+
+    Source file: ``<exp>/test/trajectory_filter/filtered_detection_summary.json``.
+    """
+    summary_path = exp_path / "test" / "trajectory_filter" / "filtered_detection_summary.json"
+    if not summary_path.exists():
+        return None
+    data = load_json(summary_path)
+    return first_value(data) if data else None
 
 
 def gather_classification_metrics(exp_path: Path) -> Dict:
@@ -571,6 +740,7 @@ class ExperimentIndex:
             seg_preview = segmentation_summary_metrics(exp_path)
             cls_preview = classification_summary_metrics(exp_path)
             tf_preview = trajectory_filter_summary_metrics(exp_path)
+            fdet_preview = filtered_detection_summary_metrics(exp_path)
             entry = {
                 "id": rel,
                 "path": exp_path,
@@ -594,6 +764,7 @@ class ExperimentIndex:
                     "segmentation": seg_preview,
                     "classification": cls_preview,
                     "trajectory_filter": tf_preview,
+                    "filtered_detection": fdet_preview,
                 },
             }
             entries[rel] = entry
@@ -1029,6 +1200,7 @@ def create_app(results_root: Path) -> FastAPI:
             seg_fold_previews: List[Optional[Dict]] = []
             cls_fold_previews: List[Optional[Dict]] = []
             tf_fold_previews: List[Optional[Dict]] = []
+            fdet_fold_previews: List[Optional[Dict]] = []
             newest_created_at = None
             newest_entry: Optional[Dict] = None
 
@@ -1039,6 +1211,7 @@ def create_app(results_root: Path) -> FastAPI:
                 raw_entry = index.entries.get(raw_id)
                 if not raw_entry:
                     continue
+                raw_exp_path = Path(raw_entry["path"])
                 created_at = raw_entry.get("created_at")
                 if created_at and (newest_created_at is None or str(created_at) > str(newest_created_at)):
                     newest_created_at = created_at
@@ -1048,6 +1221,10 @@ def create_app(results_root: Path) -> FastAPI:
                 seg_fold_previews.append((raw_entry.get("preview") or {}).get("segmentation"))
                 cls_fold_previews.append((raw_entry.get("preview") or {}).get("classification"))
                 tf_fold_previews.append((raw_entry.get("preview") or {}).get("trajectory_filter"))
+                fdet_direct = filtered_detection_summary_metrics(raw_exp_path)
+                fdet_fold_previews.append(
+                    fdet_direct if fdet_direct is not None else (raw_entry.get("preview") or {}).get("filtered_detection")
+                )
                 fold_payloads.append({
                     "fold": fold.get("fold"),
                     "exp_id": raw_id,
@@ -1063,6 +1240,7 @@ def create_app(results_root: Path) -> FastAPI:
             aggregate_segmentation = aggregate_preview_dicts(seg_fold_previews)
             aggregate_classification = aggregate_preview_dicts(cls_fold_previews)
             aggregate_trajectory_filter = aggregate_preview_dicts(tf_fold_previews)
+            aggregate_filtered_detection = aggregate_preview_dicts(fdet_fold_previews)
 
             # Combined (summed) classification stats across all LOSO folds
             combined_cls_summary, combined_predictions = _build_loso_combined(
@@ -1094,8 +1272,10 @@ def create_app(results_root: Path) -> FastAPI:
                     "combined": combined_cls_summary,
                     "predictions": combined_predictions,
                     "artefacts": None,
+                    "feature_importance": _loso_feature_importance_view(folds, index.entries),
                 },
                 "trajectory_filter": {"summary": aggregate_trajectory_filter, "per_video": []} if aggregate_trajectory_filter else None,
+                "filtered_detection": {"summary": aggregate_filtered_detection} if aggregate_filtered_detection else None,
                 "loso_voting": loso_voting,
                 "folds": fold_payloads,
             }
@@ -1110,6 +1290,8 @@ def create_app(results_root: Path) -> FastAPI:
         detection = gather_detection_metrics(exp_path) if (exp_path / "test" / "detection").exists() else None
         segmentation = gather_segmentation_metrics(exp_path) if (exp_path / "test" / "segmentation").exists() else None
         classification = gather_classification_metrics(exp_path) if (exp_path / "classification").exists() else None
+        if isinstance(classification, dict):
+            classification["feature_importance"] = _single_feature_importance_view(classification.get("artefacts"))
         trajectory_filter = gather_trajectory_filter_metrics(exp_path)
         # Expose filtered-detection accuracy (IoU/CE/SR after smoothing) as a
         # dedicated top-level key so the frontend can render it alongside the

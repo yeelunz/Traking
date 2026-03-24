@@ -1,0 +1,26 @@
+texture_pretrain:
+  enable: true
+  backbone: convnext_tiny
+  num_classes: 2
+  embedding_dim: 3
+  input_size: 96
+  batch_size: 32
+  epochs: 30
+  lr: 0.0001
+  weight_decay: 0.0001
+  save_path: C:\Users\User\Desktop\code\Traking\ckpt\texture_pretrain_cache\auto_data\tsc_v3_pro_c27285f27cd964275e8f5ea4\best.pth
+  save_backbone_only: true
+  optimizer: adamw
+  scheduler: cosine
+  num_workers: 0
+  device: auto
+  amp: true
+  head_type: linear
+  hidden_dim: 256
+  dropout: 0.2
+  pretrained_imagenet: true
+  force_official_pretrained: true
+  cache_enabled: true
+  cache_dir: C:\Users\User\Desktop\code\Traking\ckpt\texture_pretrain_cache
+  train_manifest: C:\Users\User\Desktop\code\Traking\ckpt\texture_pretrain_cache\auto_data\tsc_v3_pro_c27285f27cd964275e8f5ea4\manifests\train.csv
+  val_manifest: C:\Users\User\Desktop\code\Traking\ckpt\texture_pretrain_cache\auto_data\tsc_v3_pro_c27285f27cd964275e8f5ea4\manifests\val.csv
