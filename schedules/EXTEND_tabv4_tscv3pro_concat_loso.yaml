@@ -162,6 +162,29 @@ queue:
         label_file: *label_file
         level: video
 
+      clf_tabv4_xgboost_concat: &clf_tabv4_xgboost_concat
+        enabled: true
+        feature_extractor: *fe_tab_v4_pretrain
+        classifier:
+          name: xgboost
+          params:
+            n_estimators: 200
+            max_depth: 4
+            learning_rate: 0.05
+            subsample: 0.8
+            colsample_bytree: 0.8
+            gamma: 0.0
+            reg_lambda: 1.0
+            reg_alpha: 0.0
+            eval_metric: logloss
+            n_jobs: -1
+            random_state: 42
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
       clf_tscv3pro_multirocket_concat: &clf_tscv3pro_multirocket_concat
         enabled: true
         feature_extractor: *fe_tsc_v3pro_pretrain
@@ -358,6 +381,29 @@ queue:
               params: *detector_yolo11l
       evaluation: *evaluation_defaults
       classification: *clf_tscv3pro_timesnet_concat
+      segmentation: *seg_mednext
+      output: *output_defaults
+      trajectory_filter: *trajectory_filter_defaults
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 07  tab_v4(pretrain) + XGBoost + concat
+  # ═══════════════════════════════════════════════════════════════════════════
+  - label: "07_tabv4_xgboost_concat"
+    config:
+      seed: 42
+      dataset: *dataset_merged_loso
+      experiments:
+        - name: "mednext_clahe_global_tabv4_xgboost_concat"
+          preproc_scheme: "A"
+          pipeline:
+            - type: preproc
+              name: CLAHE
+              params: *clahe_global
+            - type: model
+              name: YOLOv11
+              params: *detector_yolo11l
+      evaluation: *evaluation_defaults
+      classification: *clf_tabv4_xgboost_concat
       segmentation: *seg_mednext
       output: *output_defaults
       trajectory_filter: *trajectory_filter_defaults

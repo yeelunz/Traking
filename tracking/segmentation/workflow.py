@@ -805,6 +805,8 @@ class SegmentationWorkflow:
             return summary
 
         # If GT exists, we should evaluate ALL GT frames.
+        # In addition, inference must still run on ALL prediction frames so
+        # downstream classification can consume per-frame segmentation outputs.
         # Missing bbox handling order:
         # 1) Use bbox at the same frame (if any)
         # 2) Fallback to previous bbox
@@ -814,12 +816,13 @@ class SegmentationWorkflow:
         work_predictions: List[FramePrediction] = []
         try:
             if gt_frame_indices:
+                infer_frame_indices = sorted(set(gt_frame_indices) | set(pred_by_frame.keys()))
                 # last_bbox_raw stores an unpadded/unexpanded bbox estimate (either from detector
                 # or from bootstrap using the segmentation mask). We intentionally do NOT store
                 # padded/expanded ROI bboxes here to avoid expansion accumulating over time.
                 last_bbox_raw: Optional[tuple] = None
                 last_bbox_source: Optional[str] = None
-                for frame_idx in gt_frame_indices:
+                for frame_idx in infer_frame_indices:
                     pred = pred_by_frame.get(int(frame_idx))
                     use_bbox_raw: Optional[tuple] = None
                     used_prev_bbox = False

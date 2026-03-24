@@ -56,6 +56,7 @@ from ..trajectory_filter import (
     smooth_trajectory_2d as _smooth_trajectory_2d,
 )
 from ..texture_resnet import MaskedROIResNetExtractor, RESNET_FEAT_DIM
+from .v3pro import _build_runtime_preprocs_from_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -822,6 +823,8 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
         self._subject_stats = list(
             cfg.get("aggregate_stats", ["mean", "std", "min", "max"])
         )
+        _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
+        self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 
         if self._texture_backbone not in {"resnet18", "resnet-18"}:
             logger.warning(
@@ -999,7 +1002,12 @@ class MotionTextureStaticFeatureExtractor(TrajectoryFeatureExtractor):
         else:
             key_samples.append(samples[0])
 
-        feats = resnet.extract_from_video(video_path, key_samples)  # (2, 512)
+        feats = resnet.extract_from_video(
+            video_path,
+            key_samples,
+            global_preprocs=self._runtime_global_preprocs,
+            roi_preprocs=self._runtime_roi_preprocs,
+        )  # (2, 512)
         return feats.flatten().tolist()
 
 
@@ -1058,6 +1066,8 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
         self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
         self._interp_method: str = str(cfg.get("interp_method", "cubic"))
+        _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
+        self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 
         if self._texture_backbone not in {"resnet18", "resnet-18"}:
             logger.warning(
@@ -1337,7 +1347,12 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
             )
             selected.append(proxy)
 
-        feats = resnet.extract_from_video(video_path, selected)  # (N_TS_STEPS, 512)
+        feats = resnet.extract_from_video(
+            video_path,
+            selected,
+            global_preprocs=self._runtime_global_preprocs,
+            roi_preprocs=self._runtime_roi_preprocs,
+        )  # (N_TS_STEPS, 512)
 
         n_actual = min(feats.shape[0], N_TS_STEPS)
         result[:n_actual] = feats[:n_actual]
@@ -1847,6 +1862,8 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
         self._subject_stats = list(
             cfg.get("aggregate_stats", ["mean", "std", "min", "max"])
         )
+        _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
+        self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 
         if self._texture_backbone not in {"resnet18", "resnet-18"}:
             logger.warning(
@@ -2014,7 +2031,12 @@ class MotionTextureStaticV2FeatureExtractor(TrajectoryFeatureExtractor):
         else:
             key_samples.append(samples[0])
 
-        feats = resnet.extract_from_video(video_path, key_samples)
+        feats = resnet.extract_from_video(
+            video_path,
+            key_samples,
+            global_preprocs=self._runtime_global_preprocs,
+            roi_preprocs=self._runtime_roi_preprocs,
+        )
         return feats.flatten().tolist()
 
 
@@ -2077,6 +2099,8 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
         self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
         self._interp_method: str = str(cfg.get("interp_method", "cubic"))
+        _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
+        self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 
         if self._texture_backbone not in {"resnet18", "resnet-18"}:
             logger.warning(
@@ -2330,7 +2354,12 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
             )
             selected.append(proxy)
 
-        feats = resnet.extract_from_video(video_path, selected)
+        feats = resnet.extract_from_video(
+            video_path,
+            selected,
+            global_preprocs=self._runtime_global_preprocs,
+            roi_preprocs=self._runtime_roi_preprocs,
+        )
 
         n_actual = min(feats.shape[0], N_TS_STEPS_V2)
         result[:n_actual] = feats[:n_actual]

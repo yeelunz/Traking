@@ -362,6 +362,80 @@ def _to_float_list(values: Any) -> Optional[List[float]]:
     return out
 
 
+def _rows_to_feature_map(rows: Any) -> Dict[str, float]:
+    if not isinstance(rows, list):
+        return {}
+    fmap: Dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name_raw = row.get("feature_name", row.get("feature"))
+        if name_raw is None:
+            idx = row.get("feature_index")
+            if idx is None:
+                continue
+            name = f"f_{int(idx):04d}"
+        else:
+            name = str(name_raw)
+        try:
+            val = float(row.get("importance", 0.0))
+        except Exception:
+            val = 0.0
+        fmap[name] = val
+    return fmap
+
+
+def _extract_feature_map_from_payload(payload: Optional[Dict[str, Any]]) -> Tuple[Dict[str, float], Optional[str]]:
+    if not isinstance(payload, dict) or not payload:
+        return {}, None
+
+    candidates: List[Tuple[str, Dict[str, float]]] = []
+
+    model_reported = payload.get("model_reported")
+    if isinstance(model_reported, dict):
+        fmap = _rows_to_feature_map(model_reported.get("importances"))
+        if fmap:
+            candidates.append(("feature_importance.model_reported", fmap))
+
+    classifier_specific = payload.get("classifier_specific")
+    if isinstance(classifier_specific, dict):
+        preferred_keys = (
+            "tree_model_feature_importances",
+            "tabpfn_extensions_interpretability",
+        )
+        for key in preferred_keys:
+            section = classifier_specific.get(key)
+            if isinstance(section, dict):
+                fmap = _rows_to_feature_map(section.get("importances"))
+                if fmap:
+                    candidates.append((f"feature_importance.classifier_specific.{key}", fmap))
+        for key, section in classifier_specific.items():
+            if key in preferred_keys or not isinstance(section, dict):
+                continue
+            fmap = _rows_to_feature_map(section.get("importances"))
+            if fmap:
+                candidates.append((f"feature_importance.classifier_specific.{key}", fmap))
+
+    model_agnostic = payload.get("model_agnostic")
+    if isinstance(model_agnostic, dict):
+        fmap = _rows_to_feature_map(model_agnostic.get("importances"))
+        if fmap:
+            candidates.append(("feature_importance.model_agnostic", fmap))
+
+    if not candidates:
+        return {}, None
+
+    # Prefer classifier-specific explanations, then model-reported, then model-agnostic.
+    source_order = {
+        "feature_importance.classifier_specific.tree_model_feature_importances": 0,
+        "feature_importance.classifier_specific.tabpfn_extensions_interpretability": 1,
+        "feature_importance.model_reported": 2,
+        "feature_importance.model_agnostic": 3,
+    }
+    candidates.sort(key=lambda item: source_order.get(item[0], 10))
+    return candidates[0][1], candidates[0][0]
+
+
 def _aligned_feature_importances(
     feature_keys: Sequence[str],
     train_info: Optional[Dict[str, Any]],
@@ -403,6 +477,23 @@ def _aligned_feature_importances(
     return full
 
 
+def _feature_importance_map_from_artifacts(
+    artefacts: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, float], Optional[str]]:
+    if not isinstance(artefacts, dict):
+        return {}, None
+    feature_keys = artefacts.get("feature_keys")
+    if not isinstance(feature_keys, list) or not feature_keys:
+        return {}, None
+    aligned = _aligned_feature_importances(feature_keys, artefacts.get("train_info"))
+    if aligned is None:
+        return {}, None
+    return (
+        {str(k): float(v) for k, v in zip(feature_keys, aligned)},
+        "artefacts.train_info.feature_importances",
+    )
+
+
 def _build_feature_importance_view(
     keys: Sequence[str],
     importances: Sequence[float],
@@ -427,21 +518,29 @@ def _build_feature_importance_view(
     }
 
 
-def _single_feature_importance_view(artefacts: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not isinstance(artefacts, dict):
+def _single_feature_importance_view(classification: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(classification, dict):
         return None
-    feature_keys = artefacts.get("feature_keys")
-    train_info = artefacts.get("train_info")
-    if not isinstance(feature_keys, list):
+
+    fi_payload = classification.get("feature_importance_data")
+    fmap, source = _extract_feature_map_from_payload(fi_payload if isinstance(fi_payload, dict) else None)
+
+    if not fmap:
+        artefacts = classification.get("artefacts")
+        fmap, source = _feature_importance_map_from_artifacts(
+            artefacts if isinstance(artefacts, dict) else None
+        )
+
+    if not fmap:
         return None
-    aligned = _aligned_feature_importances(feature_keys, train_info)
-    if aligned is None:
-        return None
+
+    keys = list(fmap.keys())
+    values = [float(fmap[k]) for k in keys]
     return _build_feature_importance_view(
-        feature_keys,
-        aligned,
+        keys,
+        values,
         top_n=10,
-        meta={"mode": "single", "source": "artefacts.train_info.feature_importances"},
+        meta={"mode": "single", "source": source or "unknown"},
     )
 
 
@@ -464,18 +563,18 @@ def _loso_feature_importance_view(
         if not raw_entry:
             continue
         exp_path = Path(raw_entry["path"])
-        art = load_json(exp_path / "classification" / "artefacts.json") or {}
-        feature_keys = art.get("feature_keys")
-        if not isinstance(feature_keys, list) or not feature_keys:
+
+        fi_payload = load_json(exp_path / "classification" / "feature_importance.json") or {}
+        fmap, _ = _extract_feature_map_from_payload(fi_payload)
+        if not fmap:
+            art = load_json(exp_path / "classification" / "artefacts.json") or {}
+            fmap, _ = _feature_importance_map_from_artifacts(art)
+        if not fmap:
             continue
-        aligned = _aligned_feature_importances(feature_keys, art.get("train_info"))
-        if aligned is None:
-            continue
-        fmap = {str(k): float(v) for k, v in zip(feature_keys, aligned)}
+
         fold_maps.append(fmap)
         used_folds += 1
-        for key in feature_keys:
-            key_str = str(key)
+        for key_str in fmap.keys():
             if key_str not in key_seen:
                 key_seen.add(key_str)
                 key_order.append(key_str)
@@ -573,10 +672,16 @@ def gather_classification_metrics(exp_path: Path) -> Dict:
     summary = load_json(cls_dir / "summary.json") if (cls_dir / "summary.json").exists() else None
     predictions = load_json(cls_dir / "predictions.json") if (cls_dir / "predictions.json").exists() else None
     artefacts = load_json(cls_dir / "artefacts.json") if (cls_dir / "artefacts.json").exists() else None
+    feature_importance_data = (
+        load_json(cls_dir / "feature_importance.json")
+        if (cls_dir / "feature_importance.json").exists()
+        else None
+    )
     return {
         "summary": summary,
         "predictions": predictions or [],
         "artefacts": artefacts,
+        "feature_importance_data": feature_importance_data,
     }
 
 
@@ -1291,7 +1396,7 @@ def create_app(results_root: Path) -> FastAPI:
         segmentation = gather_segmentation_metrics(exp_path) if (exp_path / "test" / "segmentation").exists() else None
         classification = gather_classification_metrics(exp_path) if (exp_path / "classification").exists() else None
         if isinstance(classification, dict):
-            classification["feature_importance"] = _single_feature_importance_view(classification.get("artefacts"))
+            classification["feature_importance"] = _single_feature_importance_view(classification)
         trajectory_filter = gather_trajectory_filter_metrics(exp_path)
         # Expose filtered-detection accuracy (IoU/CE/SR after smoothing) as a
         # dedicated top-level key so the frontend can render it alongside the

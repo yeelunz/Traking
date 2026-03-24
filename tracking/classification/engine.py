@@ -421,11 +421,32 @@ def _build_runtime_preprocs(classification_cfg: Dict[str, Any]) -> Tuple[List[An
     return global_preprocs, roi_preprocs
 
 
+def _inject_runtime_preprocessing_into_feature_cfg(
+    classification_cfg: Dict[str, Any],
+    feature_cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Attach runtime preprocessing config to texture-capable feature extractors.
+
+    This keeps inference-time texture ROI extraction aligned with texture pretrain
+    ROI generation, which already consumes ``runtime_preprocessing`` from
+    classification config.
+    """
+    cfg = dict(feature_cfg or {})
+    feature_name = str(cfg.get("name", "")).strip().lower()
+    if feature_name not in _TEXTURE_BACKBONE_FEATURES:
+        return cfg
+
+    runtime_cfg = dict((classification_cfg or {}).get("runtime_preprocessing") or {})
+    params = dict(cfg.get("params") or {})
+    params["_runtime_texture_preprocessing"] = runtime_cfg
+    cfg["params"] = params
+    return cfg
+
+
 def _build_texture_pretrain_auto_root(
     *,
     cache_dir: Path,
     dataset_root: str,
-    feature_name: str,
     train_videos: Dict[str, List[FramePrediction]],
     backbone: str,
     input_size: int,
@@ -433,11 +454,27 @@ def _build_texture_pretrain_auto_root(
     val_ratio: float,
     roi_pad_ratio: float,
     seed: int,
+    runtime_preprocessing: Optional[Dict[str, Any]] = None,
 ) -> Path:
+    runtime_cfg = dict(runtime_preprocessing or {})
+    step_defs = runtime_cfg.get("preproc_steps") or []
+    normalized_steps: List[Dict[str, Any]] = []
+    if isinstance(step_defs, Sequence) and not isinstance(step_defs, (str, bytes)):
+        for step in step_defs:
+            if not isinstance(step, dict):
+                continue
+            name = str(step.get("name", "")).strip()
+            if not name:
+                continue
+            normalized_steps.append(
+                {
+                    "name": name,
+                    "params": step.get("params", {}) or {},
+                }
+            )
     identity = {
-        "schema": "texture_pretrain_auto_data_v1",
+        "schema": "texture_pretrain_auto_data_v2",
         "dataset_root": str(Path(dataset_root).resolve()),
-        "feature_name": str(feature_name),
         "train_videos": sorted(str(v) for v in train_videos.keys()),
         "backbone": str(backbone),
         "input_size": int(input_size),
@@ -445,10 +482,14 @@ def _build_texture_pretrain_auto_root(
         "val_ratio": float(val_ratio),
         "roi_pad_ratio": float(roi_pad_ratio),
         "seed": int(seed),
+        "runtime_preprocessing": {
+            "scheme": str(runtime_cfg.get("scheme", "A")).strip().upper(),
+            "preproc_steps": normalized_steps,
+        },
     }
     packed = json.dumps(identity, ensure_ascii=False, sort_keys=True)
     key = hashlib.sha256(packed.encode("utf-8")).hexdigest()[:24]
-    return cache_dir / "auto_data" / f"{feature_name}_{key}"
+    return cache_dir / "auto_data" / f"shared_{key}"
 
 
 def _ensure_texture_pretrain_ckpt(
@@ -487,14 +528,14 @@ def _ensure_texture_pretrain_ckpt(
     input_size = int(tp_cfg.get("input_size", params.get("texture_image_size", 96)))
     max_frames_per_video = int(tp_cfg.get("max_frames_per_video", 16))
     val_ratio = float(tp_cfg.get("val_ratio", 0.2))
-    roi_pad_ratio = float(tp_cfg.get("roi_pad_ratio", 0.15))
+    roi_pad_ratio = float(params.get("roi_pad_ratio", tp_cfg.get("roi_pad_ratio", 0.15)))
 
     tp_seed = int(tp_cfg.get("seed", 42))
     cache_dir = Path(tp_cfg.get("cache_dir", "ckpt/texture_pretrain_cache")).resolve()
+    runtime_cfg = dict((classification_cfg or {}).get("runtime_preprocessing") or {})
     auto_root = _build_texture_pretrain_auto_root(
         cache_dir=cache_dir,
         dataset_root=dataset_root,
-        feature_name=feature_name,
         train_videos=train_videos,
         backbone=backbone,
         input_size=input_size,
@@ -502,6 +543,7 @@ def _ensure_texture_pretrain_ckpt(
         val_ratio=val_ratio,
         roi_pad_ratio=roi_pad_ratio,
         seed=tp_seed,
+        runtime_preprocessing=runtime_cfg,
     )
     roi_dir = auto_root / "roi_images"
     roi_dir.mkdir(parents=True, exist_ok=True)
@@ -1098,6 +1140,7 @@ def _run_subject_classification_impl(
         return None
 
     feature_cfg = config.get("feature_extractor", {"name": "basic", "params": {}})
+    feature_cfg = _inject_runtime_preprocessing_into_feature_cfg(config, feature_cfg)
     feature_name = feature_cfg.get("name", "basic")
     feature_cls = FEATURE_EXTRACTOR_REGISTRY.get(feature_name)
     if feature_cls is None:
@@ -1330,6 +1373,7 @@ def _run_subject_classification_impl(
             results_dir=results_dir,
             logger=logger,
         )
+        feature_cfg = _inject_runtime_preprocessing_into_feature_cfg(config, feature_cfg)
         feature_extractor = feature_cls(feature_cfg.get("params"))
     except Exception as _auto_pretrain_err:
         raise RuntimeError(

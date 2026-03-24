@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 
 RESNET_FEAT_DIM: int = 512
 
+
+def _apply_preprocs_frame_like_segmentation(frame: np.ndarray, preprocs: Sequence) -> np.ndarray:
+    if frame.ndim == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if not preprocs:
+        return frame
+    if frame.ndim == 2:
+        out = frame
+        for p in preprocs:
+            out = p.apply_to_frame(out)
+        return out
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    for p in preprocs:
+        rgb = p.apply_to_frame(rgb)
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
 # ── Dependency checks ────────────────────────────────────────────────────────
 _TORCH_OK = False
 _TV_OK = False
@@ -323,6 +340,9 @@ class MaskedROIResNetExtractor:
         video_path: str,
         samples: Sequence,
         dataset_root: Optional[str] = None,
+        *,
+        global_preprocs: Optional[Sequence] = None,
+        roi_preprocs: Optional[Sequence] = None,
     ) -> np.ndarray:
         """Extract 512-D features for each *sample* frame.
 
@@ -367,11 +387,12 @@ class MaskedROIResNetExtractor:
                     patches.append(None)
                     continue
 
-                gray = (
-                    cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    if frame.ndim == 3
-                    else frame
-                )
+                frame_for_crop = frame
+                if global_preprocs:
+                    frame_for_crop = _apply_preprocs_frame_like_segmentation(
+                        frame_for_crop,
+                        global_preprocs,
+                    )
 
                 # Load segmentation mask if available
                 mask_img = None
@@ -388,7 +409,29 @@ class MaskedROIResNetExtractor:
                         except Exception:
                             pass
 
-                patch = self._crop_and_mask(gray, sample.bbox, mask_img)
+                seg = getattr(sample, "segmentation", None)
+                seg_roi_bbox = getattr(seg, "roi_bbox", None) if seg is not None else None
+                crop_bbox = seg_roi_bbox if seg_roi_bbox is not None else sample.bbox
+                h, w = frame_for_crop.shape[:2]
+                x, y, bw, bh = crop_bbox
+                x0 = max(0, int(np.floor(x)))
+                y0 = max(0, int(np.floor(y)))
+                x1 = min(w, int(np.ceil(x + bw)))
+                y1 = min(h, int(np.ceil(y + bh)))
+                if x1 <= x0 or y1 <= y0:
+                    patches.append(None)
+                    continue
+
+                roi = frame_for_crop[y0:y1, x0:x1].copy()
+                if roi_preprocs and roi.size > 0:
+                    roi = _apply_preprocs_frame_like_segmentation(roi, roi_preprocs)
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+                mask_crop = mask_img[y0:y1, x0:x1] if mask_img is not None else None
+                if mask_crop is not None and mask_crop.ndim == 3:
+                    mask_crop = mask_crop[:, :, 0]
+                if mask_crop is not None:
+                    gray_roi = gray_roi * (mask_crop > 0).astype(np.uint8)
+                patch = gray_roi if gray_roi.size > 0 and min(gray_roi.shape[:2]) >= 2 else None
                 patches.append(patch)
         finally:
             cap.release()

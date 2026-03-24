@@ -2234,7 +2234,6 @@ class PipelineRunner:
                             self._log(f"[ClfCache] Saved classifier to persistent cache: {_clf_produced_pkl}")
                             _clf_disk_cache.setdefault(_clf_sig_key, {})[_clf_model_key] = _clf_cache_entry
                     except Exception as _e_cls:
-                        import traceback as _tb
                         stage_entry["status"] = "failed"
                         _tb_str = _tb.format_exc()
                         stage_entry["error"] = {"type": type(_e_cls).__name__, "message": str(_e_cls), "traceback": _tb_str}

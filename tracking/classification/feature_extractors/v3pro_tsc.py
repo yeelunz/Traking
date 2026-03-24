@@ -10,6 +10,11 @@ import numpy as np
 from ...core.interfaces import FramePrediction
 from ...core.registry import register_feature_extractor
 from ..interfaces import TrajectoryFeatureExtractor
+from .v3pro import (
+    _apply_preprocs_frame_like_segmentation,
+    _build_runtime_preprocs_from_cfg,
+    _resolve_texture_roi_bbox,
+)
 from .v3lite import N_TS_STEPS_LITE, _extract_ts_channels_lite
 from ..texture_backbone import TextureBackboneWrapper
 
@@ -68,6 +73,7 @@ def _crop_roi_rgb(
     bbox: Sequence[float],
     image_size: int,
     pad_ratio: float,
+    roi_preprocs: Optional[Sequence[Any]] = None,
 ) -> Optional[np.ndarray]:
     if frame_bgr is None or frame_bgr.size == 0 or len(bbox) != 4:
         return None
@@ -88,6 +94,9 @@ def _crop_roi_rgb(
     roi = frame_bgr[y1:y2, x1:x2]
     if roi.size == 0:
         return None
+
+    if roi_preprocs:
+        roi = _apply_preprocs_frame_like_segmentation(roi, roi_preprocs)
 
     resized = cv2.resize(roi, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -146,6 +155,8 @@ class TimeSeriesV3ProFeatureExtractor(TrajectoryFeatureExtractor):
         self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.15))
         self._texture_batch_size = int(cfg.get("texture_batch_size", 64))
         self._texture_device = str(cfg.get("texture_device", "auto"))
+        _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
+        self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 
         self._n_channels = N_TS_CHANNELS_V3PRO
         self._flat_len = self._n_channels * self._n_steps
@@ -221,11 +232,20 @@ class TimeSeriesV3ProFeatureExtractor(TrajectoryFeatureExtractor):
                 if not ok or frame is None:
                     continue
 
+                frame_for_crop = frame
+                if self._runtime_global_preprocs:
+                    frame_for_crop = _apply_preprocs_frame_like_segmentation(
+                        frame_for_crop,
+                        self._runtime_global_preprocs,
+                    )
+
+                crop_bbox, crop_pad_ratio = _resolve_texture_roi_bbox(ref, self._roi_pad_ratio)
                 roi = _crop_roi_rgb(
-                    frame,
-                    ref.bbox,
+                    frame_for_crop,
+                    crop_bbox,
                     image_size=self._texture_image_size,
-                    pad_ratio=self._roi_pad_ratio,
+                    pad_ratio=crop_pad_ratio,
+                    roi_preprocs=self._runtime_roi_preprocs,
                 )
                 if roi is None:
                     continue

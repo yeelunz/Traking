@@ -14,7 +14,12 @@ from ...core.interfaces import FramePrediction
 from ...core.registry import register_feature_extractor
 from ..interfaces import TrajectoryFeatureExtractor
 from ..texture_backbone import TextureBackboneWrapper
-from .v3pro import _extract_mean_roi_rgb
+from .v3pro import (
+    _aggregate_roi_features,
+    _extract_roi_rgb_batch,
+    _normalize_texture_pooling,
+    _normalize_texture_weight_source,
+)
 from ..trajectory_filter import smooth_trajectory_2d as _smooth_trajectory_2d
 
 
@@ -276,6 +281,8 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
         "n_texture_frames": 5,
         "texture_image_size": 96,
         "roi_pad_ratio": 0.15,
+        "texture_pooling": "score_weighted",  # mean | score_weighted
+        "texture_pooling_weight_source": "detection_score",  # detection_score | confidence | iou_pred
         "texture_mode": "freeze",  # freeze | learnable | pretrain
         "texture_backbone": "convnext_tiny",
         "texture_pretrain_ckpt": None,
@@ -288,6 +295,10 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
         self._n_texture_frames = int(cfg.get("n_texture_frames", 5))
         self._texture_image_size = int(cfg.get("texture_image_size", 96))
         self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.15))
+        self._texture_pooling = _normalize_texture_pooling(str(cfg.get("texture_pooling", "score_weighted")))
+        self._texture_pooling_weight_source = _normalize_texture_weight_source(
+            str(cfg.get("texture_pooling_weight_source", "detection_score"))
+        )
         self._texture_mode = _normalize_texture_mode_v4(str(cfg.get("texture_mode", "freeze")))
         self._texture_backbone = str(cfg.get("texture_backbone", "convnext_tiny"))
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
@@ -382,13 +393,16 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
         video_path: Optional[str],
     ) -> Dict[str, Any]:
         zeros = np.zeros((self._texture_dim,), dtype=np.float32)
-        tex_img = _extract_mean_roi_rgb(
+        roi_batch, roi_weights = _extract_roi_rgb_batch(
             samples=samples,
             video_path=video_path,
             image_size=self._texture_image_size,
             n_frames=self._n_texture_frames,
             pad_ratio=self._roi_pad_ratio,
+            weight_source=self._texture_pooling_weight_source,
         )
+        if roi_batch.shape[0] == 0:
+            return {"tex": zeros}
         if torch is None:
             return {"tex": zeros}
 
@@ -397,18 +411,24 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
             dev = next(wrapper.parameters()).device
         except Exception:  # noqa: BLE001
             dev = torch.device("cpu")
-        xb = torch.tensor(tex_img[None, ...], dtype=torch.float32, device=dev)
+        xb = torch.tensor(roi_batch, dtype=torch.float32, device=dev)
 
         if self._texture_mode == "freeze":
             with torch.no_grad():
                 x_norm = (xb - wrapper.img_mean) / (wrapper.img_std + 1e-8)
                 raw = wrapper._forward_backbone(x_norm).detach().cpu().numpy().astype(np.float64)
-            return {"tex": zeros, "_raw_texture_backbone": raw.reshape(-1)}
+            return {
+                "tex": zeros,
+                "_raw_texture_backbone_batch": raw,
+                "_raw_texture_weights": roi_weights,
+            }
 
         with torch.no_grad():
-            feat = wrapper(xb).detach().cpu().numpy().reshape(-1).astype(np.float32)
+            feat = wrapper(xb).detach().cpu().numpy().astype(np.float64)
+        feat = feat.reshape(feat.shape[0], -1)
+        pooled = _aggregate_roi_features(feat, roi_weights, self._texture_pooling)
         out = np.zeros((self._texture_dim,), dtype=np.float32)
-        out[: min(self._texture_dim, feat.shape[0])] = feat[: min(self._texture_dim, feat.shape[0])]
+        out[: min(self._texture_dim, pooled.shape[0])] = pooled[: min(self._texture_dim, pooled.shape[0])]
         return {"tex": out}
 
     def feature_order(self, level: str = "video") -> Sequence[str]:
@@ -432,9 +452,13 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
         for i, k in enumerate(self._texture_keys):
             out[k] = float(tex_vec[i]) if i < tex_vec.size else 0.0
 
-        raw = tex_info.get("_raw_texture_backbone")
-        if raw is not None:
-            out["_raw_texture_backbone"] = np.asarray(raw, dtype=np.float64)
+        raw_batch = tex_info.get("_raw_texture_backbone_batch")
+        if raw_batch is not None:
+            out["_raw_texture_backbone_batch"] = np.asarray(raw_batch, dtype=np.float64)
+            out["_raw_texture_weights"] = np.asarray(
+                tex_info.get("_raw_texture_weights", np.zeros((0,), dtype=np.float64)),
+                dtype=np.float64,
+            )
         return out
 
     def finalize_batch(
@@ -452,39 +476,73 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
                 out = OrderedDict((k, float(feat.get(k, 0.0))) for k in self._video_keys)
                 result.append(out)
         else:
-            raw_rows: List[np.ndarray] = []
-            indices: List[int] = []
-            for i, feat in enumerate(features_list):
-                raw = feat.get("_raw_texture_backbone")
-                if raw is None:
+            fit_rows: List[np.ndarray] = []
+            for feat in features_list:
+                raw_batch = feat.get("_raw_texture_backbone_batch")
+                if raw_batch is not None:
+                    arr2d = np.asarray(raw_batch, dtype=np.float64)
+                    if arr2d.ndim == 1:
+                        arr2d = arr2d.reshape(1, -1)
+                    elif arr2d.ndim > 2:
+                        arr2d = arr2d.reshape(arr2d.shape[0], -1)
+                    if arr2d.shape[0] > 0 and arr2d.shape[1] > 0:
+                        fit_rows.append(arr2d)
                     continue
-                arr = np.asarray(raw, dtype=np.float64).reshape(-1)
-                raw_rows.append(arr)
-                indices.append(i)
+                raw_legacy = feat.get("_raw_texture_backbone")
+                if raw_legacy is not None:
+                    arr1d = np.asarray(raw_legacy, dtype=np.float64).reshape(1, -1)
+                    if arr1d.shape[1] > 0:
+                        fit_rows.append(arr1d)
 
-            reduced = None
-            if raw_rows:
-                X = np.vstack(raw_rows)
+            if fit_rows:
+                X = np.vstack(fit_rows)
                 if fit:
-                    reduced, self._pca_mean, self._pca_components = self._pca_fit_transform(X, self._texture_dim)
+                    _, self._pca_mean, self._pca_components = self._pca_fit_transform(X, self._texture_dim)
                 else:
                     if self._pca_mean is None or self._pca_components is None:
                         raise RuntimeError(
                             "tab_v4 freeze mode requires fitted PCA state; run finalize_batch(..., fit=True) first."
                         )
-                    reduced = self._pca_transform(X, self._pca_mean, self._pca_components, self._texture_dim)
 
-            index_map = {src_idx: red_idx for red_idx, src_idx in enumerate(indices)}
             for i, feat in enumerate(features_list):
                 out = OrderedDict()
                 for k in self._motion_keys:
                     out[k] = float(feat.get(k, 0.0))
                 for k in self._static_keys:
                     out[k] = float(feat.get(k, 0.0))
-                if reduced is not None and i in index_map:
-                    tex_vec = reduced[index_map[i]]
-                else:
-                    tex_vec = np.zeros((self._texture_dim,), dtype=np.float64)
+
+                raw_batch = feat.get("_raw_texture_backbone_batch")
+                weights = feat.get("_raw_texture_weights")
+                if raw_batch is None:
+                    raw_legacy = feat.get("_raw_texture_backbone")
+                    if raw_legacy is not None:
+                        raw_batch = np.asarray(raw_legacy, dtype=np.float64).reshape(1, -1)
+                        weights = np.ones((1,), dtype=np.float64)
+
+                tex_vec = np.zeros((self._texture_dim,), dtype=np.float64)
+                if raw_batch is not None:
+                    arr2d = np.asarray(raw_batch, dtype=np.float64)
+                    if arr2d.ndim == 1:
+                        arr2d = arr2d.reshape(1, -1)
+                    elif arr2d.ndim > 2:
+                        arr2d = arr2d.reshape(arr2d.shape[0], -1)
+                    if arr2d.shape[0] > 0 and arr2d.shape[1] > 0:
+                        if self._pca_mean is None or self._pca_components is None:
+                            if fit and fit_rows:
+                                raise RuntimeError(
+                                    "tab_v4 freeze mode could not build PCA state for per-ROI texture reduction."
+                                )
+                        else:
+                            roi_reduced = self._pca_transform(
+                                arr2d,
+                                self._pca_mean,
+                                self._pca_components,
+                                self._texture_dim,
+                            )
+                            w = np.asarray(weights if weights is not None else np.ones((roi_reduced.shape[0],), dtype=np.float64), dtype=np.float64)
+                            pooled = _aggregate_roi_features(roi_reduced, w, self._texture_pooling)
+                            tex_vec[: min(self._texture_dim, pooled.shape[0])] = pooled[: min(self._texture_dim, pooled.shape[0])]
+
                 for j, k in enumerate(self._texture_keys):
                     out[k] = float(tex_vec[j]) if j < tex_vec.shape[0] else 0.0
                 result.append(out)
@@ -529,6 +587,8 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
     def get_state(self) -> Dict[str, Any]:
         return {
             "texture_mode": self._texture_mode,
+            "texture_pooling": self._texture_pooling,
+            "texture_pooling_weight_source": self._texture_pooling_weight_source,
             "pca_mean": self._pca_mean,
             "pca_components": self._pca_components,
             "feat_mean": self._feat_mean,
@@ -540,6 +600,12 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
     def set_state(self, state: Dict[str, Any]) -> None:
         if not isinstance(state, dict):
             raise ValueError("tab_v4 state must be a dict")
+        if "texture_pooling" in state:
+            self._texture_pooling = _normalize_texture_pooling(str(state.get("texture_pooling")))
+        if "texture_pooling_weight_source" in state:
+            self._texture_pooling_weight_source = _normalize_texture_weight_source(
+                str(state.get("texture_pooling_weight_source"))
+            )
         self._pca_mean = state.get("pca_mean")
         self._pca_components = state.get("pca_components")
         self._feat_mean = state.get("feat_mean")
