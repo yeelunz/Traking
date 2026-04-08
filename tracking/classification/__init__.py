@@ -17,6 +17,7 @@ from . import feature_extractors_v3lite  # noqa: F401
 # V3-Pro implementations (texture branch + fusion_mlp classifier; v3pro_fusion kept as alias)
 from . import feature_extractors_v3pro  # noqa: F401
 from . import feature_extractors_v4  # noqa: F401
+from . import feature_extractors_v5  # noqa: F401
 from . import feature_extractors_v3pro_tsc  # noqa: F401
 from . import classifiers_v3pro  # noqa: F401
 from . import classifiers_limix  # noqa: F401
@@ -40,6 +41,7 @@ __all__ = [
     "feature_extractors_v3lite",
     "feature_extractors_v3pro",
     "feature_extractors_v4",
+    "feature_extractors_v5",
     "feature_extractors_v3pro_tsc",
     "classifiers_v3pro",
     "classifiers_limix",

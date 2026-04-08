@@ -1,0 +1,15 @@
+{
+  "dice_mean": 0.8266928195953369,
+  "dice_std": 0.048381220549345016,
+  "dice_count": 30,
+  "iou_mean": 0.7074740529060364,
+  "iou_std": 0.07015904784202576,
+  "iou_count": 30,
+  "centroid_mean": 7.116445541381836,
+  "centroid_std": 3.8854384422302246,
+  "centroid_count": 30,
+  "debug_gt_frames": 30.0,
+  "debug_pred_frames": 225.0,
+  "debug_processed_frames": 225.0,
+  "fps": 203.3301316521693
+}

@@ -115,7 +115,7 @@ class TimeSeriesV3ProFeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "frame_w": 640.0,
         "frame_h": 480.0,
-        "interp_method": "cubic",
+        "interp_method": "pchip",
         "n_steps": N_TS_STEPS_LITE,
         "texture_mode": "pretrain",  # pretrain | freeze | learnable(fallback)
         "texture_backbone": "convnext_tiny",
@@ -131,7 +131,7 @@ class TimeSeriesV3ProFeatureExtractor(TrajectoryFeatureExtractor):
         cfg = {**self.DEFAULT_CONFIG, **(params or {})}
         self._frame_w = float(cfg.get("frame_w", 640.0))
         self._frame_h = float(cfg.get("frame_h", 480.0))
-        self._interp_method = str(cfg.get("interp_method", "cubic"))
+        self._interp_method = str(cfg.get("interp_method", "pchip"))
         self._n_steps = int(cfg.get("n_steps", N_TS_STEPS_LITE))
 
         self._texture_mode = str(cfg.get("texture_mode", "pretrain")).lower()

@@ -510,7 +510,13 @@ def _build_feature_importance_view(
     if not pairs:
         return None
     desc = sorted(pairs, key=lambda item: item["importance"], reverse=True)
-    asc = sorted(pairs, key=lambda item: item["importance"])
+    # "Bottom" should reflect the least important features, not the most
+    # negative ones. For permutation-style importances this keeps the UI
+    # aligned with "不重要特徵" semantics.
+    asc = sorted(
+        pairs,
+        key=lambda item: (abs(float(item["importance"])), float(item["importance"])),
+    )
     return {
         "top": desc[:top_n],
         "bottom": asc[:top_n],

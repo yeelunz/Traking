@@ -1,0 +1,240 @@
+{
+  "coverage": {
+    "prediction_files_found": 1194,
+    "experiments_found": 284,
+    "rows_total": 34547,
+    "rows_scored": 33615,
+    "rows_unscored": 932,
+    "subjects": [
+      "001",
+      "002",
+      "003",
+      "004",
+      "005",
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+      "n001",
+      "n003",
+      "n004",
+      "n005",
+      "n006",
+      "n007"
+    ],
+    "videos": [
+      "001/Grasp",
+      "001/Relax",
+      "001/Rest",
+      "001/Rest post",
+      "001/doppler",
+      "002/Grasp",
+      "002/Relax",
+      "002/Rest",
+      "002/Rest post",
+      "002/doppler",
+      "003/Grasp",
+      "003/Relax",
+      "003/Rest",
+      "003/Rest post",
+      "003/doppler",
+      "004/Grasp",
+      "004/Relax",
+      "004/Rest",
+      "004/Rest post",
+      "004/doppler",
+      "005/Grasp",
+      "005/Relax",
+      "005/Rest",
+      "005/Rest post",
+      "005/doppler",
+      "c1/Image05_伸握伸",
+      "c1/Image09_d",
+      "c1/Image10_90握",
+      "c2/Image05伸握伸",
+      "c2/Image06_90握伸",
+      "c2/Image08_d",
+      "c3/Image01ASDF01_伸握伸",
+      "c3/Image01ASDF06_90握伸",
+      "c4/Image02_伸握伸",
+      "c4/Image07_90握伸",
+      "c5/Image22_伸握伸",
+      "c5/Image24_90伸握",
+      "n001/D",
+      "n001/G-R",
+      "n001/R-G",
+      "n001/R1",
+      "n001/R2",
+      "n003/D",
+      "n003/G-R",
+      "n003/R-G",
+      "n003/R1",
+      "n003/R2",
+      "n004/D",
+      "n004/G-R",
+      "n004/R-G",
+      "n004/R1",
+      "n004/R2",
+      "n005/D",
+      "n005/G-R",
+      "n005/R-G",
+      "n005/R1",
+      "n005/R2",
+      "n006/D",
+      "n006/G-R",
+      "n006/R-G",
+      "n006/R1",
+      "n006/R2",
+      "n007/D",
+      "n007/G-R",
+      "n007/R-G",
+      "n007/R1",
+      "n007/R2"
+    ],
+    "skipped_subject_video_no_gt": []
+  },
+  "overall": {
+    "n_scored": 33615,
+    "iou_mean": 0.7178342574222316,
+    "ce_mean": 10.139962858819528,
+    "score_quantiles": {
+      "q20": 0.7364329695701599,
+      "q80": 0.8608334064483643
+    },
+    "iou_corr": {
+      "n": 33615,
+      "pearson_r": 0.24450795875580963,
+      "spearman_rho": 0.37557732223720564,
+      "slope": 0.3209885474101827,
+      "intercept": 0.46840947059078386,
+      "perm_p_pearson": 0.000999000999000999,
+      "perm_p_spearman": 0.000999000999000999
+    },
+    "ce_corr": {
+      "n": 33615,
+      "pearson_r": -0.20271559643020592,
+      "spearman_rho": -0.4142869083893078,
+      "slope": -30.570120231999823,
+      "intercept": 33.89453536241284,
+      "perm_p_pearson": 0.000999000999000999,
+      "perm_p_spearman": 0.000999000999000999
+    },
+    "iou_low_high_20pct": {
+      "n_low": 6725,
+      "n_high": 6725,
+      "iou_low_mean": 0.6315647454734997,
+      "iou_high_mean": 0.8134382198590258,
+      "delta_high_minus_low": 0.18187347438552603,
+      "delta_ci95": [
+        0.17605704058625032,
+        0.1874619299482552
+      ],
+      "perm_p": 0.0004997501249375312
+    },
+    "ce_low_high_20pct": {
+      "n_low": 6725,
+      "n_high": 6725,
+      "ce_low_mean": 17.946207876517352,
+      "ce_high_mean": 3.505459234814404,
+      "delta_low_minus_high": 14.440748641702948,
+      "delta_ci95": [
+        13.757826968104007,
+        15.195340244333954
+      ],
+      "perm_p": 0.0004997501249375312
+    }
+  },
+  "loso": {
+    "n_scored": 33615,
+    "iou_mean": 0.7178342574222316,
+    "ce_mean": 10.139962858819528,
+    "score_quantiles": {
+      "q20": 0.7364329695701599,
+      "q80": 0.8608334064483643
+    },
+    "iou_corr": {
+      "n": 33615,
+      "pearson_r": 0.24450795875580963,
+      "spearman_rho": 0.37557732223720564,
+      "slope": 0.3209885474101827,
+      "intercept": 0.46840947059078386,
+      "perm_p_pearson": 0.000999000999000999,
+      "perm_p_spearman": 0.000999000999000999
+    },
+    "ce_corr": {
+      "n": 33615,
+      "pearson_r": -0.20271559643020592,
+      "spearman_rho": -0.4142869083893078,
+      "slope": -30.570120231999823,
+      "intercept": 33.89453536241284,
+      "perm_p_pearson": 0.000999000999000999,
+      "perm_p_spearman": 0.000999000999000999
+    },
+    "iou_low_high_20pct": {
+      "n_low": 6725,
+      "n_high": 6725,
+      "iou_low_mean": 0.6315647454734997,
+      "iou_high_mean": 0.8134382198590258,
+      "delta_high_minus_low": 0.18187347438552603,
+      "delta_ci95": [
+        0.17605704058625032,
+        0.1874619299482552
+      ],
+      "perm_p": 0.0004997501249375312
+    },
+    "ce_low_high_20pct": {
+      "n_low": 6725,
+      "n_high": 6725,
+      "ce_low_mean": 17.946207876517352,
+      "ce_high_mean": 3.505459234814404,
+      "delta_low_minus_high": 14.440748641702948,
+      "delta_ci95": [
+        13.757826968104007,
+        15.195340244333954
+      ],
+      "perm_p": 0.0004997501249375312
+    }
+  },
+  "non_loso": {
+    "n_scored": 0,
+    "iou_corr": {
+      "n": 0,
+      "pearson_r": null,
+      "spearman_rho": null,
+      "slope": null,
+      "intercept": null,
+      "perm_p_pearson": null,
+      "perm_p_spearman": null
+    },
+    "ce_corr": {
+      "n": 0,
+      "pearson_r": null,
+      "spearman_rho": null,
+      "slope": null,
+      "intercept": null,
+      "perm_p_pearson": null,
+      "perm_p_spearman": null
+    },
+    "iou_low_high_20pct": null,
+    "ce_low_high_20pct": null,
+    "score_quantiles": null,
+    "iou_mean": null,
+    "ce_mean": null
+  },
+  "experiment_relation_distribution": {
+    "n_experiments_with_corr": 284,
+    "pearson_iou_median": 0.14074277670718716,
+    "pearson_iou_q25": 0.09231780529216792,
+    "pearson_iou_q75": 0.3530543882665294,
+    "pearson_ce_median": -0.20645411026769472,
+    "pearson_ce_q25": -0.295208297049364,
+    "pearson_ce_q75": -0.04621541453422555,
+    "n_support_hypothesis": 249,
+    "support_ratio": 0.8767605633802817
+  },
+  "artifacts": {
+    "all_rows_csv": "c:/Users/User/Desktop/code/Traking/analysis/confidence_relation_all_experiments/confidence_iou_ce_all_rows.csv",
+    "experiment_stats_csv": "c:/Users/User/Desktop/code/Traking/analysis/confidence_relation_all_experiments/experiment_level_stats.csv"
+  }
+}

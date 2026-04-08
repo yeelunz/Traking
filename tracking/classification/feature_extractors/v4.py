@@ -16,6 +16,7 @@ from ..interfaces import TrajectoryFeatureExtractor
 from ..texture_backbone import TextureBackboneWrapper
 from .v3pro import (
     _aggregate_roi_features,
+    _build_runtime_preprocs_from_cfg,
     _extract_roi_rgb_batch,
     _normalize_texture_pooling,
     _normalize_texture_weight_source,
@@ -304,6 +305,10 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
         self._pretrained_backbone = bool(cfg.get("pretrained_backbone", True))
         self._texture_device = str(cfg.get("texture_device", "auto"))
+        _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
+        self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(
+            _runtime_pp
+        )
         self._texture_wrapper: Optional[TextureBackboneWrapper] = None
 
         self._motion_keys = list(TAB_V4_MOTION_KEYS)
@@ -400,6 +405,8 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
             n_frames=self._n_texture_frames,
             pad_ratio=self._roi_pad_ratio,
             weight_source=self._texture_pooling_weight_source,
+            global_preprocs=self._runtime_global_preprocs,
+            roi_preprocs=self._runtime_roi_preprocs,
         )
         if roi_batch.shape[0] == 0:
             return {"tex": zeros}

@@ -37,6 +37,7 @@ from ..models import mixformerv2  # noqa: F401
 from ..eval import evaluator  # noqa: F401
 from ..utils.env import capture_env
 from ..utils.seed import set_seed
+from ..utils.fallback_stats import compute_roi_fallback_stats_from_trace
 from .pipeline_validator import enforce_or_collect_warnings
 import traceback as _tb
 
@@ -1444,48 +1445,83 @@ class PipelineRunner:
                     stage_entry.setdefault("artifacts", {})["metrics_dir"] = detection_metrics.get("metrics_dir")
                     stage_entry.setdefault("artifacts", {})["predictions_dir"] = detection_metrics.get("predictions_dir")
                 _dump_meta()
+            raw_test_predictions = copy.deepcopy(test_predictions)
 
             # ── Trajectory Filter Stage ─────────────────────────────────
             # Detection → Trajectory Filtering → Re-cropping → Segmentation
-            # Applies multi-scale Hampel + bidirectional S-G to smooth noisy
-            # detection bbox trajectories before segmentation ROI cropping.
+            # Use benchmark-aligned lw_tab_p for ROI trajectory repair:
+            # BiLOWESS detector -> delete outliers -> TabPFN fill -> Poisson glue-back.
             traj_filter_cfg = self.cfg.get("trajectory_filter", {}) or {}
             traj_filter_enabled = bool(traj_filter_cfg.get("enabled", True))
             if traj_filter_enabled and test_predictions:
                 import numpy as _np_tf
                 from ..classification.trajectory_filter import (
-                    filter_detections as _filter_detections,
                     compute_trajectory_metrics as _compute_traj_metrics,
+                )
+                from ..classification.lw_tab_p import (
+                    LWTabPConfig as _LWTabPConfig,
+                    LWTabPFilter as _LWTabPFilter,
+                    build_dense_gt_from_frame_map as _lw_build_dense_gt,
+                )
+
+                _tf_confidence_threshold = float(traj_filter_cfg.get("confidence_threshold", 0.0))
+                _tf_trusted_sources_raw = traj_filter_cfg.get("trusted_bbox_sources", ["detector", "tracker"])
+                if isinstance(_tf_trusted_sources_raw, (list, tuple, set)):
+                    _tf_trusted_sources = {str(x).strip().lower() for x in _tf_trusted_sources_raw if str(x).strip()}
+                else:
+                    _tf_trusted_sources = {"detector", "tracker"}
+                if not _tf_trusted_sources:
+                    _tf_trusted_sources = {"detector", "tracker"}
+
+                _lw_cfg = _LWTabPConfig(
+                    seed=int(traj_filter_cfg.get("seed", self.seed)),
+                    lowess_frac=float(traj_filter_cfg.get("lowess_frac", 0.5)),
+                    robust_iterations=int(traj_filter_cfg.get("robust_iterations", 3)),
+                    anomaly_residual_quantile=float(traj_filter_cfg.get("anomaly_residual_quantile", 0.80)),
+                    mild_sg_window=int(traj_filter_cfg.get("mild_sg_window", 5)),
+                    mild_sg_polyorder=int(traj_filter_cfg.get("mild_sg_polyorder", 2)),
+                    tabpfn_device=str(traj_filter_cfg.get("tabpfn_device", "auto")),
+                    tabpfn_max_train_rows=int(traj_filter_cfg.get("tabpfn_max_train_rows", 4096)),
                 )
                 with stage_scope(
                     "trajectory_filter",
                     "trajectory_filter",
                     {
-                        "bbox_strategy": str(traj_filter_cfg.get("bbox_strategy", "none")),
-                        "filter_bbox_size": bool(traj_filter_cfg.get("filter_bbox_size", False)),
-                        "skip_hampel": bool(traj_filter_cfg.get("skip_hampel", True)),
+                        "method": "lw_tab_p",
+                        "non_observed_policy": "leave_empty_for_interpolation",
+                        "lowess_frac": float(_lw_cfg.lowess_frac),
+                        "confidence_threshold": float(_tf_confidence_threshold),
+                        "trusted_bbox_sources": sorted(_tf_trusted_sources),
                         "detector_models": list(test_predictions.keys()),
                     },
                 ) as stage_entry:
-                    _tf_bbox_strategy = str(traj_filter_cfg.get("bbox_strategy", "hampel_only"))
-                    _tf_bbox_params = dict(traj_filter_cfg.get("bbox_params", {}) or {})
-                    _tf_traj_params = dict(traj_filter_cfg.get("traj_params", {}) or {})
-                    _tf_skip_hampel = bool(traj_filter_cfg.get("skip_hampel", False))
-                    _tf_filter_bbox_size = bool(traj_filter_cfg.get("filter_bbox_size", False))
-                    if not _tf_bbox_params:
-                        _tf_bbox_params = {
-                            "macro_ratio": 0.06,
-                            "micro_hw": 2,
-                        }
-                    if not _tf_traj_params:
-                        _tf_traj_params = {
-                            "sg_window": 5,
-                            "sg_polyorder": 2,
-                            "macro_ratio": 0.06,
-                            "micro_hw": 2,
-                            "macro_sigma": 3.0,
-                            "micro_sigma": 3.0,
-                        }
+                    _tf_train_trajectories: List[tuple[_np_tf.ndarray, _np_tf.ndarray]] = []
+                    for _ti in range(len(train_ds)):
+                        _tvp = train_ds[_ti].get("video_path")
+                        if not _tvp:
+                            continue
+                        _tjson = os.path.splitext(_tvp)[0] + ".json"
+                        if not os.path.exists(_tjson):
+                            continue
+                        try:
+                            _gt_payload = load_coco_vid(_tjson)
+                            _dense = _lw_build_dense_gt(
+                                _gt_payload.get("frames", {}),
+                                smooth_window=int(_lw_cfg.mild_sg_window),
+                                smooth_polyorder=int(_lw_cfg.mild_sg_polyorder),
+                            )
+                            if _dense is not None:
+                                _tf_train_trajectories.append(_dense)
+                        except Exception:
+                            continue
+
+                    if len(_tf_train_trajectories) < 2:
+                        raise RuntimeError(
+                            "lw_tab_p requires at least 2 usable GT trajectories in train split to fit TabPFN"
+                        )
+
+                    _lw_filter = _LWTabPFilter(_lw_cfg)
+                    _lw_filter.fit(_tf_train_trajectories)
 
                     _tf_metrics_all: Dict[str, Dict[str, Dict[str, Any]]] = {}
                     _tf_filtered: Dict[str, Dict[str, list]] = {}
@@ -1515,42 +1551,79 @@ class PipelineRunner:
                             # Extract arrays from FramePrediction objects
                             _tf_fi = _np_tf.array([p.frame_index for p in _tf_preds], dtype=_np_tf.int64)
                             _tf_bb = _np_tf.array([list(p.bbox) for p in _tf_preds], dtype=_np_tf.float64)
-                            _tf_cx = _tf_bb[:, 0] + _tf_bb[:, 2] / 2.0
-                            _tf_cy = _tf_bb[:, 1] + _tf_bb[:, 3] / 2.0
-                            _tf_w = _tf_bb[:, 2].copy()
-                            _tf_h = _tf_bb[:, 3].copy()
-                            _tf_sc = _np_tf.array(
-                                # Detector predictions: default to 0.0 if score missing
-                                [float(p.score if p.score is not None else 0.0) for p in _tf_preds],
+                            _tf_valid_bbox = _np_tf.array(
+                                [
+                                    bool(_np_tf.isfinite(_tf_bb[_i]).all())
+                                    and float(_tf_bb[_i][2]) > 0.0
+                                    and float(_tf_bb[_i][3]) > 0.0
+                                    for _i in range(len(_tf_preds))
+                                ],
+                                dtype=bool,
+                            )
+                            _tf_not_fallback = _np_tf.array(
+                                [not bool(getattr(p, "is_fallback", False)) for p in _tf_preds],
+                                dtype=bool,
+                            )
+                            _tf_source_ok = _np_tf.array(
+                                [
+                                    str(getattr(p, "bbox_source", "detector") or "detector").strip().lower()
+                                    in _tf_trusted_sources
+                                    for p in _tf_preds
+                                ],
+                                dtype=bool,
+                            )
+                            _tf_conf_values = _np_tf.array(
+                                [
+                                    float(
+                                        getattr(p, "confidence", None)
+                                        if getattr(p, "confidence", None) is not None
+                                        else (p.score if p.score is not None else -1.0)
+                                    )
+                                    for p in _tf_preds
+                                ],
                                 dtype=_np_tf.float64,
                             )
+                            _tf_conf_ok = (
+                                _tf_conf_values >= float(_tf_confidence_threshold)
+                                if float(_tf_confidence_threshold) > 0.0
+                                else _np_tf.ones(len(_tf_preds), dtype=bool)
+                            )
+                            # Only direct detector/tracker boxes that pass confidence are treated as observations.
+                            _tf_observed = _tf_valid_bbox & _tf_not_fallback & _tf_source_ok & _tf_conf_ok
+
+                            _tf_proxy_before = _lw_filter.make_proxy_bbox(_tf_bb, _tf_fi)
+                            _tf_bcx = _tf_proxy_before[:, 0] + _tf_proxy_before[:, 2] / 2.0
+                            _tf_bcy = _tf_proxy_before[:, 1] + _tf_proxy_before[:, 3] / 2.0
+                            _tf_bw = _tf_proxy_before[:, 2]
+                            _tf_bh = _tf_proxy_before[:, 3]
 
                             # Before-filtering metrics (sort first for correct time order)
                             _tf_sort_b = _np_tf.argsort(_tf_fi)
                             _tf_before = _compute_traj_metrics(
-                                _tf_cx[_tf_sort_b], _tf_cy[_tf_sort_b],
-                                _tf_w[_tf_sort_b], _tf_h[_tf_sort_b],
+                                _tf_bcx[_tf_sort_b], _tf_bcy[_tf_sort_b],
+                                _tf_bw[_tf_sort_b], _tf_bh[_tf_sort_b],
                                 _tf_fi[_tf_sort_b],
                             )
 
-                            # Apply trajectory filter (multi-scale Hampel + bidirectional S-G)
-                            _tf_result = _filter_detections(
-                                _tf_fi, _tf_cx, _tf_cy, _tf_w, _tf_h, _tf_sc,
-                                bbox_strategy=_tf_bbox_strategy,
-                                bbox_params=_tf_bbox_params,
-                                traj_params=_tf_traj_params,
-                                skip_hampel=_tf_skip_hampel,
+                            # Apply lw_tab_p (BiLOWESS detector + TabPFN + Poisson glue-back)
+                            _tf_result = _lw_filter.repair(
+                                _tf_bb,
+                                _tf_fi,
+                                observed_mask=_tf_observed,
                             )
 
-                            if not _tf_filter_bbox_size:
-                                _tf_result["widths"] = _tf_w.copy()
-                                _tf_result["heights"] = _tf_h.copy()
+                            _tf_rcx = _tf_result["center"][:, 0]
+                            _tf_rcy = _tf_result["center"][:, 1]
+                            _tf_rw = _tf_result["bbox"][:, 2]
+                            _tf_rh = _tf_result["bbox"][:, 3]
 
                             # After-filtering metrics
                             _tf_after = _compute_traj_metrics(
-                                _tf_result["cx"], _tf_result["cy"],
-                                _tf_result["widths"], _tf_result["heights"],
-                                _tf_result["frame_indices"],
+                                _tf_rcx,
+                                _tf_rcy,
+                                _tf_rw,
+                                _tf_rh,
+                                _tf_fi,
                             )
 
                             _tf_vid_stem = os.path.splitext(os.path.basename(_tf_vp))[0]
@@ -1562,8 +1635,7 @@ class PipelineRunner:
 
                             # Map sorted results back to original prediction order
                             # Use frame_index→result_index lookup for robustness
-                            _tf_fi_result = _tf_result["frame_indices"]
-                            _tf_fi_map = {int(fi): idx for idx, fi in enumerate(_tf_fi_result)}
+                            _tf_fi_map = {int(fi): idx for idx, fi in enumerate(_tf_fi)}
 
                             _tf_new_preds: list = []
                             for _tf_i, _tf_pred in enumerate(_tf_preds):
@@ -1572,12 +1644,21 @@ class PipelineRunner:
                                     # Frame was removed (shouldn't happen after dedup); keep original
                                     _tf_new_preds.append(_tf_pred)
                                     continue
-                                _tf_ncx = float(_tf_result["cx"][_tf_k])
-                                _tf_ncy = float(_tf_result["cy"][_tf_k])
-                                _tf_nw = float(_tf_result["widths"][_tf_k])
-                                _tf_nh = float(_tf_result["heights"][_tf_k])
-                                _tf_nx = _tf_ncx - _tf_nw / 2.0
-                                _tf_ny = _tf_ncy - _tf_nh / 2.0
+                                if not bool(_tf_observed[_tf_k]):
+                                    _tf_new_preds.append(FramePrediction(
+                                        frame_index=_tf_pred.frame_index,
+                                        bbox=(0.0, 0.0, 0.0, 0.0),
+                                        score=_tf_pred.score,
+                                        confidence=getattr(_tf_pred, "confidence", None),
+                                        confidence_components=getattr(_tf_pred, "confidence_components", None),
+                                        segmentation=getattr(_tf_pred, "segmentation", None),
+                                        is_fallback=True,
+                                        bbox_source="missing",
+                                    ))
+                                    continue
+                                _tf_nx, _tf_ny, _tf_nw, _tf_nh = [
+                                    float(v) for v in _tf_result["bbox"][_tf_k][:4]
+                                ]
                                 _tf_new_preds.append(FramePrediction(
                                     frame_index=_tf_pred.frame_index,
                                     bbox=(_tf_nx, _tf_ny, _tf_nw, _tf_nh),
@@ -1585,8 +1666,8 @@ class PipelineRunner:
                                     confidence=getattr(_tf_pred, "confidence", None),
                                     confidence_components=getattr(_tf_pred, "confidence_components", None),
                                     segmentation=getattr(_tf_pred, "segmentation", None),
-                                    is_fallback=bool(getattr(_tf_pred, "is_fallback", False)),
-                                    bbox_source=getattr(_tf_pred, "bbox_source", "detector"),
+                                    is_fallback=False,
+                                    bbox_source="lw_tab_p",
                                 ))
                             _tf_filtered[_tf_mn][_tf_vp] = _tf_new_preds
 
@@ -1617,11 +1698,17 @@ class PipelineRunner:
                             k: float(_np_tf.mean(v)) for k, v in _tf_agg_a.items()
                         } if _tf_agg_a else {},
                         "config": {
-                            "bbox_strategy": _tf_bbox_strategy,
-                            "bbox_params": _tf_bbox_params,
-                            "traj_params": _tf_traj_params,
-                            "skip_hampel": _tf_skip_hampel,
-                            "filter_bbox_size": _tf_filter_bbox_size,
+                            "method": "lw_tab_p",
+                            "lowess_frac": float(_lw_cfg.lowess_frac),
+                            "robust_iterations": int(_lw_cfg.robust_iterations),
+                            "anomaly_residual_quantile": float(_lw_cfg.anomaly_residual_quantile),
+                            "mild_sg_window": int(_lw_cfg.mild_sg_window),
+                            "mild_sg_polyorder": int(_lw_cfg.mild_sg_polyorder),
+                            "tabpfn_device": str(_lw_cfg.tabpfn_device),
+                            "tabpfn_max_train_rows": int(_lw_cfg.tabpfn_max_train_rows),
+                            "confidence_threshold": float(_tf_confidence_threshold),
+                            "trusted_bbox_sources": sorted(_tf_trusted_sources),
+                            "n_train_trajectories": int(len(_tf_train_trajectories)),
                         },
                     }
                     _tf_summary_path = os.path.join(_tf_out_dir, "summary.json")
@@ -1750,7 +1837,7 @@ class PipelineRunner:
                     stage_entry.setdefault("artifacts", {})["metrics_path"] = _tf_metrics_path
                     stage_entry.setdefault("artifacts", {})["summary_path"] = _tf_summary_path
                     self._log(
-                        f"[TrajectoryFilter] bbox_strategy={_tf_bbox_strategy} | "
+                        f"[TrajectoryFilter] method=lw_tab_p | "
                         f"videos_filtered={sum(len(v) for v in _tf_metrics_all.values())}",
                         to_console=(tqdm is None),
                     )
@@ -1759,7 +1846,7 @@ class PipelineRunner:
                 _record_stage_skip("trajectory_filter", "trajectory_filter", "disabled via config")
 
             # segmentation stage (mandatory)
-            seg_cfg = self.cfg.get("segmentation", {}) or {}
+            seg_cfg = dict(self.cfg.get("segmentation", {}) or {})
             seg_results_root = os.path.join(test_dir, "segmentation")
             os.makedirs(seg_results_root, exist_ok=True)
             seg_train_root = os.path.join(train_root, "segmentation")
@@ -1914,6 +2001,198 @@ class PipelineRunner:
                         cv2 = _cv2
                     except Exception:
                         return
+
+                def _draw_dashed_rectangle(img: Any, bbox: Sequence[float], color: Sequence[int], thickness: int = 2, dash: int = 10) -> None:
+                    try:
+                        import cv2  # type: ignore
+                    except Exception:
+                        return
+                    try:
+                        x, y, w, h = map(float, bbox)
+                    except Exception:
+                        return
+                    if w <= 1.0 or h <= 1.0:
+                        return
+                    x1, y1 = int(round(x)), int(round(y))
+                    x2, y2 = int(round(x + w)), int(round(y + h))
+                    segments = [
+                        ((x1, y1), (x2, y1)),
+                        ((x2, y1), (x2, y2)),
+                        ((x2, y2), (x1, y2)),
+                        ((x1, y2), (x1, y1)),
+                    ]
+                    for (sx, sy), (ex, ey) in segments:
+                        dx = ex - sx
+                        dy = ey - sy
+                        length = max(abs(dx), abs(dy))
+                        if length <= 0:
+                            continue
+                        step = max(2, int(dash))
+                        for offset in range(0, length, step * 2):
+                            t0 = float(offset) / float(length)
+                            t1 = float(min(length, offset + step)) / float(length)
+                            p0 = (int(round(sx + dx * t0)), int(round(sy + dy * t0)))
+                            p1 = (int(round(sx + dx * t1)), int(round(sy + dy * t1)))
+                            cv2.line(img, p0, p1, color, thickness, cv2.LINE_AA)
+
+                def _save_detection_comparison_visuals(
+                    video_path: str,
+                    raw_preds: Sequence[FramePrediction],
+                    roi_trace_path: str,
+                    gt: Dict[str, Any],
+                    output_root: str,
+                    sample_limit: int,
+                ) -> None:
+                    try:
+                        import cv2  # type: ignore
+                    except Exception:
+                        return
+                    try:
+                        if not os.path.exists(roi_trace_path):
+                            return
+                        with open(roi_trace_path, "r", encoding="utf-8") as f:
+                            trace = json.load(f) or {}
+                    except Exception:
+                        return
+                    if not isinstance(trace, dict) or not trace:
+                        return
+
+                    trace_map: Dict[int, Dict[str, Any]] = {}
+                    for key, value in trace.items():
+                        try:
+                            frame_idx = int(key)
+                        except Exception:
+                            continue
+                        if isinstance(value, dict):
+                            trace_map[frame_idx] = value
+                    if not trace_map:
+                        return
+
+                    raw_map: Dict[int, Dict[str, Any]] = {}
+                    for pred in raw_preds or []:
+                        fi = int(pred.frame_index)
+                        if fi in raw_map:
+                            continue
+                        raw_map[fi] = {
+                            "bbox": list(pred.bbox) if getattr(pred, "bbox", None) is not None else None,
+                            "fallback": bool(getattr(pred, "is_fallback", False)),
+                            "bbox_source": str(getattr(pred, "bbox_source", "detector") or "detector"),
+                        }
+
+                    gt_frames_sorted = sorted(int(fi) for fi, boxes in (gt.get("frames", {}) or {}).items() if boxes)
+                    if not gt_frames_sorted:
+                        return
+
+                    if sample_limit > 0 and len(gt_frames_sorted) > sample_limit:
+                        if sample_limit == 1:
+                            selected_frames = [gt_frames_sorted[len(gt_frames_sorted) // 2]]
+                        else:
+                            last_idx = len(gt_frames_sorted) - 1
+                            selected_positions = sorted({
+                                int(round(i * last_idx / max(1, sample_limit - 1)))
+                                for i in range(sample_limit)
+                            })
+                            selected_frames = [gt_frames_sorted[pos] for pos in selected_positions]
+                    else:
+                        selected_frames = gt_frames_sorted
+
+                    final_vs_gt_dir = os.path.join(output_root, "final_vs_gt")
+                    raw_vs_final_dir = os.path.join(output_root, "raw_vs_final")
+                    os.makedirs(final_vs_gt_dir, exist_ok=True)
+                    os.makedirs(raw_vs_final_dir, exist_ok=True)
+
+                    cap = cv2.VideoCapture(video_path)
+                    try:
+                        for fi in selected_frames:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                            ok, frame = cap.read()
+                            if not ok or frame is None:
+                                continue
+
+                            trace_row = trace_map.get(fi) or {}
+                            final_bbox = trace_row.get("bbox")
+                            final_source = str(trace_row.get("bbox_source", "unknown") or "unknown")
+                            raw_entry = raw_map.get(fi)
+                            gt_boxes = gt.get("frames", {}).get(fi, []) or []
+
+                            final_img = frame.copy()
+                            for gtb in gt_boxes:
+                                try:
+                                    x, y, w, h = map(float, gtb)
+                                except Exception:
+                                    continue
+                                cv2.rectangle(final_img, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), 2)
+                            if isinstance(final_bbox, (list, tuple)) and len(final_bbox) == 4:
+                                x, y, w, h = map(float, final_bbox)
+                                cv2.rectangle(final_img, (int(x), int(y)), (int(x + w), int(y + h)), (255, 0, 0), 2)
+                                cv2.putText(
+                                    final_img,
+                                    f"final->seg [{final_source}]",
+                                    (int(x), max(0, int(y) - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.5,
+                                    (255, 0, 0),
+                                    1,
+                                    cv2.LINE_AA,
+                                )
+                            else:
+                                cv2.putText(
+                                    final_img,
+                                    "final->seg: no bbox",
+                                    (10, 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.6,
+                                    (255, 0, 0),
+                                    2,
+                                    cv2.LINE_AA,
+                                )
+                            cv2.imwrite(os.path.join(final_vs_gt_dir, f"frame_{fi:06d}.jpg"), final_img)
+
+                            compare_img = frame.copy()
+                            if isinstance(final_bbox, (list, tuple)) and len(final_bbox) == 4:
+                                x, y, w, h = map(float, final_bbox)
+                                cv2.rectangle(compare_img, (int(x), int(y)), (int(x + w), int(y + h)), (255, 0, 0), 2)
+                                cv2.putText(
+                                    compare_img,
+                                    f"final->seg [{final_source}]",
+                                    (int(x), max(0, int(y) - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.5,
+                                    (255, 0, 0),
+                                    1,
+                                    cv2.LINE_AA,
+                                )
+                            if raw_entry and isinstance(raw_entry.get("bbox"), (list, tuple)) and len(raw_entry["bbox"]) == 4:
+                                _draw_dashed_rectangle(compare_img, raw_entry["bbox"], (0, 165, 255), thickness=2, dash=10)
+                                raw_source = str(raw_entry.get("bbox_source", "detector") or "detector")
+                                raw_label = "raw detector"
+                                if bool(raw_entry.get("fallback")):
+                                    raw_label = f"raw fallback [{raw_source}]"
+                                x, y, _, _ = map(float, raw_entry["bbox"])
+                                cv2.putText(
+                                    compare_img,
+                                    raw_label,
+                                    (int(x), max(0, int(y) - 22)),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.5,
+                                    (0, 165, 255),
+                                    1,
+                                    cv2.LINE_AA,
+                                )
+                            else:
+                                cv2.putText(
+                                    compare_img,
+                                    "raw detector: no output",
+                                    (10, 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.6,
+                                    (0, 165, 255),
+                                    2,
+                                    cv2.LINE_AA,
+                                )
+                            cv2.imwrite(os.path.join(raw_vs_final_dir, f"frame_{fi:06d}.jpg"), compare_img)
+                    finally:
+                        cap.release()
                     try:
                         if not os.path.isdir(det_vis_dir) or not os.path.exists(roi_trace_path):
                             return
@@ -1943,87 +2222,16 @@ class PipelineRunner:
                             row = trace_map.get(fi)
                             if not row:
                                 continue
-                            if str(row.get("bbox_source", "")) != "prev_segmentation":
-                                continue
-
-                            # Prefer ROI bbox (expanded crop) if available; otherwise fall back to raw bbox.
-                            bb = row.get("roi_bbox") or row.get("bbox")
-                            if not (isinstance(bb, (list, tuple)) and len(bb) == 4):
-                                continue
-                            try:
-                                x, y, w, h = map(float, bb)
-                            except Exception:
-                                continue
-                            if w <= 1.0 or h <= 1.0:
-                                continue
-
-                            img_path = os.path.join(det_vis_dir, fname)
-                            if not os.path.isfile(img_path) or os.path.getsize(img_path) == 0:
-                                continue
-                            try:
-                                img = cv2.imread(img_path)
-                            except Exception:
-                                continue
-                            if img is None:
-                                continue
-
-                            color = (255, 0, 0)  # blue (BGR)
-                            label = f"{model_label} ROI(From Last Seg)"
-                            cv2.rectangle(img, (int(x), int(y)), (int(x + w), int(y + h)), color, 2)
-                            cv2.putText(
-                                img,
-                                label,
-                                (int(x), max(0, int(y) - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5,
-                                color,
-                                1,
-                                cv2.LINE_AA,
-                            )
-                            try:
-                                cv2.imwrite(img_path, img)
-                            except Exception:
-                                pass
                     except Exception:
                         return
 
                 def _roi_trace_fallback_stats(roi_trace_path: str) -> Optional[Dict[str, float]]:
-                    """Compute ROI fallback stats from roi_trace.json.
-
-                    Fallback definition:
-                    - Direct ROI: bbox_source in {detector, tracker}
-                    - Fallback ROI: everything else (prev_bbox / prev_segmentation / full_frame / segmentation_bootstrap / unknown)
-                    Denominator: total frames in roi_trace (int keys).
-                    """
                     try:
                         if not os.path.exists(roi_trace_path):
                             return None
                         with open(roi_trace_path, "r", encoding="utf-8") as f:
                             trace = json.load(f) or {}
-                        if not isinstance(trace, dict) or not trace:
-                            return None
-                        direct_sources = {"detector", "tracker"}
-                        total = 0
-                        fallback = 0
-                        for k, v in trace.items():
-                            try:
-                                _ = int(k)
-                            except Exception:
-                                continue
-                            if not isinstance(v, dict):
-                                continue
-                            total += 1
-                            src = str(v.get("bbox_source", "")).strip().lower()
-                            if src not in direct_sources:
-                                fallback += 1
-                        if total <= 0:
-                            return None
-                        rate = float(fallback) / float(total)
-                        return {
-                            "roi_total_frames": float(total),
-                            "roi_fallback_frames": float(fallback),
-                            "roi_fallback_rate": float(rate),
-                        }
+                        return compute_roi_fallback_stats_from_trace(trace)
                     except Exception:
                         return None
 
@@ -2121,8 +2329,23 @@ class PipelineRunner:
                             _subj_id_seg = os.path.basename(os.path.dirname(vp))
                             vid_stem = os.path.splitext(os.path.basename(vp))[0]
                             det_vis_dir = os.path.join(detection_test_dir, "visualizations", _subj_id_seg, vid_stem)
+                            compare_vis_dir = os.path.join(
+                                detection_test_dir,
+                                "visualizations_compare",
+                                str(model_name),
+                                _subj_id_seg,
+                                vid_stem,
+                            )
                             roi_trace_path = os.path.join(out_dir_model, _subj_id_seg, vid_stem, "roi_trace.json")
                             _augment_detection_visuals_with_seg_roi(det_vis_dir, roi_trace_path, str(model_name))
+                            _save_detection_comparison_visuals(
+                                video_path=vp,
+                                raw_preds=(raw_test_predictions.get(model_name, {}) or {}).get(vp, []) or [],
+                                roi_trace_path=roi_trace_path,
+                                gt=test_annotations.get(vp, {}) or {},
+                                output_root=compare_vis_dir,
+                                sample_limit=int(seg_viz_cfg["samples"]) if "samples" in seg_viz_cfg else 8,
+                            )
                     except Exception:
                         pass
                     summary_metrics = metrics_payload.get("summary", {})

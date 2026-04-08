@@ -31,6 +31,8 @@ from ..utils.annotations import load_coco_vid
 _TEXTURE_BACKBONE_FEATURES = {
     "tab_v3_pro",
     "tab_v4",
+    "tab_v5",
+    "tab_v5_lite",
     "tab_v2",
     "tab_v2_extend",
     "tsc_v2",
@@ -77,6 +79,20 @@ def _infer_texture_embedding_dim(feature_name: str, params: Dict[str, Any], tp_c
             return int(TAB_V4_TOTAL_DIM - len(TAB_V4_MOTION_KEYS) - len(TAB_V4_STATIC_KEYS))
         except Exception:
             return 11
+    if feature_name == "tab_v5":
+        try:
+            from .feature_extractors_v5 import TAB_V5_TOTAL_DIM, TAB_V5_MOTION_KEYS, TAB_V5_STATIC_KEYS
+
+            return int(TAB_V5_TOTAL_DIM - len(TAB_V5_MOTION_KEYS) - len(TAB_V5_STATIC_KEYS))
+        except Exception:
+            return 11
+    if feature_name == "tab_v5_lite":
+        try:
+            from .feature_extractors_v5 import TAB_V5_LITE_TOTAL_DIM, TAB_V5_LITE_MOTION_KEYS
+
+            return int(TAB_V5_LITE_TOTAL_DIM - len(TAB_V5_LITE_MOTION_KEYS))
+        except Exception:
+            return 15
     if feature_name == "tsc_v3_pro":
         try:
             from .feature_extractors_v3pro_tsc import N_TEX_CHANNELS_V3PRO

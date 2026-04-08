@@ -4,7 +4,7 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from ..classification.trajectory_filter import cubic_spline_interpolate_1d
+from ..classification.trajectory_filter import pchip_interpolate_1d
 from ..core.interfaces import FramePrediction
 
 
@@ -42,14 +42,13 @@ def cubic_clip_interpolate_predictions(
     preds: Sequence[FramePrediction],
     *,
     max_gap: int = 30,
-    interpolated_bbox_source: str = "interpolated_cubic",
+    interpolated_bbox_source: str = "interpolated_pchip",
 ) -> List[FramePrediction]:
-    """Interpolate missing frames with GT-aligned cubic+clip bbox interpolation.
+    """Interpolate missing frames with GT-aligned PCHIP+clip bbox interpolation.
 
-    - Uses the same cubic interpolation helper as GT processing
-      (``cubic_spline_interpolate_1d``).
+    - Uses the same shape-preserving PCHIP interpolation helper as GT processing.
     - Clips interpolated values to known-data min/max range per bbox dimension
-      to prevent cubic overshoot.
+      to prevent overshoot.
     - Fills only interior gaps whose length is ``<= max_gap``.
     """
     if len(preds) < 2:
@@ -88,7 +87,7 @@ def cubic_clip_interpolate_predictions(
 
         interp_dims: List[np.ndarray] = []
         for dim in range(4):
-            values = cubic_spline_interpolate_1d(
+            values = pchip_interpolate_1d(
                 known_frames,
                 known_boxes[:, dim],
                 query_frames,

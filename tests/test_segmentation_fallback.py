@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, List
 
@@ -137,6 +138,13 @@ def test_predict_video_switches_to_eval_mode(monkeypatch, tmp_path):
                 return False, None
             return True, frame.copy()
 
+        def get(self, prop_id):
+            if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 16
+            if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 16
+            return 0
+
         def release(self):
             pass
 
@@ -207,6 +215,13 @@ def test_predict_video_empty_predictions_with_gt_penalizes(monkeypatch, tmp_path
                 return False, None
             return True, frame.copy()
 
+        def get(self, prop_id):
+            if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 16
+            if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 16
+            return 0
+
         def release(self):
             pass
 
@@ -254,11 +269,8 @@ def test_predict_video_empty_predictions_with_gt_penalizes(monkeypatch, tmp_path
     assert metrics["dice_mean"] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_bootstrap_bbox_from_full_frame_segmentation(monkeypatch, tmp_path):
-    frames = {
-        0: np.zeros((16, 16, 3), dtype=np.uint8),
-        14: np.zeros((16, 16, 3), dtype=np.uint8),
-    }
+def test_predict_video_preserves_upstream_fallback_bbox_source(monkeypatch, tmp_path):
+    frames = {0: np.zeros((16, 16, 3), dtype=np.uint8)}
 
     class _FakeCapture:
         def __init__(self, _path):
@@ -277,81 +289,43 @@ def test_bootstrap_bbox_from_full_frame_segmentation(monkeypatch, tmp_path):
                 return False, None
             return True, frame.copy()
 
+        def get(self, prop_id):
+            if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 16
+            if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 16
+            return 0
+
         def release(self):
             pass
 
     monkeypatch.setattr(cv2, "VideoCapture", lambda *_args, **_kwargs: _FakeCapture(_args[0] if _args else None))
-
-    # Create a real dummy mask file on disk so _resolve_gt_mask_path can find it.
-    _mask_img = np.zeros((16, 16), dtype=np.uint8)
-    _mask_img[2:6, 3:7] = 255
-    cv2.imwrite(str(tmp_path / "dummy.png"), _mask_img)
-
-    written_masks = {}
-
-    def _fake_imwrite(path, image):
-        written_masks[path] = image
-        return True
-
-    monkeypatch.setattr(cv2, "imwrite", _fake_imwrite)
-
-    # Record the ROI bbox used for cropping (BoundingBox object).
-    roi_bboxes = []
-    _orig_crop = seg_utils.crop_with_bbox
-
-    def _recording_crop(image, bbox):
-        # Record only frame->ROI crops (3-channel frames)
-        if isinstance(image, np.ndarray) and image.ndim == 3:
-            roi_bboxes.append(bbox.as_tuple())
-        return _orig_crop(image, bbox)
-
-    monkeypatch.setattr(seg_workflow, "crop_with_bbox", _recording_crop, raising=True)
+    monkeypatch.setattr(cv2, "imwrite", lambda *_args, **_kwargs: True)
 
     cfg = {"model": {"name": "unetpp"}}
     workflow = SegmentationWorkflow(cfg, dataset_root=str(tmp_path), results_dir=str(tmp_path / "results"))
-    # Disable resizing to make bbox/ROI size assertions stable.
     workflow.input_size = None
 
-    # Force a non-empty segmentation mask in full-frame mode: a small 4x4 blob.
-    def _fake_run_model(_self, roi_tensor: torch.Tensor) -> torch.Tensor:
-        _, _, h, w = roi_tensor.shape
-        logits = torch.full((1, 1, h, w), -10.0, dtype=roi_tensor.dtype, device=roi_tensor.device)
-        logits[:, :, 2:6, 3:7] = 10.0
-        return logits
+    preds = [
+        FramePrediction(
+            frame_index=0,
+            bbox=(2.0, 2.0, 6.0, 6.0),
+            score=None,
+            is_fallback=True,
+            bbox_source="lw_tab_p",
+        )
+    ]
 
-    monkeypatch.setattr(SegmentationWorkflow, "_run_model_with_fallback", _fake_run_model, raising=True)
-
-    # Avoid GT metric dependencies in this test.
-    def _fake_load_mask(_self, _video_path, _seg_data):
-        return None
-
-    monkeypatch.setattr(SegmentationWorkflow, "_load_mask_from_annotation", _fake_load_mask, raising=False)
-
-    gt_annotation = {
-        "frames": {"0": [(2.0, 2.0, 6.0, 6.0)], "14": [(2.0, 2.0, 6.0, 6.0)]},
-        "frame_annotations": {
-            "0": [{"mask_path": "dummy.png", "metadata": {"centroid": [0.0, 0.0]}}],
-            "14": [{"mask_path": "dummy.png", "metadata": {"centroid": [0.0, 0.0]}}],
-        },
-    }
-
-    metrics, accum = workflow.predict_video(
+    workflow.predict_video(
         "dummy.mp4",
-        predictions=[],
+        predictions=preds,
         output_dir=str(tmp_path / "output"),
-        gt_annotation=gt_annotation,
+        gt_annotation=None,
         viz_settings={"include_segmentation": False},
     )
 
-    # We expect at least 2 ROI crops (frame 0 and frame 14)
-    assert len(roi_bboxes) >= 2
-    # Frame 0 is forced full-frame -> ROI should be full frame (after clamping)
-    assert roi_bboxes[0][2] == pytest.approx(16.0, abs=1e-6)
-    assert roi_bboxes[0][3] == pytest.approx(16.0, abs=1e-6)
-    # Frame 14 should NOT be full-frame anymore due to bootstrap bbox from frame 0 mask.
-    assert roi_bboxes[1][2] < 16.0
-    assert roi_bboxes[1][3] < 16.0
-    assert "iou_mean" in metrics
-    assert "centroid_mean" in metrics
-    assert written_masks  # should have written at least one mask
-    assert accum["dice"] is not None
+    with open(tmp_path / "output" / "roi_trace.json", "r", encoding="utf-8") as f:
+        trace = json.load(f)
+
+    assert trace["0"]["bbox_source"] == "lw_tab_p"
+    assert trace["0"]["is_fallback"] is True

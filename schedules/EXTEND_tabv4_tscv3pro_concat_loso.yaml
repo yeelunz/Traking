@@ -31,7 +31,23 @@ queue:
         results_root: results
 
       trajectory_filter: &trajectory_filter_defaults
-        bbox_strategy: none
+        bbox_strategy: area_constraint
+        filter_bbox_size: true
+        anchor_keep_ratio: 0.0
+        bbox_params:
+          macro_ratio: 0.08
+          macro_sigma: 2.0
+          micro_hw: 1
+          micro_sigma: 2.0
+          max_outlier_run: 1
+        traj_params:
+          macro_ratio: 0.08
+          macro_sigma: 2.0
+          micro_hw: 1
+          micro_sigma: 2.0
+          max_outlier_run: 1
+          sg_window: 1
+          sg_polyorder: 1
 
       detector: &detector_yolo11l
         weights: models/detection/yolo26l.pt
@@ -109,7 +125,7 @@ queue:
           n_steps: 256
           frame_w: 640.0
           frame_h: 480.0
-          interp_method: cubic
+          interp_method: pchip
 
       clf_tabv4_rf_concat: &clf_tabv4_rf_concat
         enabled: true

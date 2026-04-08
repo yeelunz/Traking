@@ -6,6 +6,16 @@ def test_tab_v4_embedding_dim_from_feature_extractor_definition():
     assert dim == 11
 
 
+def test_tab_v5_embedding_dim_from_feature_extractor_definition():
+    dim = _infer_texture_embedding_dim("tab_v5", params={}, tp_cfg={})
+    assert dim == 11
+
+
+def test_tab_v5_lite_embedding_dim_from_feature_extractor_definition():
+    dim = _infer_texture_embedding_dim("tab_v5_lite", params={}, tp_cfg={})
+    assert dim == 15
+
+
 def test_embedding_dim_override_has_priority():
     dim = _infer_texture_embedding_dim(
         "tab_v4",

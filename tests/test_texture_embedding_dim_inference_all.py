@@ -4,6 +4,8 @@ from tracking.classification.engine import _infer_texture_embedding_dim
 def test_infer_texture_embedding_dims_for_all_pretrain_extractors_defaults():
     assert _infer_texture_embedding_dim("tab_v3_pro", {}, {}) == 10
     assert _infer_texture_embedding_dim("tab_v4", {}, {}) == 11
+    assert _infer_texture_embedding_dim("tab_v5", {}, {}) == 11
+    assert _infer_texture_embedding_dim("tab_v5_lite", {}, {}) == 15
     assert _infer_texture_embedding_dim("tsc_v3_pro", {}, {}) == 3
 
     assert _infer_texture_embedding_dim("tab_v2", {}, {}) == 64

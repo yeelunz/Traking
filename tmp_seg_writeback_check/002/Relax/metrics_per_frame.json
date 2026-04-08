@@ -1,0 +1,1127 @@
+{
+  "0": {
+    "dice": 0.8273518215297238,
+    "iou": 0.7055413863423274,
+    "centroid": 3.162882945152679
+  },
+  "1": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "2": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "3": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "4": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "5": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "6": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "7": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "8": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "9": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "10": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "11": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "12": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "13": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "14": {
+    "dice": 0.7420349433648458,
+    "iou": 0.5898692809080603,
+    "centroid": 7.972145004052188
+  },
+  "15": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "16": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "17": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "18": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "19": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "20": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "21": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "22": {
+    "dice": 0.7992672074327051,
+    "iou": 0.6656495203431452,
+    "centroid": 12.838917175874403
+  },
+  "23": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "24": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "25": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "26": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "27": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "28": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "29": {
+    "dice": 0.9143958867719285,
+    "iou": 0.8422922091304067,
+    "centroid": 1.2708241262022741
+  },
+  "30": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "31": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "32": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "33": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "34": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "35": {
+    "dice": 0.9225457819089543,
+    "iou": 0.8562273611434307,
+    "centroid": 1.841120840702378
+  },
+  "36": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "37": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "38": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "39": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "40": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "41": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "42": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "43": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "44": {
+    "dice": 0.8512429303102402,
+    "iou": 0.7410121363084469,
+    "centroid": 1.8010316572307872
+  },
+  "45": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "46": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "47": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "48": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "49": {
+    "dice": 0.8756304941813473,
+    "iou": 0.7787746729610934,
+    "centroid": 4.095763448806057
+  },
+  "50": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "51": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "52": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "53": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "54": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "55": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "56": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "57": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "58": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "59": {
+    "dice": 0.8864085898719399,
+    "iou": 0.7959908650606469,
+    "centroid": 1.7515476214678236
+  },
+  "60": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "61": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "62": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "63": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "64": {
+    "dice": 0.9118165783492332,
+    "iou": 0.8379254454786803,
+    "centroid": 3.2394455049073674
+  },
+  "65": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "66": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "67": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "68": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "69": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "70": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "71": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "72": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "73": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "74": {
+    "dice": 0.8589217488525651,
+    "iou": 0.7527281744164861,
+    "centroid": 2.6037408659056958
+  },
+  "75": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "76": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "77": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "78": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "79": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "80": {
+    "dice": 0.8905538415027833,
+    "iou": 0.8027012709738609,
+    "centroid": 3.693729454770757
+  },
+  "81": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "82": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "83": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "84": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "85": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "86": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "87": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "88": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "89": {
+    "dice": 0.8195207188193309,
+    "iou": 0.6942271091786366,
+    "centroid": 5.6649875612198395
+  },
+  "90": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "91": {
+    "dice": 0.8747693117750106,
+    "iou": 0.777413308158994,
+    "centroid": 3.091221189145188
+  },
+  "92": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "93": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "94": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "95": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "96": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "97": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "98": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "99": {
+    "dice": 0.8923998909163171,
+    "iou": 0.8057058532204363,
+    "centroid": 5.3684034822535445
+  },
+  "100": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "101": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "102": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "103": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "104": {
+    "dice": 0.8662211573740737,
+    "iou": 0.7640124553460825,
+    "centroid": 2.99213110352255
+  },
+  "105": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "106": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "107": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "108": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "109": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "110": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "111": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "112": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "113": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "114": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "115": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "116": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "117": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "118": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "119": {
+    "dice": 0.8217468804657821,
+    "iou": 0.6974281390323258,
+    "centroid": 0.618009757518866
+  },
+  "120": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "121": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "122": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "123": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "124": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "125": {
+    "dice": 0.8151280811001537,
+    "iou": 0.6879461552747407,
+    "centroid": 5.457663171926195
+  },
+  "126": {
+    "dice": 0.8103033220016486,
+    "iou": 0.6811007687816469,
+    "centroid": 4.00313739070191
+  },
+  "127": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "128": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "129": {
+    "dice": 0.8428205127124588,
+    "iou": 0.7283403499383247,
+    "centroid": 11.122951906852157
+  },
+  "130": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "131": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "132": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "133": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "134": {
+    "dice": 0.9105899074753958,
+    "iou": 0.8358559496774907,
+    "centroid": 3.10157912001661
+  },
+  "135": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "136": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "137": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "138": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "139": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "140": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "141": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "142": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "143": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "144": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "145": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "146": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "147": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "148": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "149": {
+    "dice": 0.8224719100036388,
+    "iou": 0.6984732822859288,
+    "centroid": 3.0273070172579963
+  },
+  "150": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "151": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "152": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "153": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "154": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "155": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "156": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "157": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "158": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "159": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "160": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "161": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "162": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "163": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "164": {
+    "dice": 0.7979760581515517,
+    "iou": 0.6638603694735399,
+    "centroid": 3.96244873479382
+  },
+  "165": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "166": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "167": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "168": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "169": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "170": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "171": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "172": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "173": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "174": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "175": {
+    "dice": 0.8247172858340445,
+    "iou": 0.701718212897659,
+    "centroid": 4.34763255187618
+  },
+  "176": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "177": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "178": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "179": {
+    "dice": 0.8254869081870905,
+    "iou": 0.7028332965730654,
+    "centroid": 7.902097160168179
+  },
+  "180": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "181": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "182": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "183": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "184": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "185": {
+    "dice": 0.8331335729347271,
+    "iou": 0.7139922390518164,
+    "centroid": 7.104123485073088
+  },
+  "186": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "187": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "188": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "189": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "190": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "191": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "192": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "193": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "194": {
+    "dice": 0.8283035827881978,
+    "iou": 0.7069267863421905,
+    "centroid": 6.076425113868115
+  },
+  "195": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "196": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "197": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "198": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "199": {
+    "dice": 0.8293808485028354,
+    "iou": 0.7084975907340127,
+    "centroid": 6.680873453887404
+  },
+  "200": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "201": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "202": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "203": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "204": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "205": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "206": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "207": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "208": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "209": {
+    "dice": 0.7559290811931926,
+    "iou": 0.6076253931875577,
+    "centroid": 3.7647010511039376
+  },
+  "210": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "211": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "212": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "213": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "214": {
+    "dice": 0.7741372865610892,
+    "iou": 0.6315040649122958,
+    "centroid": 8.907212466503395
+  },
+  "215": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "216": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "217": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "218": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "219": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "220": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "221": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "222": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "223": {
+    "dice": null,
+    "iou": null,
+    "centroid": null
+  },
+  "224": {
+    "dice": 0.764157881740113,
+    "iou": 0.6183296963661318,
+    "centroid": 3.300104726828929
+  }
+}

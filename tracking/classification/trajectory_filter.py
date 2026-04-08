@@ -39,6 +39,13 @@ try:
 except ImportError:
     pass
 
+_SCIPY_PCHIP_OK: bool = False
+try:
+    from scipy.interpolate import PchipInterpolator as _PchipInterpolator  # noqa: F401
+    _SCIPY_PCHIP_OK = True
+except ImportError:
+    pass
+
 
 def cubic_spline_interpolate_1d(
     t_known: np.ndarray,
@@ -67,6 +74,128 @@ def cubic_spline_interpolate_1d(
     v_min, v_max = float(v_known.min()), float(v_known.max())
     np.clip(result, v_min, v_max, out=result)
     return result
+
+
+def pchip_interpolate_1d(
+    t_known: np.ndarray,
+    v_known: np.ndarray,
+    t_query: np.ndarray,
+) -> np.ndarray:
+    """Shape-preserving PCHIP interpolation for a 1-D signal."""
+    if len(t_known) < 2:
+        if len(t_known) == 0:
+            return np.zeros_like(t_query, dtype=np.float64)
+        return np.full_like(t_query, float(v_known[0]), dtype=np.float64)
+    if not _SCIPY_PCHIP_OK:
+        return np.interp(t_query, t_known, v_known)
+    if len(t_known) >= 2 and np.any(np.diff(t_known) <= 0):
+        return np.interp(t_query, t_known, v_known)
+    from scipy.interpolate import PchipInterpolator
+
+    pchip = PchipInterpolator(t_known, v_known, extrapolate=True)
+    result = np.asarray(pchip(t_query), dtype=np.float64)
+    v_min, v_max = float(np.min(v_known)), float(np.max(v_known))
+    np.clip(result, v_min, v_max, out=result)
+    return result
+
+
+def _fill_missing_with_pchip(
+    values: np.ndarray,
+    frame_indices: np.ndarray,
+) -> np.ndarray:
+    """Fill NaNs in a 1-D trajectory using PCHIP over frame indices."""
+    out = np.asarray(values, dtype=np.float64).copy()
+    if out.size == 0 or not np.isnan(out).any():
+        return out
+
+    t_axis = np.asarray(frame_indices, dtype=np.float64)
+    valid = np.isfinite(out)
+    if not valid.any():
+        return np.zeros_like(out, dtype=np.float64)
+    if valid.sum() == 1:
+        out[~valid] = float(out[valid][0])
+        return out
+
+    out[~valid] = pchip_interpolate_1d(t_axis[valid], out[valid], t_axis[~valid])
+    return out
+
+
+def _mask_unobserved(values: np.ndarray, observed_mask: Optional[np.ndarray]) -> np.ndarray:
+    """Mark explicitly missing samples as NaN so downstream filters ignore them."""
+    out = np.asarray(values, dtype=np.float64).copy()
+    if observed_mask is None:
+        return out
+    obs = np.asarray(observed_mask, dtype=bool)
+    if obs.shape != out.shape:
+        raise ValueError("observed_mask must have the same shape as values")
+    out[~obs] = np.nan
+    return out
+
+
+def _suppress_long_outlier_runs(mask: np.ndarray, max_outlier_run: int) -> np.ndarray:
+    """Keep only short outlier bursts; long runs are likely regime shifts.
+
+    Hampel is designed for point-like anomalies. When a trajectory enters a
+    genuine rapid-motion segment, several adjacent points can be incorrectly
+    flagged as outliers, which then causes interpolation drift.
+    """
+    out = np.asarray(mask, dtype=bool).copy()
+    if out.size == 0 or max_outlier_run < 1:
+        return out
+
+    i = 0
+    n = len(out)
+    while i < n:
+        if not out[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < n and out[j]:
+            j += 1
+        run_len = j - i
+        if run_len > max_outlier_run:
+            out[i:j] = False
+        i = j
+    return out
+
+
+def hampel_then_pchip_1d(
+    values: np.ndarray,
+    frame_indices: np.ndarray,
+    *,
+    observed_mask: Optional[np.ndarray] = None,
+    macro_ratio: float = 0.15,
+    macro_sigma: float = 3.0,
+    micro_hw: int = 7,
+    micro_sigma: float = 3.0,
+    max_outlier_run: int = 2,
+    skip_hampel: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply missing-aware Hampel detection and recover trajectory with PCHIP.
+
+    Returns
+    -------
+    filtered : 1-D float array after PCHIP fill
+    marked_missing : 1-D float array with missing/outlier samples set to NaN
+    outlier_mask : bool array where Hampel marked a finite sample as outlier
+    """
+    working = _mask_unobserved(values, observed_mask)
+    if skip_hampel:
+        outlier_mask = np.zeros(len(working), dtype=bool)
+    else:
+        _, outlier_mask = multiscale_hampel(
+            working,
+            macro_ratio=macro_ratio,
+            macro_sigma=macro_sigma,
+            micro_hw=micro_hw,
+            micro_sigma=micro_sigma,
+        )
+        outlier_mask = _suppress_long_outlier_runs(outlier_mask, int(max_outlier_run))
+    marked = working.copy()
+    if outlier_mask.any():
+        marked[outlier_mask] = np.nan
+    filled = _fill_missing_with_pchip(marked, frame_indices)
+    return filled, marked, outlier_mask
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -128,7 +257,12 @@ def hampel_filter_1d(
     for i in range(n):
         lo = max(0, i - k)
         hi = min(n, i + k + 1)
+        if not np.isfinite(values[i]):
+            continue
         window = values[lo:hi]
+        window = window[np.isfinite(window)]
+        if window.size == 0:
+            continue
         med = np.median(window)
         mad = np.median(np.abs(window - med))
         threshold = n_sigma * 1.4826 * (mad + 1e-12)
@@ -248,11 +382,11 @@ def _adaptive_savgol(
     When frame spacing is non-uniform (gaps > 1 between adjacent
     observations), the pipeline is:
 
-    1. Cubic-spline resample observations to a dense 1-frame grid.
+    1. PCHIP resample observations to a dense 1-frame grid.
     2. Scale the S-G window proportionally to the density ratio so that
        the temporal coverage is equivalent regardless of sparsity.
     3. Apply bidirectional S-G on the dense grid.
-    4. Cubic-spline extract smoothed values at the original frame positions.
+    4. PCHIP extract smoothed values at the original frame positions.
     """
     n = len(values)
     if n < 4:
@@ -295,7 +429,7 @@ def _adaptive_savgol(
         return bidirectional_savgol(values, window_length, polyorder)
 
     # Resample to uniform 1-frame grid
-    interpolated = cubic_spline_interpolate_1d(fi_f, values.astype(np.float64), uniform_fi)
+    interpolated = pchip_interpolate_1d(fi_f, values.astype(np.float64), uniform_fi)
 
     # Scale window proportionally: same *temporal* coverage as intended
     density_ratio = n_uniform / max(n, 1)
@@ -308,7 +442,7 @@ def _adaptive_savgol(
     smoothed_uniform = bidirectional_savgol(interpolated, scaled_wl, scaled_po)
 
     # Extract at original positions, preserving original dtype
-    result = cubic_spline_interpolate_1d(uniform_fi, smoothed_uniform, fi_f)
+    result = pchip_interpolate_1d(uniform_fi, smoothed_uniform, fi_f)
     return result.astype(orig_dtype)
 
 
@@ -320,6 +454,7 @@ def smooth_trajectory_2d(
     observations: np.ndarray,
     frame_indices: np.ndarray,
     *,
+    observed_mask: Optional[np.ndarray] = None,
     macro_ratio: float = 0.15,
     macro_sigma: float = 3.0,
     micro_hw: int = 7,
@@ -358,19 +493,21 @@ def smooth_trajectory_2d(
     obs_sorted = observations[order]
 
     smoothed_sorted = np.empty_like(obs_sorted)
+    obs_mask_sorted = None
+    if observed_mask is not None:
+        obs_mask_sorted = np.asarray(observed_mask, dtype=bool)[order]
     for dim in range(2):
         raw = obs_sorted[:, dim]
-        if skip_hampel:
-            # GT mode: no outlier removal; directly apply S-G smoothing
-            cleaned = raw
-        else:
-            cleaned, _ = multiscale_hampel(
-                raw,
-                macro_ratio=macro_ratio,
-                macro_sigma=macro_sigma,
-                micro_hw=micro_hw,
-                micro_sigma=micro_sigma,
-            )
+        cleaned, _, _ = hampel_then_pchip_1d(
+            raw,
+            fi_sorted,
+            observed_mask=obs_mask_sorted,
+            macro_ratio=macro_ratio,
+            macro_sigma=macro_sigma,
+            micro_hw=micro_hw,
+            micro_sigma=micro_sigma,
+            skip_hampel=skip_hampel,
+        )
         # Use time-aware S-G that correctly handles non-uniform frame gaps
         smoothed_sorted[:, dim] = _adaptive_savgol(
             cleaned, fi_sorted, window_length=sg_window, polyorder=sg_polyorder,
@@ -486,8 +623,7 @@ def filter_bbox_area_constraint(
             skip_hampel=skip_hampel, frame_indices=frame_indices,
         )
 
-    # Cubic spline interpolation for NaN gaps (C2 continuity)
-    # Use actual frame_indices when available for correct temporal interpolation
+    # Fill NaN gaps with shape-preserving PCHIP interpolation.
     if frame_indices is not None and len(frame_indices) == n:
         t_axis = frame_indices.astype(np.float64)
     else:
@@ -495,7 +631,7 @@ def filter_bbox_area_constraint(
     for arr, raw in ((w_out, widths), (h_out, heights)):
         nans = np.isnan(arr)
         if nans.any() and (~nans).any():
-            arr[nans] = cubic_spline_interpolate_1d(
+            arr[nans] = pchip_interpolate_1d(
                 t_axis[~nans], arr[~nans], t_axis[nans],
             )
         elif nans.all():
@@ -536,7 +672,13 @@ def filter_bbox_none(
     metrics while still allowing centre-trajectory smoothing (Hampel + S-G)
     for downstream ROI cropping stability.
     """
-    return widths.copy().astype(np.float64), heights.copy().astype(np.float64)
+    w_out = widths.copy().astype(np.float64)
+    h_out = heights.copy().astype(np.float64)
+    if frame_indices is None or len(frame_indices) != len(w_out):
+        frame_indices = np.arange(len(w_out), dtype=np.float64)
+    w_out = _fill_missing_with_pchip(w_out, np.asarray(frame_indices))
+    h_out = _fill_missing_with_pchip(h_out, np.asarray(frame_indices))
+    return w_out, h_out
 
 
 def filter_bbox_hampel_only(
@@ -544,9 +686,12 @@ def filter_bbox_hampel_only(
     heights: np.ndarray,
     *,
     macro_ratio: float = 0.15,
+    macro_sigma: float = 3.0,
     micro_hw: int = 5,
+    micro_sigma: float = 3.0,
     skip_hampel: bool = False,
     frame_indices: Optional[np.ndarray] = None,
+    observed_mask: Optional[np.ndarray] = None,
     **_kwargs: Any,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """策略: 僅做 Hampel 離群值移除，不做 S-G 平滑。
@@ -555,10 +700,29 @@ def filter_bbox_hampel_only(
     bbox on one frame) without the over-smoothing that S-G introduces.
     A good middle-ground between ``"none"`` and ``"independent"``.
     """
-    if skip_hampel:
-        return widths.copy().astype(np.float64), heights.copy().astype(np.float64)
-    w_clean, _ = multiscale_hampel(widths, macro_ratio=macro_ratio, micro_hw=micro_hw)
-    h_clean, _ = multiscale_hampel(heights, macro_ratio=macro_ratio, micro_hw=micro_hw)
+    if frame_indices is None or len(frame_indices) != len(widths):
+        frame_indices = np.arange(len(widths), dtype=np.float64)
+    fi = np.asarray(frame_indices)
+    w_clean, _, _ = hampel_then_pchip_1d(
+        widths,
+        fi,
+        observed_mask=observed_mask,
+        macro_ratio=macro_ratio,
+        macro_sigma=macro_sigma,
+        micro_hw=micro_hw,
+        micro_sigma=micro_sigma,
+        skip_hampel=skip_hampel,
+    )
+    h_clean, _, _ = hampel_then_pchip_1d(
+        heights,
+        fi,
+        observed_mask=observed_mask,
+        macro_ratio=macro_ratio,
+        macro_sigma=macro_sigma,
+        micro_hw=micro_hw,
+        micro_sigma=micro_sigma,
+        skip_hampel=skip_hampel,
+    )
     w_clean = np.maximum(w_clean, 1.0)
     h_clean = np.maximum(h_clean, 1.0)
     return w_clean, h_clean
@@ -578,6 +742,16 @@ _BBOX_STRATEGIES = {
 }
 
 
+def resolve_filter_bbox_size(
+    bbox_strategy: str,
+    filter_bbox_size: Optional[bool],
+) -> bool:
+    """Resolve whether bbox size filtering should run."""
+    if filter_bbox_size is None:
+        return str(bbox_strategy).strip().lower() != "none"
+    return bool(filter_bbox_size)
+
+
 def filter_detections(
     frame_indices: np.ndarray,
     cx: np.ndarray,
@@ -590,6 +764,9 @@ def filter_detections(
     bbox_params: Optional[Dict[str, Any]] = None,
     traj_params: Optional[Dict[str, Any]] = None,
     skip_hampel: bool = False,
+    observed_mask: Optional[np.ndarray] = None,
+    anchor_mask: Optional[np.ndarray] = None,
+    anchor_keep_ratio: float = 0.0,
 ) -> Dict[str, np.ndarray]:
     """Filter a full detection trajectory.
 
@@ -657,10 +834,16 @@ def filter_detections(
     w_sorted = widths[order].astype(np.float64)
     h_sorted = heights[order].astype(np.float64)
     s_sorted = scores[order].astype(np.float64)
+    observed_sorted = None
+    if observed_mask is not None:
+        observed_sorted = np.asarray(observed_mask, dtype=bool)[order]
+    anchor_sorted = None
+    if anchor_mask is not None:
+        anchor_sorted = np.asarray(anchor_mask, dtype=bool)[order]
 
     # 1. Smooth centroid trajectory
     obs = np.column_stack([cx_sorted, cy_sorted])
-    smoothed = smooth_trajectory_2d(obs, fi_sorted, **traj_kw)
+    smoothed = smooth_trajectory_2d(obs, fi_sorted, observed_mask=observed_sorted, **traj_kw)
     cx_filt = smoothed[:, 0]
     cy_filt = smoothed[:, 1]
 
@@ -670,7 +853,18 @@ def filter_detections(
         raise ValueError(f"Unknown bbox_strategy: {bbox_strategy!r}. "
                          f"Choose from {list(_BBOX_STRATEGIES.keys())}")
     bbox_kw["frame_indices"] = fi_sorted
+    if observed_sorted is not None:
+        bbox_kw["observed_mask"] = observed_sorted
     w_filt, h_filt = strategy_fn(w_sorted, h_sorted, **bbox_kw)
+
+    # Keep detector-anchor frames close to raw observations so valid detector
+    # updates are not overruled by surrounding fallback segments.
+    keep = float(np.clip(anchor_keep_ratio, 0.0, 1.0))
+    if anchor_sorted is not None and keep > 0.0 and anchor_sorted.any():
+        cx_filt[anchor_sorted] = keep * cx_sorted[anchor_sorted] + (1.0 - keep) * cx_filt[anchor_sorted]
+        cy_filt[anchor_sorted] = keep * cy_sorted[anchor_sorted] + (1.0 - keep) * cy_filt[anchor_sorted]
+        w_filt[anchor_sorted] = keep * w_sorted[anchor_sorted] + (1.0 - keep) * w_filt[anchor_sorted]
+        h_filt[anchor_sorted] = keep * h_sorted[anchor_sorted] + (1.0 - keep) * h_filt[anchor_sorted]
 
     return {
         "frame_indices": fi_sorted,

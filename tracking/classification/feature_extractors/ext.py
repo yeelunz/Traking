@@ -420,6 +420,13 @@ try:
 except ImportError:
     _SCIPY_INTERP_OK = False
 
+_SCIPY_PCHIP_OK: bool
+try:
+    from scipy.interpolate import PchipInterpolator as _PchipInterpolator  # noqa: F401
+    _SCIPY_PCHIP_OK = True
+except ImportError:
+    _SCIPY_PCHIP_OK = False
+
 _SCIPY_SIGNAL_OK: bool
 try:
     from scipy.signal import savgol_filter as _savgol_filter  # noqa: F401
@@ -504,12 +511,22 @@ def _interp_channel(
     t_known : 1-D float array of known time points (frame indices).
     v_known : 1-D float array of channel values at *t_known*.
     t_all   : 1-D float array of all time points to evaluate (0..T-1).
-    method  : ``"linear"`` or ``"cubic"``.
+    method  : ``"linear"``, ``"cubic"``, or ``"pchip"``.
     """
     if len(t_known) == 0:
         return np.zeros(len(t_all), dtype=np.float64)
     if len(t_known) == 1:
         return np.full(len(t_all), v_known[0], dtype=np.float64)
+    if method == "pchip" and _SCIPY_PCHIP_OK:
+        try:
+            from scipy.interpolate import PchipInterpolator
+            pchip = PchipInterpolator(t_known, v_known, extrapolate=True)
+            result = np.asarray(pchip(t_all), dtype=np.float64)
+            v_min, v_max = float(v_known.min()), float(v_known.max())
+            np.clip(result, v_min, v_max, out=result)
+            return result
+        except Exception:
+            pass
     if method == "cubic" and _SCIPY_INTERP_OK and len(t_known) >= 4:
         try:
             from scipy.interpolate import CubicSpline
@@ -530,7 +547,7 @@ def _extract_ts_geo_channels(
     samples: Sequence[FramePrediction],
     frame_w: float = 640.0,
     frame_h: float = 480.0,
-    interp_method: str = "cubic",
+    interp_method: str = "pchip",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build ``(N_GEO_VARS, N_TS_STEPS)`` geometric channel matrix.
 
@@ -1052,7 +1069,7 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         "texture_pretrain_ckpt": None,
         # Temporal interpolation method for sparse annotations.
         # "cubic" (default, C2 continuity) or "linear" (fallback).
-        "interp_method": "cubic",
+        "interp_method": "pchip",
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -1065,7 +1082,7 @@ class TimeSeriesFeatureExtractor(TrajectoryFeatureExtractor):
         self._texture_backbone = str(cfg.get("texture_backbone", "resnet18")).lower()
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
         self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
-        self._interp_method: str = str(cfg.get("interp_method", "cubic"))
+        self._interp_method: str = str(cfg.get("interp_method", "pchip"))
         _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
         self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 
@@ -1624,7 +1641,7 @@ def _extract_ts_geo_channels_v2(
     samples: Sequence[FramePrediction],
     frame_w: float = 640.0,
     frame_h: float = 480.0,
-    interp_method: str = "cubic",
+    interp_method: str = "pchip",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build ``(N_GEO_VARS_V2, N_TS_STEPS)`` V2 geometric channel matrix.
 
@@ -2085,7 +2102,7 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
         "texture_mode": "freeze",  # freeze | learnable | pretrain
         "texture_backbone": "resnet18",
         "texture_pretrain_ckpt": None,
-        "interp_method": "cubic",
+        "interp_method": "pchip",
     }
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
@@ -2098,7 +2115,7 @@ class TimeSeriesV2FeatureExtractor(TrajectoryFeatureExtractor):
         self._texture_backbone = str(cfg.get("texture_backbone", "resnet18")).lower()
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
         self._texture_reduce_method = _resolve_texture_reduce_method(self._texture_mode)
-        self._interp_method: str = str(cfg.get("interp_method", "cubic"))
+        self._interp_method: str = str(cfg.get("interp_method", "pchip"))
         _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})
         self._runtime_global_preprocs, self._runtime_roi_preprocs = _build_runtime_preprocs_from_cfg(_runtime_pp)
 

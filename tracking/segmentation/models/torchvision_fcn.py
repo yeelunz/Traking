@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from typing import Any, Dict, Optional
 
 import torch
@@ -24,7 +25,22 @@ from ...core.registry import register_segmentation_model
 class TorchvisionFCNSegmenter(nn.Module):
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         super().__init__()
-        if fcn_resnet50 is None:  # pragma: no cover
+        fcn_ctor = fcn_resnet50
+        weights_cls = FCN_ResNet50_Weights
+        # Allow runtime overrides (e.g., tests monkeypatching
+        # tracking.segmentation.model.fcn_resnet50 / FCN_ResNet50_Weights).
+        try:
+            seg_model_module = importlib.import_module("tracking.segmentation.model")
+            fcn_override = getattr(seg_model_module, "fcn_resnet50", None)
+            weights_override = getattr(seg_model_module, "FCN_ResNet50_Weights", None)
+            if callable(fcn_override):
+                fcn_ctor = fcn_override
+            if weights_override is not None:
+                weights_cls = weights_override
+        except Exception:
+            pass
+
+        if fcn_ctor is None:  # pragma: no cover
             raise ImportError(
                 "torchvision is required for 'torchvision_fcn_resnet50'."
                 f" Install via `pip install torchvision`. Original error: {_TV_IMPORT_ERROR}"
@@ -32,16 +48,16 @@ class TorchvisionFCNSegmenter(nn.Module):
         cfg = dict(params or {})
         weights_spec = cfg.get("weights", "DEFAULT")
         weights_enum = None
-        if FCN_ResNet50_Weights is not None:
+        if weights_cls is not None:
             if isinstance(weights_spec, str):
                 key = weights_spec.upper()
-                weights_enum = getattr(FCN_ResNet50_Weights, key, None)
-                if weights_enum is None and hasattr(FCN_ResNet50_Weights, "DEFAULT"):
-                    weights_enum = FCN_ResNet50_Weights.DEFAULT
+                weights_enum = getattr(weights_cls, key, None)
+                if weights_enum is None and hasattr(weights_cls, "DEFAULT"):
+                    weights_enum = weights_cls.DEFAULT
             else:
                 weights_enum = weights_spec
         self.weights_enum = weights_enum
-        self.model = fcn_resnet50(weights=weights_enum)
+        self.model = fcn_ctor(weights=weights_enum)
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False

@@ -23,7 +23,8 @@ class YOLOv11Model(TrackingModel):
     """Single-object tracking via per-frame detection using Ultralytics YOLOv11.
 
     Strategy: run detector on each frame and take the highest-confidence bbox.
-    When no detection, optionally re-use previous bbox (fallback).
+    Frames without reliable detections are left empty and can be filled later
+    by interpolation (no prev-bbox / segmentation-init fallback here).
     """
     name = "YOLOv11"
     DEFAULT_CONFIG = {
@@ -36,7 +37,7 @@ class YOLOv11Model(TrackingModel):
         "classes": None,        # e.g., [0] for person; None for all
         "max_det": 100,
         "min_confidence": 0.0,
-        "fallback_last_prediction": True,
+        "fallback_last_prediction": False,
         "fallback_missing_interpolation": True,
         "interpolation_max_gap": 30,
         "train_enabled": True,
@@ -520,31 +521,6 @@ class YOLOv11Model(TrackingModel):
                     preds.append(FramePrediction(int(fidx), candidate_bbox, candidate_score))
                     last_bbox = candidate_bbox
                     bbox_added = True
-                elif self.fallback_last_prediction and last_bbox is not None:
-                    preds.append(
-                        FramePrediction(
-                            frame_index=int(fidx),
-                            bbox=last_bbox,
-                            score=None,
-                            is_fallback=True,
-                            bbox_source="prev_bbox",
-                        )
-                    )
-                    bbox_added = True
-                else:
-                    seg_bbox = self._segment_init_bbox(frames_buf[local_i])
-                    if self._is_valid_bbox(seg_bbox):
-                        preds.append(
-                            FramePrediction(
-                                frame_index=int(fidx),
-                                bbox=seg_bbox,  # type: ignore[arg-type]
-                                score=None,
-                                is_fallback=True,
-                                bbox_source="segmentation_init",
-                            )
-                        )
-                        last_bbox = seg_bbox
-                        bbox_added = True
 
                 if not bbox_added:
                     no_data_frames.append(int(fidx))
@@ -568,7 +544,7 @@ class YOLOv11Model(TrackingModel):
             preds = cubic_clip_interpolate_predictions(
                 preds,
                 max_gap=max(2, int(self.interpolation_max_gap)),
-                interpolated_bbox_source="interpolated_cubic",
+                interpolated_bbox_source="interpolated_pchip",
             )
         return preds
 
@@ -634,31 +610,6 @@ class YOLOv11Model(TrackingModel):
                     preds.append(FramePrediction(int(fidx), candidate_bbox, candidate_score))
                     last_bbox = candidate_bbox
                     bbox_added = True
-                elif self.fallback_last_prediction and last_bbox is not None:
-                    preds.append(
-                        FramePrediction(
-                            frame_index=int(fidx),
-                            bbox=last_bbox,
-                            score=None,
-                            is_fallback=True,
-                            bbox_source="prev_bbox",
-                        )
-                    )
-                    bbox_added = True
-                else:
-                    seg_bbox = self._segment_init_bbox(buf_frames[local_i])
-                    if self._is_valid_bbox(seg_bbox):
-                        preds.append(
-                            FramePrediction(
-                                frame_index=int(fidx),
-                                bbox=seg_bbox,  # type: ignore[arg-type]
-                                score=None,
-                                is_fallback=True,
-                                bbox_source="segmentation_init",
-                            )
-                        )
-                        last_bbox = seg_bbox
-                        bbox_added = True
 
                 if not bbox_added:
                     no_data_frames.append(int(fidx))
@@ -680,6 +631,6 @@ class YOLOv11Model(TrackingModel):
             preds = cubic_clip_interpolate_predictions(
                 preds,
                 max_gap=max(2, int(self.interpolation_max_gap)),
-                interpolated_bbox_source="interpolated_cubic",
+                interpolated_bbox_source="interpolated_pchip",
             )
         return preds

@@ -1,0 +1,160 @@
+{
+  "seed": 42,
+  "dataset": {
+    "root": "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend",
+    "split": {
+      "method": "loso",
+      "loso": true,
+      "ratios": [
+        0.8,
+        0.2
+      ],
+      "k_fold": 1,
+      "subject": "n003",
+      "max_folds": 1
+    }
+  },
+  "experiments": [
+    {
+      "name": "mednext_clahe_global_tabv4_rf_concat",
+      "preproc_scheme": "A",
+      "pipeline": [
+        {
+          "type": "preproc",
+          "name": "CLAHE",
+          "params": {
+            "clipLimit": 2.0,
+            "tileGridSize": [
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "type": "model",
+          "name": "YOLOv11",
+          "params": {
+            "weights": "models/detection/yolo26l.pt",
+            "conf": 0.05,
+            "iou": 0.5,
+            "imgsz": 640,
+            "device": "cuda",
+            "classes": null,
+            "max_det": 100,
+            "fallback_last_prediction": true,
+            "train_enabled": true,
+            "epochs": 30,
+            "batch": 8,
+            "lr0": 0.01,
+            "patience": 50,
+            "workers": 0,
+            "include_empty_frames": false,
+            "force_cpu_if_no_cuda": true
+          }
+        }
+      ]
+    }
+  ],
+  "evaluation": {
+    "evaluator": "BasicEvaluator",
+    "restrict_to_gt_frames": true,
+    "visualize": {
+      "enabled": true,
+      "samples": 0,
+      "strategy": "even_spread",
+      "include_detection": true,
+      "include_segmentation": true,
+      "ensure_first_last": true
+    }
+  },
+  "classification": {
+    "enabled": true,
+    "feature_extractor": {
+      "name": "tab_v4",
+      "params": {
+        "texture_mode": "pretrain",
+        "pretrained_backbone": true,
+        "n_texture_frames": 5,
+        "texture_image_size": 96,
+        "roi_pad_ratio": 0.15
+      }
+    },
+    "classifier": {
+      "name": "random_forest",
+      "params": {
+        "n_estimators": 200,
+        "max_depth": null,
+        "min_samples_leaf": 1,
+        "class_weight": "balanced",
+        "random_state": 42,
+        "n_jobs": -1
+      }
+    },
+    "fusion_module": {
+      "name": "concat",
+      "params": {}
+    },
+    "segmentation": {
+      "enabled": true
+    },
+    "label_file": "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\merged_extend\\ann.txt",
+    "level": "video"
+  },
+  "segmentation": {
+    "model": {
+      "name": "mednext",
+      "params": {
+        "in_channels": 3,
+        "classes": 1,
+        "model_id": "B",
+        "kernel_size": 3,
+        "deep_supervision": false,
+        "dim": "2d"
+      }
+    },
+    "padding_min": 0.1,
+    "padding_max": 0.15,
+    "padding_inference": 0.15,
+    "jitter": 0.02,
+    "redundancy": 1,
+    "target_size": [
+      256,
+      256
+    ],
+    "epochs": 30,
+    "batch_size": 2,
+    "num_workers": 0,
+    "lr": 0.0005,
+    "weight_decay": 1e-05,
+    "dice_weight": 1.0,
+    "bce_weight": 1.0,
+    "threshold": 0.5,
+    "val_ratio": 0.1,
+    "seed": 1337,
+    "device": "auto",
+    "train": true,
+    "inference_checkpoint": null
+  },
+  "output": {
+    "results_root": "results/replay_n003_full_rf_concat_debug"
+  },
+  "trajectory_filter": {
+    "bbox_strategy": "hampel_only",
+    "filter_bbox_size": true,
+    "enabled": true,
+    "bbox_params": {
+      "macro_ratio": 0.08,
+      "micro_hw": 7,
+      "macro_sigma": 1.5,
+      "micro_sigma": 1.5
+    },
+    "traj_params": {
+      "sg_window": 9,
+      "sg_polyorder": 2,
+      "macro_ratio": 0.08,
+      "micro_hw": 7,
+      "macro_sigma": 1.5,
+      "micro_sigma": 1.5
+    }
+  }
+}

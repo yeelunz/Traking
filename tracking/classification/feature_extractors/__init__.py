@@ -6,3 +6,4 @@ from . import v3lite as _load_v3lite  # noqa: F401
 from . import v3pro as _load_v3pro  # noqa: F401
 from . import v3pro_tsc as _load_v3pro_tsc  # noqa: F401
 from . import v4 as _load_v4  # noqa: F401
+from . import v5 as _load_v5  # noqa: F401

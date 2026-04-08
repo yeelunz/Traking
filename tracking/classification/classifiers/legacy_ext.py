@@ -25,6 +25,7 @@ import pickle
 import sys
 import inspect
 import importlib
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,6 +68,20 @@ try:
 except Exception:
     XGBClassifier = None  # type: ignore[assignment,misc]
     _XGB_OK = False
+
+
+def _try_import_xgboost() -> bool:
+    """Attempt to import xgboost and refresh module-level handles."""
+    global XGBClassifier, _XGB_OK
+    try:
+        from xgboost import XGBClassifier as _XGBClassifier  # type: ignore[import-not-found]
+        XGBClassifier = _XGBClassifier  # type: ignore[assignment]
+        _XGB_OK = True
+        return True
+    except Exception:
+        XGBClassifier = None  # type: ignore[assignment,misc]
+        _XGB_OK = False
+        return False
 
 # ── TabPFN ───────────────────────────────────────────────────────────────────
 try:
@@ -459,15 +474,47 @@ class XGBoostSubjectClassifier(_PickleSubjectClassifier):
         "eval_metric": "logloss",
         "n_jobs": -1,
         "random_state": 42,
+        "auto_install_dependencies": True,
+        "dependency_packages": ["xgboost"],
     }
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
-        if not _XGB_OK:
+    @staticmethod
+    def _ensure_xgboost_dependency(cfg: Dict[str, Any]) -> None:
+        if _XGB_OK:
+            return
+
+        deps = cfg.get("dependency_packages", ["xgboost"])
+        if isinstance(deps, (str, bytes)):
+            deps = [str(deps)]
+        deps = [str(pkg).strip() for pkg in (deps or []) if str(pkg).strip()]
+        if not deps:
+            deps = ["xgboost"]
+
+        if not bool(cfg.get("auto_install_dependencies", True)):
             raise RuntimeError(
                 "xgboost is required for XGBoostSubjectClassifier. "
-                "Install via: pip install xgboost"
+                "Install via: pip install xgboost. "
+                f"Active interpreter: {sys.executable}"
             )
+
+        cmd = [sys.executable, "-m", "pip", "install", *deps]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "unknown pip failure").strip()
+            raise RuntimeError(
+                "Failed to install XGBoost dependency at runtime "
+                f"({', '.join(deps)}). pip output: {detail}"
+            )
+
+        if not _try_import_xgboost():
+            raise RuntimeError(
+                "xgboost remains unavailable after runtime installation. "
+                f"Active interpreter: {sys.executable}"
+            )
+
+    def __init__(self, params: Optional[Dict[str, Any]] = None):
         cfg = {**self.DEFAULT_CONFIG, **(params or {})}
+        self._ensure_xgboost_dependency(cfg)
         self._model = XGBClassifier(
             n_estimators=int(cfg["n_estimators"]),
             max_depth=int(cfg["max_depth"]),

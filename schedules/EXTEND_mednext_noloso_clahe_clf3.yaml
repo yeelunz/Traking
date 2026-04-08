@@ -41,7 +41,7 @@ queue:
         results_root: results
 
       trajectory_filter: &trajectory_filter_defaults
-        bbox_strategy: none
+        bbox_strategy: hampel_only
 
       # ── ROI 偵測器：YOLOv11l ─────────────────────────────────────────────────────────────────
       detector: &detector_yolo11l

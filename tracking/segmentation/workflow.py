@@ -10,6 +10,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+# Windows Conda: avoid abort on duplicate OpenMP runtime when torch + skimage
+# coexist in the same interpreter process.
+if os.name == "nt":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import torch
 import torch.nn.functional as F
 
@@ -209,7 +215,6 @@ class SegmentationConfig:
             jitter_val = float(jitter_raw)
         except Exception:
             jitter_val = 0.0
-
         return cls(
             model_name=name,
             model_params=model_params,
@@ -807,27 +812,20 @@ class SegmentationWorkflow:
         # If GT exists, we should evaluate ALL GT frames.
         # In addition, inference must still run on ALL prediction frames so
         # downstream classification can consume per-frame segmentation outputs.
-        # Missing bbox handling order:
-        # 1) Use bbox at the same frame (if any)
-        # 2) Fallback to previous bbox
-        # 3) If even the first bbox is missing, fallback to full-frame ROI
+        # Missing bbox handling:
+        # 1) Use bbox at the same frame when it is valid
+        # 2) Otherwise mark the frame as missing and emit an empty ROI/mask
         gt_frame_indices: List[int] = sorted(int(i) for i in gt_by_frame.keys()) if gt_by_frame else []
         pred_by_frame: Dict[int, FramePrediction] = {int(p.frame_index): p for p in predictions}
         work_predictions: List[FramePrediction] = []
         try:
             if gt_frame_indices:
                 infer_frame_indices = sorted(set(gt_frame_indices) | set(pred_by_frame.keys()))
-                # last_bbox_raw stores an unpadded/unexpanded bbox estimate (either from detector
-                # or from bootstrap using the segmentation mask). We intentionally do NOT store
-                # padded/expanded ROI bboxes here to avoid expansion accumulating over time.
-                last_bbox_raw: Optional[tuple] = None
-                last_bbox_source: Optional[str] = None
                 for frame_idx in infer_frame_indices:
                     pred = pred_by_frame.get(int(frame_idx))
                     use_bbox_raw: Optional[tuple] = None
-                    used_prev_bbox = False
-                    forced_full_frame = False
-                    bbox_source = "detector"
+                    missing_bbox_input = False
+                    bbox_source = "missing"
                     pad_fraction = float(self.cfg.padding_inference)
                     pred_bbox_raw: Optional[tuple] = None
                     min_raw_wh = 2.0
@@ -854,24 +852,11 @@ class SegmentationWorkflow:
                         pred_bbox_valid = pred_bbox_raw
 
                     if pred_bbox_valid is not None:
-                        # Best case: detector bbox for this frame (non-tiny).
                         use_bbox_raw = pred_bbox_valid
-                        last_bbox_raw = pred_bbox_valid
-                        last_bbox_source = "detector"
-                        bbox_source = "detector"
-                    elif last_bbox_raw is not None and last_bbox_raw[2] >= min_raw_wh and last_bbox_raw[3] >= min_raw_wh:
-                        # Strategy 1: detector bbox missing or tiny -> reuse previous bbox.
-                        # When reusing, expand by at least 15% per side to tolerate motion/dropouts,
-                        # but keep last_bbox_raw unexpanded to avoid growth across frames.
-                        pad_fraction = max(pad_fraction, 0.15)
-                        use_bbox_raw = last_bbox_raw
-                        used_prev_bbox = True
-                        bbox_source = "prev_segmentation" if last_bbox_source == "segmentation_bootstrap" else "prev_bbox"
+                        bbox_source = str(getattr(pred, "bbox_source", "detector")).strip() or "detector"
                     else:
-                        # Strategy 0: no bbox yet (or only tiny bbox) -> full-frame segmentation.
-                        use_bbox_raw = (0.0, 0.0, float(frame_w), float(frame_h))
-                        forced_full_frame = True
-                        bbox_source = "full_frame"
+                        use_bbox_raw = (0.0, 0.0, 0.0, 0.0)
+                        missing_bbox_input = True
 
                     if pred is not None:
                         work_pred = FramePrediction(
@@ -881,7 +866,7 @@ class SegmentationWorkflow:
                             confidence=getattr(pred, "confidence", None),
                             confidence_components=getattr(pred, "confidence_components", None),
                             segmentation=getattr(pred, "segmentation", None),
-                            is_fallback=bool(getattr(pred, "is_fallback", False) or used_prev_bbox or forced_full_frame),
+                            is_fallback=bool(getattr(pred, "is_fallback", False) or missing_bbox_input),
                             bbox_source=bbox_source,
                         )
                     else:
@@ -889,15 +874,14 @@ class SegmentationWorkflow:
                             frame_index=int(frame_idx),
                             bbox=use_bbox_raw,
                             score=None,
-                            is_fallback=used_prev_bbox or forced_full_frame,
+                            is_fallback=missing_bbox_input,
                             bbox_source=bbox_source,
                         )
                     work_predictions.append(work_pred)
                     bbox = expand_bbox(use_bbox_raw, pad_fraction, (frame_h, frame_w))
                     if bbox.w < 2.0 or bbox.h < 2.0:
-                        # Expanded bbox still unusably small -> treat as detection failure and use full frame.
-                        bbox = BoundingBox(0.0, 0.0, float(frame_w), float(frame_h))
-                        forced_full_frame = True
+                        bbox = BoundingBox(0.0, 0.0, 0.0, 0.0)
+                        missing_bbox_input = True
                     roi = crop_with_bbox(frame, bbox)
                     if roi.size == 0:
                         # If ROI collapses to empty, fall back to full-frame zeros to ensure metrics are recorded.
@@ -1011,26 +995,6 @@ class SegmentationWorkflow:
 
                     stats = compute_mask_stats(full_mask)
 
-                    # Strategy 2 (bootstrap): if we were forced to do full-frame segmentation and
-                    # it produced a non-empty mask, derive a bbox from the mask and store it as the
-                    # next frame's last_bbox_raw. This allows subsequent frames to use Strategy 1.
-                    if forced_full_frame and float(getattr(stats, "area_px", 0.0)) > 0.0:
-                        try:
-                            bx, by, bw, bh = tuple(map(float, stats.bbox))
-                        except Exception:
-                            bx = by = bw = bh = 0.0
-                        if bw > 0.0 and bh > 0.0:
-                            last_bbox_raw = (bx, by, bw, bh)
-                            last_bbox_source = "segmentation_bootstrap"
-                            # Also reflect the bootstrapped bbox in the per-frame prediction object.
-                            try:
-                                work_pred.bbox = last_bbox_raw  # type: ignore[assignment]
-                                # This bbox itself is derived from the segmentation mask, but note that
-                                # the ROI used for THIS frame may still have been full-frame.
-                                if getattr(work_pred, "bbox_source", "") == "full_frame":
-                                    work_pred.bbox_source = "segmentation_bootstrap"  # type: ignore[assignment]
-                            except Exception:
-                                pass
                     dice = None
                     iou = None
                     centroid_err = None
@@ -1090,8 +1054,6 @@ class SegmentationWorkflow:
             else:
                 # Inference-only mode: only process frames where we have bbox predictions.
                 work_predictions = list(predictions)
-                last_bbox_raw: Optional[tuple] = None
-                last_bbox_source: Optional[str] = None
                 for pred in predictions:
                     frame_idx = int(pred.frame_index)
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -1105,28 +1067,28 @@ class SegmentationWorkflow:
                         continue
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
 
-                    # Detection fallback: prefer current bbox; otherwise reuse last good bbox; otherwise full-frame.
+                    # Segmentation consumes the current-frame bbox directly. Missing bboxes stay missing.
                     pad_fraction = float(self.cfg.padding_inference)
-                    forced_full_frame = False
+                    missing_bbox_input = False
                     min_raw_wh = 2.0
                     try:
                         pred_bbox_raw = tuple(map(float, pred.bbox))
                     except Exception:
                         pred_bbox_raw = None
                     use_bbox_raw = None
-                    bbox_source = "detector"
+                    bbox_source = "missing"
                     if pred_bbox_raw is not None and pred_bbox_raw[2] >= min_raw_wh and pred_bbox_raw[3] >= min_raw_wh:
                         use_bbox_raw = pred_bbox_raw
-                        last_bbox_source = "detector"
-                        bbox_source = "detector"
-                    elif last_bbox_raw is not None and last_bbox_raw[2] >= min_raw_wh and last_bbox_raw[3] >= min_raw_wh:
-                        pad_fraction = max(pad_fraction, 0.15)
-                        use_bbox_raw = last_bbox_raw
-                        bbox_source = "prev_segmentation" if last_bbox_source == "segmentation_bootstrap" else "prev_bbox"
+                        bbox_source = str(getattr(pred, "bbox_source", "detector")).strip() or "detector"
                     else:
-                        use_bbox_raw = (0.0, 0.0, float(frame.shape[1]), float(frame.shape[0]))
-                        forced_full_frame = True
-                        bbox_source = "full_frame"
+                        use_bbox_raw = (0.0, 0.0, 0.0, 0.0)
+                        missing_bbox_input = True
+
+                    if missing_bbox_input:
+                        try:
+                            pred.is_fallback = True  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
 
                     try:
                         pred.bbox_source = bbox_source  # type: ignore[attr-defined]
@@ -1135,8 +1097,12 @@ class SegmentationWorkflow:
 
                     bbox = expand_bbox(use_bbox_raw, pad_fraction, frame.shape[:2])
                     if bbox.w < 2.0 or bbox.h < 2.0:
-                        bbox = BoundingBox(0.0, 0.0, float(frame.shape[1]), float(frame.shape[0]))
-                        forced_full_frame = True
+                        bbox = BoundingBox(0.0, 0.0, 0.0, 0.0)
+                        missing_bbox_input = True
+                        try:
+                            pred.is_fallback = True  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
 
                     roi = crop_with_bbox(frame, bbox)
                     if roi.size == 0:
@@ -1248,22 +1214,6 @@ class SegmentationWorkflow:
                         computed_mask = False
 
                     stats = compute_mask_stats(full_mask)
-
-                    # Bootstrap bbox from successful segmentation for later fallback.
-                    try:
-                        if getattr(stats, "area_px", 0.0) > 0.0:
-                            bx, by, bw, bh = tuple(map(float, stats.bbox))
-                            if bw > 0.0 and bh > 0.0:
-                                last_bbox_raw = (bx, by, bw, bh)
-                                last_bbox_source = "segmentation_bootstrap"
-                                try:
-                                    pred.bbox = last_bbox_raw  # type: ignore[assignment]
-                                    if getattr(pred, "bbox_source", "") == "full_frame":
-                                        pred.bbox_source = "segmentation_bootstrap"  # type: ignore[attr-defined]
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
 
                     dice = None
                     iou = None

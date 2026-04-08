@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+# Windows Conda environments can load duplicate OpenMP runtimes when torch and
+# scikit-image are imported in the same process. Allow continuation so optional
+# auto-mask helpers do not abort the interpreter at import time.
+if os.name == "nt":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 try:
     from skimage.segmentation import morphological_geodesic_active_contour  # type: ignore
 except Exception:  # pragma: no cover - scikit-image is optional in unit tests

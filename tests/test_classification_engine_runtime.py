@@ -9,8 +9,11 @@ from tracking.classification.engine import (
     _exclude_loso_subjects,
     _subject_from_video_path,
 )
+from tracking.classification.feature_extractors.v3pro import _build_runtime_preprocs_from_cfg
 from tracking.core.registry import FEATURE_EXTRACTOR_REGISTRY
 import tracking.classification.feature_extractors_ext  # noqa: F401
+import tracking.classification.feature_extractors_v4  # noqa: F401
+import tracking.classification.feature_extractors_v5  # noqa: F401
 
 
 def test_subject_from_video_path_normalises_directory_prefix(tmp_path):
@@ -38,6 +41,23 @@ def test_runtime_preproc_routing_hybrid_scheme():
     assert len(roi_preprocs) == 1
 
 
+def test_runtime_preproc_builder_is_aligned_between_training_and_feature_extractors():
+    steps = [{"name": "CLAHE", "params": {"clip_limit": 2.0}}]
+    expected = {
+        "A": (1, 0),
+        "B": (0, 1),
+        "C": (0, 1),
+    }
+
+    for scheme, target_counts in expected.items():
+        runtime_cfg = {"scheme": scheme, "preproc_steps": steps}
+        train_global, train_roi = _build_runtime_preprocs({"runtime_preprocessing": runtime_cfg})
+        feat_global, feat_roi = _build_runtime_preprocs_from_cfg(runtime_cfg)
+
+        assert (len(train_global), len(train_roi)) == target_counts
+        assert (len(feat_global), len(feat_roi)) == target_counts
+
+
 def test_runtime_preproc_injected_into_legacy_texture_extractor():
     cfg = {
         "runtime_preprocessing": {
@@ -51,6 +71,63 @@ def test_runtime_preproc_injected_into_legacy_texture_extractor():
 
     injected = _inject_runtime_preprocessing_into_feature_cfg(cfg, feature_cfg)
     ext_cls = FEATURE_EXTRACTOR_REGISTRY["tab_v2"]
+    ext = ext_cls(injected["params"])
+
+    assert len(ext._runtime_global_preprocs) == 0
+    assert len(ext._runtime_roi_preprocs) == 1
+
+
+def test_runtime_preproc_injected_into_tab_v4_texture_extractor():
+    cfg = {
+        "runtime_preprocessing": {
+            "scheme": "C",
+            "preproc_steps": [
+                {"name": "CLAHE", "params": {"clip_limit": 2.0}},
+            ],
+        }
+    }
+    feature_cfg = {"name": "tab_v4", "params": {}}
+
+    injected = _inject_runtime_preprocessing_into_feature_cfg(cfg, feature_cfg)
+    ext_cls = FEATURE_EXTRACTOR_REGISTRY["tab_v4"]
+    ext = ext_cls(injected["params"])
+
+    assert len(ext._runtime_global_preprocs) == 0
+    assert len(ext._runtime_roi_preprocs) == 1
+
+
+def test_runtime_preproc_injected_into_tab_v5_texture_extractor():
+    cfg = {
+        "runtime_preprocessing": {
+            "scheme": "C",
+            "preproc_steps": [
+                {"name": "CLAHE", "params": {"clip_limit": 2.0}},
+            ],
+        }
+    }
+    feature_cfg = {"name": "tab_v5", "params": {}}
+
+    injected = _inject_runtime_preprocessing_into_feature_cfg(cfg, feature_cfg)
+    ext_cls = FEATURE_EXTRACTOR_REGISTRY["tab_v5"]
+    ext = ext_cls(injected["params"])
+
+    assert len(ext._runtime_global_preprocs) == 0
+    assert len(ext._runtime_roi_preprocs) == 1
+
+
+def test_runtime_preproc_injected_into_tab_v5_lite_texture_extractor():
+    cfg = {
+        "runtime_preprocessing": {
+            "scheme": "C",
+            "preproc_steps": [
+                {"name": "CLAHE", "params": {"clip_limit": 2.0}},
+            ],
+        }
+    }
+    feature_cfg = {"name": "tab_v5_lite", "params": {}}
+
+    injected = _inject_runtime_preprocessing_into_feature_cfg(cfg, feature_cfg)
+    ext_cls = FEATURE_EXTRACTOR_REGISTRY["tab_v5_lite"]
     ext = ext_cls(injected["params"])
 
     assert len(ext._runtime_global_preprocs) == 0

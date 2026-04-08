@@ -247,18 +247,35 @@ try:
 except ImportError:
     _SCIPY_INTERP_OK = False
 
+_SCIPY_PCHIP_OK: bool
+try:
+    from scipy.interpolate import PchipInterpolator as _PchipInterpolator  # noqa: F401
+    _SCIPY_PCHIP_OK = True
+except ImportError:
+    _SCIPY_PCHIP_OK = False
+
 
 def _interp_channel(
     t_known: np.ndarray,
     v_known: np.ndarray,
     t_all: np.ndarray,
-    method: str = "cubic",
+    method: str = "pchip",
 ) -> np.ndarray:
     """Interpolate a 1-D channel over a dense timeline."""
     if len(t_known) == 0:
         return np.zeros(len(t_all), dtype=np.float64)
     if len(t_known) == 1:
         return np.full(len(t_all), v_known[0], dtype=np.float64)
+    if method == "pchip" and _SCIPY_PCHIP_OK:
+        try:
+            from scipy.interpolate import PchipInterpolator
+            pchip = PchipInterpolator(t_known, v_known, extrapolate=True)
+            result = np.asarray(pchip(t_all), dtype=np.float64)
+            v_min, v_max = float(v_known.min()), float(v_known.max())
+            np.clip(result, v_min, v_max, out=result)
+            return result
+        except Exception:
+            pass
     if method == "cubic" and _SCIPY_INTERP_OK and len(t_known) >= 4:
         try:
             from scipy.interpolate import CubicSpline
@@ -524,7 +541,7 @@ def _extract_ts_channels_lite(
     video_path: Optional[str],
     frame_w: float = 640.0,
     frame_h: float = 480.0,
-    interp_method: str = "cubic",
+    interp_method: str = "pchip",
     n_steps: int = N_TS_STEPS_LITE,
 ) -> np.ndarray:
     """Build ``(N_TS_CHANNELS_LITE, n_steps)`` v3-lite channel matrix.
@@ -891,7 +908,7 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "frame_w": 640.0,
         "frame_h": 480.0,
-        "interp_method": "cubic",
+        "interp_method": "pchip",
         "n_steps": N_TS_STEPS_LITE,        # default 256; set to 128 for compat
         "texture_mode": "freeze",
     }
@@ -900,7 +917,7 @@ class TimeSeriesV3LiteFeatureExtractor(TrajectoryFeatureExtractor):
         cfg = params or {}
         self._frame_w = float(cfg.get("frame_w", 640.0))
         self._frame_h = float(cfg.get("frame_h", 480.0))
-        self._interp_method = str(cfg.get("interp_method", "cubic"))
+        self._interp_method = str(cfg.get("interp_method", "pchip"))
         self._n_steps = int(cfg.get("n_steps", N_TS_STEPS_LITE))
         self._texture_mode = str(cfg.get("texture_mode", "freeze")).lower()
         if self._texture_mode != "freeze":
