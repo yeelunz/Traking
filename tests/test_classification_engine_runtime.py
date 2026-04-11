@@ -5,6 +5,7 @@ from tracking.classification.engine import (
     _build_texture_pretrain_auto_root,
     _build_runtime_preprocs,
     _ensure_texture_pretrain_ckpt,
+    _inject_texture_roi_pad_ratio_default,
     _inject_runtime_preprocessing_into_feature_cfg,
     _exclude_loso_subjects,
     _subject_from_video_path,
@@ -253,6 +254,49 @@ def test_texture_pretrain_uses_feature_roi_pad_ratio_first(tmp_path, monkeypatch
 
     assert updated is None
     assert captured["roi_pad_ratio"] == 0.33
+
+
+def test_texture_roi_pad_default_for_pipeline_inference_pretrained_true():
+    feature_cfg = {
+        "name": "tab_v4",
+        "params": {
+            "texture_mode": "freeze",
+            "pretrained_backbone": True,
+        },
+    }
+
+    updated = _inject_texture_roi_pad_ratio_default(feature_cfg)
+
+    assert updated["params"]["roi_pad_ratio"] == 0.15
+
+
+def test_texture_roi_pad_default_for_pipeline_inference_pretrained_false():
+    feature_cfg = {
+        "name": "tab_v4",
+        "params": {
+            "texture_mode": "freeze",
+            "pretrained_backbone": False,
+        },
+    }
+
+    updated = _inject_texture_roi_pad_ratio_default(feature_cfg)
+
+    assert updated["params"]["roi_pad_ratio"] == 0.0
+
+
+def test_texture_roi_pad_default_does_not_override_explicit_value():
+    feature_cfg = {
+        "name": "tab_v5",
+        "params": {
+            "texture_mode": "freeze",
+            "pretrained_backbone": False,
+            "roi_pad_ratio": 0.22,
+        },
+    }
+
+    updated = _inject_texture_roi_pad_ratio_default(feature_cfg)
+
+    assert updated["params"]["roi_pad_ratio"] == 0.22
 
 
 def test_exclude_loso_subjects_removes_blocked_subjects():

@@ -33,11 +33,21 @@ _TEXTURE_BACKBONE_FEATURES = {
     "tab_v4",
     "tab_v5",
     "tab_v5_lite",
+    "tab_v6",
+    "tab_v6_lite",
     "tab_v2",
     "tab_v2_extend",
     "tsc_v2",
     "tsc_v2_extend",
     "tsc_v3_pro",
+    "tsc_v4",
+}
+
+_MOTION_PRETRAIN_FEATURES = {
+    "tab_v5",
+    "tab_v5_lite",
+    "tab_v6",
+    "tab_v6_lite",
 }
 
 
@@ -93,7 +103,29 @@ def _infer_texture_embedding_dim(feature_name: str, params: Dict[str, Any], tp_c
             return int(TAB_V5_LITE_TOTAL_DIM - len(TAB_V5_LITE_MOTION_KEYS))
         except Exception:
             return 15
+    if feature_name == "tab_v6":
+        try:
+            from .feature_extractors_v5 import TAB_V5_TOTAL_DIM, TAB_V5_MOTION_KEYS
+            from .feature_extractors_v4 import TAB_V4_STATIC_KEYS
+
+            return int(TAB_V5_TOTAL_DIM - len(TAB_V5_MOTION_KEYS) - len(TAB_V4_STATIC_KEYS))
+        except Exception:
+            return 11
+    if feature_name == "tab_v6_lite":
+        try:
+            from .feature_extractors_v5 import TAB_V5_LITE_TOTAL_DIM, TAB_V5_LITE_MOTION_KEYS
+
+            return int(TAB_V5_LITE_TOTAL_DIM - len(TAB_V5_LITE_MOTION_KEYS))
+        except Exception:
+            return 15
     if feature_name == "tsc_v3_pro":
+        try:
+            from .feature_extractors_v3pro_tsc import N_TEX_CHANNELS_V3PRO
+
+            return int(N_TEX_CHANNELS_V3PRO)
+        except Exception:
+            return 3
+    if feature_name == "tsc_v4":
         try:
             from .feature_extractors_v3pro_tsc import N_TEX_CHANNELS_V3PRO
 
@@ -459,6 +491,57 @@ def _inject_runtime_preprocessing_into_feature_cfg(
     return cfg
 
 
+def _normalise_texture_mode_engine(mode: Any) -> str:
+    mode_lc = str(mode or "freeze").strip().lower()
+    aliases = {
+        "freez": "freeze",
+        "frozen": "freeze",
+        "pretrained": "pretrain",
+    }
+    mode_lc = aliases.get(mode_lc, mode_lc)
+    if mode_lc not in {"freeze", "learnable", "pretrain"}:
+        return "freeze"
+    return mode_lc
+
+
+def _infer_texture_roi_pad_ratio_default(params: Dict[str, Any]) -> float:
+    mode = _normalise_texture_mode_engine(params.get("texture_mode", "freeze"))
+    pretrained_enabled = mode == "pretrain" or bool(params.get("pretrained_backbone", True))
+    return 0.15 if pretrained_enabled else 0.0
+
+
+def _resolve_texture_roi_pad_ratio(
+    *,
+    params: Dict[str, Any],
+    texture_pretrain_cfg: Optional[Dict[str, Any]] = None,
+) -> float:
+    tp_cfg = dict(texture_pretrain_cfg or {})
+    raw = params.get("roi_pad_ratio", None)
+    if raw is None:
+        raw = tp_cfg.get("roi_pad_ratio", None)
+    if raw is None:
+        raw = _infer_texture_roi_pad_ratio_default(params)
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return _infer_texture_roi_pad_ratio_default(params)
+
+
+def _inject_texture_roi_pad_ratio_default(feature_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = dict(feature_cfg or {})
+    feature_name = str(cfg.get("name", "")).strip().lower()
+    if feature_name not in _TEXTURE_BACKBONE_FEATURES:
+        return cfg
+
+    params = dict(cfg.get("params") or {})
+    if params.get("roi_pad_ratio") is not None:
+        return cfg
+
+    params["roi_pad_ratio"] = _infer_texture_roi_pad_ratio_default(params)
+    cfg["params"] = params
+    return cfg
+
+
 def _build_texture_pretrain_auto_root(
     *,
     cache_dir: Path,
@@ -544,7 +627,7 @@ def _ensure_texture_pretrain_ckpt(
     input_size = int(tp_cfg.get("input_size", params.get("texture_image_size", 96)))
     max_frames_per_video = int(tp_cfg.get("max_frames_per_video", 16))
     val_ratio = float(tp_cfg.get("val_ratio", 0.2))
-    roi_pad_ratio = float(params.get("roi_pad_ratio", tp_cfg.get("roi_pad_ratio", 0.15)))
+    roi_pad_ratio = _resolve_texture_roi_pad_ratio(params=params, texture_pretrain_cfg=tp_cfg)
 
     tp_seed = int(tp_cfg.get("seed", 42))
     cache_dir = Path(tp_cfg.get("cache_dir", "ckpt/texture_pretrain_cache")).resolve()
@@ -721,6 +804,372 @@ def _ensure_texture_pretrain_ckpt(
 
     updated = dict(feature_cfg)
     updated["params"] = params
+    return updated
+
+
+def _normalise_motion_mode_engine(mode: Any) -> str:
+    mode_lc = str(mode or "freeze").strip().lower()
+    aliases = {
+        "freez": "freeze",
+        "frozen": "freeze",
+        "pretrained": "pretrain",
+    }
+    return aliases.get(mode_lc, mode_lc)
+
+
+def _resolve_torch_device(device: str):  # noqa: ANN001
+    import torch  # noqa: PLC0415
+
+    dev = str(device or "auto").strip().lower()
+    if dev == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(dev)
+
+
+def _motion_pretrain_cache_path(
+    *,
+    cache_dir: Path,
+    dataset_root: str,
+    feature_name: str,
+    train_videos: Dict[str, List[FramePrediction]],
+    labels: Dict[str, int],
+    params: Dict[str, Any],
+    mp_cfg: Dict[str, Any],
+) -> Tuple[Path, str, Dict[str, Any]]:
+    train_items: List[Dict[str, Any]] = []
+    for video_path in sorted(train_videos.keys()):
+        subject = _subject_from_video_path(video_path, dataset_root)
+        if subject not in labels:
+            continue
+        train_items.append(
+            {
+                "path": str(Path(video_path).resolve()),
+                "subject": str(subject),
+                "label": int(labels[subject]),
+            }
+        )
+
+    identity = {
+        "schema": "moment_motion_pretrain_v1",
+        "dataset_root": str(Path(dataset_root).resolve()),
+        "feature_name": str(feature_name),
+        "train_items": train_items,
+        "moment_model_name": str(params.get("moment_model_name", "AutonLab/MOMENT-1-base")),
+        "moment_input_steps": int(params.get("moment_input_steps", 256)),
+        "motion_dim": int(params.get("moment_pca_dim", 12)),
+        "motion_projection_seed": int(mp_cfg.get("seed", params.get("motion_projection_seed", 42))),
+        "epochs": int(mp_cfg.get("epochs", 30)),
+        "lr": float(mp_cfg.get("lr", 1e-3)),
+        "weight_decay": float(mp_cfg.get("weight_decay", 1e-4)),
+        "batch_size": int(mp_cfg.get("batch_size", 32)),
+        "val_ratio": float(mp_cfg.get("val_ratio", 0.2)),
+        "scale_source": "feature_extractor_runtime",
+    }
+    packed = json.dumps(identity, ensure_ascii=False, sort_keys=True)
+    key = hashlib.sha256(packed.encode("utf-8")).hexdigest()[:24]
+    return cache_dir / f"moment_motion_{key}.pth", key, identity
+
+
+def _save_motion_projection_checkpoint(
+    *,
+    ckpt_path: Path,
+    input_dim: int,
+    motion_dim: int,
+    projection_state_dict: Dict[str, Any],
+    identity: Dict[str, Any],
+    summary: Dict[str, Any],
+) -> None:
+    import torch  # noqa: PLC0415
+
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "stage": "moment_motion_pretrain_projection",
+        "schema": "moment_motion_pretrain_v1",
+        "motion_input_dim": int(input_dim),
+        "motion_embedding_dim": int(motion_dim),
+        "projection_state_dict": {k: v.detach().cpu() for k, v in projection_state_dict.items()},
+        "identity": identity,
+        "summary": summary,
+    }
+    torch.save(payload, str(ckpt_path))
+    meta_path = ckpt_path.with_suffix(".json")
+    meta_payload = {
+        "ckpt": str(ckpt_path),
+        "motion_input_dim": int(input_dim),
+        "motion_embedding_dim": int(motion_dim),
+        "identity": identity,
+        "summary": summary,
+    }
+    with meta_path.open("w", encoding="utf-8") as f:
+        json.dump(meta_payload, f, ensure_ascii=False, indent=2)
+
+
+def _fit_motion_projection_pretrain(
+    *,
+    X: np.ndarray,
+    y: np.ndarray,
+    motion_dim: int,
+    seed: int,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    weight_decay: float,
+    val_ratio: float,
+    subjects: Sequence[str],
+    device: Any,
+) -> Dict[str, Any]:
+    import torch  # noqa: PLC0415
+    import torch.nn as _nn  # noqa: PLC0415
+
+    rng = np.random.default_rng(int(seed))
+    X = np.asarray(X, dtype=np.float32)
+    y_raw = np.asarray(y, dtype=np.int64)
+    class_values = sorted(int(v) for v in set(y_raw.tolist()))
+    class_to_idx = {value: idx for idx, value in enumerate(class_values)}
+    y_idx = np.asarray([class_to_idx[int(v)] for v in y_raw], dtype=np.int64)
+
+    input_dim = int(X.shape[1])
+    n_classes = int(len(class_values))
+    with torch.random.fork_rng():
+        torch.manual_seed(int(seed))
+        projection = _nn.Sequential(
+            _nn.Linear(input_dim, int(motion_dim)),
+            _nn.LayerNorm(int(motion_dim)),
+            _nn.GELU(),
+        )
+        head = _nn.Linear(int(motion_dim), n_classes)
+
+    model = _nn.Sequential(projection, head).to(device)
+    unique_subjects = sorted(set(str(s) for s in subjects))
+    rng.shuffle(unique_subjects)
+    n_val = int(round(len(unique_subjects) * float(val_ratio))) if len(unique_subjects) > 1 else 0
+    n_val = max(0, min(n_val, max(0, len(unique_subjects) - 1)))
+    val_subjects = set(unique_subjects[:n_val])
+    val_idx = np.asarray([i for i, s in enumerate(subjects) if str(s) in val_subjects], dtype=np.int64)
+    train_idx = np.asarray([i for i, s in enumerate(subjects) if str(s) not in val_subjects], dtype=np.int64)
+    if train_idx.size == 0:
+        train_idx = np.arange(X.shape[0], dtype=np.int64)
+        val_idx = np.asarray([], dtype=np.int64)
+
+    x_t = torch.tensor(X, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y_idx, dtype=torch.long, device=device)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    criterion = _nn.CrossEntropyLoss()
+
+    best_score = -float("inf")
+    best_state = None
+    best_epoch = 0
+    train_idx_np = train_idx.copy()
+    for epoch in range(1, int(epochs) + 1):
+        model.train()
+        rng.shuffle(train_idx_np)
+        losses: List[float] = []
+        bs = max(1, int(batch_size))
+        for start in range(0, int(train_idx_np.size), bs):
+            idx_np = train_idx_np[start : start + bs]
+            idx = torch.tensor(idx_np, dtype=torch.long, device=device)
+            opt.zero_grad(set_to_none=True)
+            logits = model(x_t.index_select(0, idx))
+            loss = criterion(logits, y_t.index_select(0, idx))
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.detach().cpu().item()))
+
+        model.eval()
+        with torch.no_grad():
+            if val_idx.size > 0:
+                idx = torch.tensor(val_idx, dtype=torch.long, device=device)
+                logits = model(x_t.index_select(0, idx))
+                pred = logits.argmax(dim=1)
+                score = float((pred == y_t.index_select(0, idx)).float().mean().cpu().item())
+            else:
+                idx = torch.tensor(train_idx, dtype=torch.long, device=device)
+                logits = model(x_t.index_select(0, idx))
+                loss = criterion(logits, y_t.index_select(0, idx))
+                score = -float(loss.detach().cpu().item())
+
+        if score > best_score:
+            best_score = score
+            best_epoch = int(epoch)
+            best_state = {k: v.detach().cpu().clone() for k, v in projection.state_dict().items()}
+
+    if best_state is None:
+        best_state = {k: v.detach().cpu().clone() for k, v in projection.state_dict().items()}
+
+    return {
+        "projection_state_dict": best_state,
+        "best_score": float(best_score),
+        "best_epoch": int(best_epoch),
+        "n_classes": n_classes,
+        "class_values": class_values,
+        "train_n": int(train_idx.size),
+        "val_n": int(val_idx.size),
+    }
+
+
+def _ensure_motion_pretrain_ckpt(
+    *,
+    classification_cfg: Dict[str, any],  # noqa: ANN001
+    feature_cfg: Dict[str, any],  # noqa: ANN001
+    dataset_root: str,
+    train_videos: Dict[str, List[FramePrediction]],
+    labels: Dict[str, int],
+    results_dir: str,
+    logger: Callable[[str], None],
+) -> Dict[str, any]:  # noqa: ANN001
+    feature_name = str((feature_cfg or {}).get("name", "")).strip().lower()
+    params = dict((feature_cfg or {}).get("params") or {})
+    if feature_name not in _MOTION_PRETRAIN_FEATURES:
+        return feature_cfg
+
+    feature_cls = FEATURE_EXTRACTOR_REGISTRY.get(feature_name)
+    if feature_cls is None:
+        raise KeyError(f"Unknown feature extractor for motion pretrain: {feature_name}")
+    default_params = dict(getattr(feature_cls, "DEFAULT_CONFIG", {}) or {})
+    effective_params = {**default_params, **params}
+
+    mode = _normalise_motion_mode_engine(effective_params.get("motion_mode", "freeze"))
+    if mode != "pretrain":
+        return feature_cfg
+
+    ckpt = params.get("motion_pretrain_ckpt")
+    if isinstance(ckpt, str) and ckpt.strip() and os.path.exists(ckpt):
+        return feature_cfg
+
+    mp_cfg = dict((classification_cfg or {}).get("motion_pretrain") or {})
+    cache_enabled = bool(mp_cfg.get("cache_enabled", True))
+    cache_dir = Path(mp_cfg.get("cache_dir", "ckpt/motion_pretrain_cache")).resolve()
+    if not cache_enabled:
+        cache_dir = Path(results_dir).resolve() / "motion_pretrain_auto"
+
+    cache_path, cache_key, identity = _motion_pretrain_cache_path(
+        cache_dir=cache_dir,
+        dataset_root=dataset_root,
+        feature_name=feature_name,
+        train_videos=train_videos,
+        labels=labels,
+        params=effective_params,
+        mp_cfg=mp_cfg,
+    )
+    if cache_enabled and cache_path.exists():
+        params["motion_mode"] = "pretrain"
+        params["motion_pretrain_ckpt"] = str(cache_path)
+        updated = dict(feature_cfg)
+        updated["params"] = params
+        logger(f"[Classification] Auto MOMENT motion pretrain cache hit: ckpt={cache_path}")
+        logger(f"[Classification] Auto MOMENT motion pretrain cache_key={cache_key}")
+        return updated
+
+    logger(
+        "[Classification] motion_mode=pretrain detected without valid checkpoint; "
+        "auto-training frozen-MOMENT projection head (with cache)."
+    )
+
+    import torch  # noqa: PLC0415
+    import torch.nn as _nn  # noqa: PLC0415
+
+    embed_params = dict(effective_params)
+    embed_params["motion_mode"] = "freeze"
+    embed_params.setdefault("texture_mode", "freeze")
+    embed_extractor = feature_cls(embed_params)
+
+    X_rows: List[np.ndarray] = []
+    y_rows: List[int] = []
+    subjects: List[str] = []
+    for video_path, samples in sorted(train_videos.items(), key=lambda kv: kv[0]):
+        subject = _subject_from_video_path(video_path, dataset_root)
+        if subject not in labels or not samples:
+            continue
+        motion_samples = samples
+        scaler = getattr(embed_extractor, "_scaled_samples_for_video", None)
+        if callable(scaler):
+            motion_samples = scaler(samples, video_path)
+        motion_info = embed_extractor._extract_moment_motion_vector(motion_samples)
+        raw_motion = motion_info.get("_raw_moment_embedding")
+        if raw_motion is None:
+            continue
+        arr = np.asarray(raw_motion, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            continue
+        X_rows.append(arr)
+        y_rows.append(int(labels[subject]))
+        subjects.append(str(subject))
+
+    if not X_rows:
+        raise RuntimeError("Auto MOMENT motion pretraining failed: no MOMENT embeddings could be extracted.")
+
+    X = np.vstack(X_rows).astype(np.float32)
+    y = np.asarray(y_rows, dtype=np.int64)
+    motion_dim = int(effective_params.get("moment_pca_dim", X.shape[1]))
+    seed = int(mp_cfg.get("seed", effective_params.get("motion_projection_seed", 42)))
+    device = _resolve_torch_device(str(mp_cfg.get("device", effective_params.get("moment_device", "auto"))))
+
+    if len(set(y.tolist())) < 2:
+        with torch.random.fork_rng():
+            torch.manual_seed(seed)
+            projection = _nn.Sequential(
+                _nn.Linear(int(X.shape[1]), int(motion_dim)),
+                _nn.LayerNorm(int(motion_dim)),
+                _nn.GELU(),
+            )
+        summary = {
+            "cached": False,
+            "trained": False,
+            "reason": "single_class_training_fold",
+            "n_samples": int(X.shape[0]),
+            "n_classes": 1,
+            "cache_key": cache_key,
+        }
+        _save_motion_projection_checkpoint(
+            ckpt_path=cache_path,
+            input_dim=int(X.shape[1]),
+            motion_dim=motion_dim,
+            projection_state_dict=projection.state_dict(),
+            identity=identity,
+            summary=summary,
+        )
+        logger(
+            "[Classification] WARNING: MOMENT motion pretrain saw only one class; "
+            "cached deterministic projection instead."
+        )
+    else:
+        fit_summary = _fit_motion_projection_pretrain(
+            X=X,
+            y=y,
+            motion_dim=motion_dim,
+            seed=seed,
+            epochs=int(mp_cfg.get("epochs", 30)),
+            batch_size=int(mp_cfg.get("batch_size", 32)),
+            lr=float(mp_cfg.get("lr", 1e-3)),
+            weight_decay=float(mp_cfg.get("weight_decay", 1e-4)),
+            val_ratio=float(mp_cfg.get("val_ratio", 0.2)),
+            subjects=subjects,
+            device=device,
+        )
+        summary = {
+            "cached": False,
+            "trained": True,
+            "n_samples": int(X.shape[0]),
+            "cache_key": cache_key,
+            **{k: v for k, v in fit_summary.items() if k != "projection_state_dict"},
+        }
+        _save_motion_projection_checkpoint(
+            ckpt_path=cache_path,
+            input_dim=int(X.shape[1]),
+            motion_dim=motion_dim,
+            projection_state_dict=fit_summary["projection_state_dict"],
+            identity=identity,
+            summary=summary,
+        )
+
+    params["motion_mode"] = "pretrain"
+    params["motion_pretrain_ckpt"] = str(cache_path)
+    updated = dict(feature_cfg)
+    updated["params"] = params
+    logger(
+        "[Classification] Auto MOMENT motion pretrain ready: "
+        f"ckpt={cache_path}, cache_key={cache_key}, samples={len(X_rows)}"
+    )
     return updated
 
 
@@ -1016,6 +1465,29 @@ def _find_youden_threshold(
     return best_t, best_j
 
 
+def _binary_auc_score(y_true: np.ndarray, proba_positive: np.ndarray) -> Optional[float]:
+    """Compute binary AUROC without requiring sklearn at call-site."""
+    y_true = np.asarray(y_true, dtype=int)
+    proba = np.asarray(proba_positive, dtype=float)
+    if y_true.shape[0] != proba.shape[0] or y_true.size == 0:
+        return None
+    finite = np.isfinite(proba)
+    y_true = y_true[finite]
+    proba = proba[finite]
+    labels = np.unique(y_true)
+    if y_true.size == 0 or labels.size != 2:
+        return None
+    neg_label, pos_label = int(labels[0]), int(labels[1])
+    pos_scores = proba[y_true == pos_label]
+    neg_scores = proba[y_true == neg_label]
+    if pos_scores.size == 0 or neg_scores.size == 0:
+        return None
+    greater = (pos_scores[:, None] > neg_scores[None, :]).sum(dtype=np.float64)
+    ties = (pos_scores[:, None] == neg_scores[None, :]).sum(dtype=np.float64)
+    auc = (greater + 0.5 * ties) / float(pos_scores.size * neg_scores.size)
+    return float(auc)
+
+
 def _loo_calib_probabilities(
     train_entities: Sequence[str],
     train_features: Dict[str, Dict[str, float]],
@@ -1157,6 +1629,7 @@ def _run_subject_classification_impl(
 
     feature_cfg = config.get("feature_extractor", {"name": "basic", "params": {}})
     feature_cfg = _inject_runtime_preprocessing_into_feature_cfg(config, feature_cfg)
+    feature_cfg = _inject_texture_roi_pad_ratio_default(feature_cfg)
     feature_name = feature_cfg.get("name", "basic")
     feature_cls = FEATURE_EXTRACTOR_REGISTRY.get(feature_name)
     if feature_cls is None:
@@ -1380,6 +1853,15 @@ def _run_subject_classification_impl(
     # if the selected feature extractor uses texture backbone in pretrain mode
     # and no checkpoint is provided, run Stage-1 automatically (with cache).
     try:
+        feature_cfg = _ensure_motion_pretrain_ckpt(
+            classification_cfg=config,
+            feature_cfg=feature_cfg,
+            dataset_root=dataset_root,
+            train_videos=train_videos,
+            labels=labels,
+            results_dir=results_dir,
+            logger=logger,
+        )
         feature_cfg = _ensure_texture_pretrain_ckpt(
             classification_cfg=config,
             feature_cfg=feature_cfg,
@@ -1390,10 +1872,11 @@ def _run_subject_classification_impl(
             logger=logger,
         )
         feature_cfg = _inject_runtime_preprocessing_into_feature_cfg(config, feature_cfg)
+        feature_cfg = _inject_texture_roi_pad_ratio_default(feature_cfg)
         feature_extractor = feature_cls(feature_cfg.get("params"))
     except Exception as _auto_pretrain_err:
         raise RuntimeError(
-            "Failed to auto-prepare texture pretrain checkpoint for feature extractor "
+            "Failed to auto-prepare pretrain checkpoint for feature extractor "
             f"'{feature_name}': {_auto_pretrain_err}"
         ) from _auto_pretrain_err
 
@@ -1463,12 +1946,36 @@ def _run_subject_classification_impl(
     # ── Threshold calibration via Youden's Index ─────────────────────────────
     threshold_cfg = config.get("threshold", {}) or {}
     threshold_method = str(threshold_cfg.get("method", "youden")).lower()
+    rev_opt_enabled = bool(config.get("rev_opt", False))
+    fr_enabled = bool(config.get("fr", False))
+    rev_opt_loso_pooled_mode = bool(
+        rev_opt_enabled and (not fr_enabled) and str(split_method).lower() == "loso"
+    )
+    if rev_opt_enabled:
+        logger(
+            "[Classification] rev_opt is deprecated and should not be used in new configs; "
+            "it remains active for backward compatibility."
+        )
+    if fr_enabled:
+        logger("[Classification] fr (forced reverse) is enabled.")
+    if fr_enabled and rev_opt_enabled:
+        logger("[Classification] fr overrides rev_opt auto-decision; rev_opt check will be skipped.")
+    if rev_opt_loso_pooled_mode:
+        logger(
+            "[Classification] rev_opt decision deferred: LOSO mode now uses pooled test ROC AUC "
+            "across folds (post-run) instead of per-fold LOO validation AUC."
+        )
 
     decision_threshold: float = float(threshold_cfg.get("value", 0.5)) if threshold_method == "fixed" else 0.5
     youden_j_val: Optional[float] = None
     n_loo_predictions: int = 0  # number of out-of-sample predictions used for Youden calibration
+    rev_opt_auc: Optional[float] = None
+    rev_opt_applied = False
+    fr_applied = False
+    y_loo = np.array([], dtype=int)
+    p_loo = np.array([], dtype=float)
 
-    if threshold_method == "youden":
+    if threshold_method == "youden" or rev_opt_enabled or fr_enabled:
         # Use leave-one-subject-out on the training set to get out-of-sample
         # probabilities for every training entity.  This works robustly even
         # when only 2–3 subjects per class are available (common in LOSO).
@@ -1487,6 +1994,34 @@ def _run_subject_classification_impl(
         except ImportError:
             pass
 
+        n_unique_labels = len(set(y_loo.tolist())) if len(y_loo) else 0
+        if rev_opt_enabled and not fr_enabled and not rev_opt_loso_pooled_mode and n_unique_labels >= 2:
+            rev_opt_auc = _binary_auc_score(y_loo, p_loo)
+            if rev_opt_auc is not None and np.isfinite(float(rev_opt_auc)) and float(rev_opt_auc) < 0.5:
+                p_loo = 1.0 - np.asarray(p_loo, dtype=float)
+                rev_opt_applied = True
+                logger(
+                    f"[Classification] rev_opt (deprecated): validation AUROC={rev_opt_auc:.4f} < 0.5; "
+                    "probabilities will be reversed."
+                )
+            elif rev_opt_auc is not None:
+                logger(f"[Classification] rev_opt (deprecated): validation AUROC={rev_opt_auc:.4f}; no reversal.")
+            else:
+                logger("[Classification] rev_opt (deprecated) but validation AUROC is not computable; no reversal.")
+        elif rev_opt_enabled and not fr_enabled and not rev_opt_loso_pooled_mode:
+            logger(
+                f"[Classification] rev_opt (deprecated) but LOO validation is degenerate "
+                f"(n_loo={len(y_loo)}, unique_labels={n_unique_labels}); no reversal."
+            )
+
+        if fr_enabled and len(p_loo):
+            p_loo = 1.0 - np.asarray(p_loo, dtype=float)
+            fr_applied = True
+            logger("[Classification] fr applied on LOO probabilities for threshold calibration.")
+        elif fr_enabled:
+            logger("[Classification] fr enabled but LOO probabilities are empty; skip LOO reversal.")
+
+    if threshold_method == "youden":
         n_unique_labels = len(set(y_loo.tolist())) if len(y_loo) else 0
         if n_unique_labels >= 2:
             decision_threshold, youden_j_val = _find_youden_threshold(y_loo, p_loo)
@@ -1611,6 +2146,11 @@ def _run_subject_classification_impl(
         prob_positive = _positive_class_probabilities(classifier, X_test).tolist()
     except Exception:
         prob_positive = [0.0 for _ in y_pred_default]
+    if fr_enabled and prob_positive:
+        prob_positive = (1.0 - np.asarray(prob_positive, dtype=float)).tolist()
+        fr_applied = True
+    elif rev_opt_applied and prob_positive:
+        prob_positive = (1.0 - np.asarray(prob_positive, dtype=float)).tolist()
 
     # Apply the calibrated threshold (Youden or fixed) to prob_positive
     if prob_positive and any(p > 0.0 for p in prob_positive):
@@ -1630,6 +2170,13 @@ def _run_subject_classification_impl(
     metrics = summarise_classification(y_test, y_pred, prob_positive)
     metrics["threshold_used"] = round(decision_threshold, 6)
     metrics["threshold_method"] = threshold_method
+    metrics["rev_opt_enabled"] = bool(rev_opt_enabled)
+    metrics["rev_opt_applied"] = bool(rev_opt_applied)
+    metrics["rev_opt_scope"] = "loso_pooled_test_auc" if rev_opt_loso_pooled_mode else "loo_validation_auc"
+    metrics["fr_enabled"] = bool(fr_enabled)
+    metrics["fr_applied"] = bool(fr_applied)
+    if rev_opt_auc is not None:
+        metrics["rev_opt_validation_auc"] = round(float(rev_opt_auc), 6)
     if youden_j_val is not None:
         metrics["youden_j"] = round(youden_j_val, 6)
     if n_loo_predictions:
@@ -1675,6 +2222,12 @@ def _run_subject_classification_impl(
         "threshold_used": round(decision_threshold, 6),
         "youden_j": round(youden_j_val, 6) if youden_j_val is not None else None,
         "threshold_n_loo_predictions": n_loo_predictions,
+        "rev_opt_enabled": bool(rev_opt_enabled),
+        "rev_opt_applied": bool(rev_opt_applied),
+        "rev_opt_scope": "loso_pooled_test_auc" if rev_opt_loso_pooled_mode else "loo_validation_auc",
+        "fr_enabled": bool(fr_enabled),
+        "fr_applied": bool(fr_applied),
+        "rev_opt_validation_auc": round(float(rev_opt_auc), 6) if rev_opt_auc is not None else None,
         "feature_importance_file": fi_file_basename,
         "feature_extractor_state_file": os.path.basename(fe_state_path) if fe_state_path else None,
         "feature_extractor_state_source": _loaded_fe_state_path,
