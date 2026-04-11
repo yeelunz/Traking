@@ -15,7 +15,6 @@ except Exception as e:  # pragma: no cover - environment without ultralytics
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
 from ..core.registry import register_model
 from ..utils.init_bbox import resolve_weights_path
-from ..utils.prediction_interpolation import cubic_clip_interpolate_predictions
 
 
 @register_model("YOLOv11")
@@ -23,8 +22,8 @@ class YOLOv11Model(TrackingModel):
     """Single-object tracking via per-frame detection using Ultralytics YOLOv11.
 
     Strategy: run detector on each frame and take the highest-confidence bbox.
-    Frames without reliable detections are left empty and can be filled later
-    by interpolation (no prev-bbox / segmentation-init fallback here).
+    Frames without reliable detections are emitted as explicit empty entries
+    and are left for downstream trajectory filtering/interpolation.
     """
     name = "YOLOv11"
     DEFAULT_CONFIG = {
@@ -38,7 +37,7 @@ class YOLOv11Model(TrackingModel):
         "max_det": 100,
         "min_confidence": 0.0,
         "fallback_last_prediction": False,
-        "fallback_missing_interpolation": True,
+        "fallback_missing_interpolation": False,
         "interpolation_max_gap": 30,
         "train_enabled": True,
         # Training
@@ -408,6 +407,7 @@ class YOLOv11Model(TrackingModel):
 
         # Run training
         results = None
+        run_name = str(getattr(self, "name", "YOLOv11") or "YOLOv11")
         try:
             results = self.model.train(
                 data=data_yaml,
@@ -419,7 +419,7 @@ class YOLOv11Model(TrackingModel):
                 patience=patience,
                 workers=workers,
                 project=base_out,
-                name="YOLOv11",
+                name=run_name,
                 exist_ok=True,
                 verbose=True,
             )
@@ -430,7 +430,7 @@ class YOLOv11Model(TrackingModel):
         best_ckpt = None
         try:
             # Ultralytics saves to {project}/{name}/weights/best.pt
-            run_dir = os.path.join(base_out, "YOLOv11")
+            run_dir = os.path.join(base_out, run_name)
             best_path = os.path.join(run_dir, "weights", "best.pt")
             if os.path.exists(best_path):
                 best_ckpt = best_path
@@ -466,9 +466,7 @@ class YOLOv11Model(TrackingModel):
             raise RuntimeError(f"Cannot open video: {video_path}")
 
         preds: List[FramePrediction] = []
-        no_data_frames: List[int] = []
         idx = 0
-        last_bbox: Optional[tuple] = None
         # small-batch prediction to reduce per-call overhead
         try:
             batch_size = int(getattr(self, "inference_batch", 4) or 4)
@@ -477,7 +475,6 @@ class YOLOv11Model(TrackingModel):
         frames_buf = []
         idx_buf: List[int] = []
         def _flush():
-            nonlocal last_bbox
             if not frames_buf:
                 return
             try:
@@ -518,12 +515,29 @@ class YOLOv11Model(TrackingModel):
                     bbox_added = False
 
                 if candidate_bbox is not None:
-                    preds.append(FramePrediction(int(fidx), candidate_bbox, candidate_score))
-                    last_bbox = candidate_bbox
+                    preds.append(
+                        FramePrediction(
+                            frame_index=int(fidx),
+                            bbox=candidate_bbox,
+                            score=candidate_score,
+                            confidence=candidate_score,
+                            is_fallback=False,
+                            bbox_source="detector",
+                        )
+                    )
                     bbox_added = True
 
                 if not bbox_added:
-                    no_data_frames.append(int(fidx))
+                    preds.append(
+                        FramePrediction(
+                            frame_index=int(fidx),
+                            bbox=(0.0, 0.0, 0.0, 0.0),
+                            score=None,
+                            confidence=0.0,
+                            is_fallback=True,
+                            bbox_source="missing_detector",
+                        )
+                    )
 
             frames_buf.clear()
             idx_buf.clear()
@@ -540,12 +554,6 @@ class YOLOv11Model(TrackingModel):
         _flush()
 
         cap.release()
-        if self.fallback_missing_interpolation:
-            preds = cubic_clip_interpolate_predictions(
-                preds,
-                max_gap=max(2, int(self.interpolation_max_gap)),
-                interpolated_bbox_source="interpolated_pchip",
-            )
         return preds
 
     def predict_frames(self, video_path: str, frame_indices: List[int]) -> List[FramePrediction]:
@@ -557,8 +565,6 @@ class YOLOv11Model(TrackingModel):
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
         preds: List[FramePrediction] = []
-        no_data_frames: List[int] = []
-        last_bbox: Optional[tuple] = None
         try:
             batch_size = int(getattr(self, "inference_batch", 4) or 4)
         except Exception:
@@ -566,7 +572,6 @@ class YOLOv11Model(TrackingModel):
         buf_frames = []
         buf_indices: List[int] = []
         def _flush():
-            nonlocal last_bbox
             if not buf_frames:
                 return
             try:
@@ -607,12 +612,29 @@ class YOLOv11Model(TrackingModel):
                     bbox_added = False
 
                 if candidate_bbox is not None:
-                    preds.append(FramePrediction(int(fidx), candidate_bbox, candidate_score))
-                    last_bbox = candidate_bbox
+                    preds.append(
+                        FramePrediction(
+                            frame_index=int(fidx),
+                            bbox=candidate_bbox,
+                            score=candidate_score,
+                            confidence=candidate_score,
+                            is_fallback=False,
+                            bbox_source="detector",
+                        )
+                    )
                     bbox_added = True
 
                 if not bbox_added:
-                    no_data_frames.append(int(fidx))
+                    preds.append(
+                        FramePrediction(
+                            frame_index=int(fidx),
+                            bbox=(0.0, 0.0, 0.0, 0.0),
+                            score=None,
+                            confidence=0.0,
+                            is_fallback=True,
+                            bbox_source="missing_detector",
+                        )
+                    )
 
             buf_frames.clear(); buf_indices.clear()
         for idx in sorted(set(int(i) for i in frame_indices)):
@@ -627,10 +649,4 @@ class YOLOv11Model(TrackingModel):
                 _flush()
         _flush()
         cap.release()
-        if self.fallback_missing_interpolation:
-            preds = cubic_clip_interpolate_predictions(
-                preds,
-                max_gap=max(2, int(self.interpolation_max_gap)),
-                interpolated_bbox_source="interpolated_pchip",
-            )
         return preds

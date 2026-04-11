@@ -4,9 +4,10 @@ import json
 import time
 import hashlib
 import copy
+import math
 from datetime import datetime
 from contextlib import contextmanager
-from typing import Dict, Any, List, Callable, Optional, Sequence
+from typing import Dict, Any, List, Callable, Optional, Sequence, Tuple
 import random
 try:
     from tqdm import tqdm  # type: ignore
@@ -19,6 +20,7 @@ from ..core.interfaces import FramePrediction
 from ..data.dataset_manager import COCOJsonDatasetManager, SimpleDataset
 # classification modules
 from ..classification.engine import run_subject_classification
+from ..classification.metrics import summarise_classification
 from ..segmentation import SegmentationWorkflow
 # import built-in plugins to populate registries
 from ..preproc import clahe  # noqa: F401
@@ -28,6 +30,7 @@ from ..models import csrt  # noqa: F401
 from ..models import optical_flow_lk  # noqa: F401
 from ..models import faster_rcnn  # noqa: F401
 from ..models import yolov11  # noqa: F401
+from ..models import rtdetrv2  # noqa: F401
 from ..models import fast_speckle  # noqa: F401
 from ..models import ocsort  # noqa: F401
 from ..models import strongsort  # noqa: F401
@@ -248,6 +251,47 @@ class PipelineRunner:
                 self._logger(msg)
             except Exception:
                 pass
+
+    @staticmethod
+    def _flag_to_bool(value: Any) -> bool:
+        """Parse common bool-like values from YAML/JSON configs."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+                return True
+            if v in {"0", "false", "no", "n", "off", "disable", "disabled", ""}:
+                return False
+        return bool(value)
+
+    def _resolve_detection_only_mode(self, exp_cfg: Dict[str, Any]) -> bool:
+        """Resolve detection-only mode from experiment-level or global config.
+
+        Supported forms:
+        - detection_only: true
+        - mode: detection_only
+        """
+        exp_cfg = exp_cfg or {}
+        root_cfg = self.cfg or {}
+
+        if "detection_only" in exp_cfg:
+            return self._flag_to_bool(exp_cfg.get("detection_only"))
+
+        exp_mode = str(exp_cfg.get("mode", "")).strip().lower()
+        if exp_mode in {"detection_only", "detector_only", "detection-only", "detector-only"}:
+            return True
+
+        if "detection_only" in root_cfg:
+            return self._flag_to_bool(root_cfg.get("detection_only"))
+
+        root_mode = str(root_cfg.get("mode", "")).strip().lower()
+        if root_mode in {"detection_only", "detector_only", "detection-only", "detector-only"}:
+            return True
+
+        return False
 
     def run(self):
         # Validate pipeline design compatibility before any training starts.
@@ -553,6 +597,173 @@ class PipelineRunner:
             sig_raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
             return {"key": hashlib.sha256(sig_raw.encode("utf-8")).hexdigest(), "payload": payload}
 
+        loso_clf_out_dirs: Dict[str, List[str]] = {}
+
+        def _read_json_file(path: str) -> Optional[Any]:
+            if not os.path.exists(path):
+                return None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return None
+
+        def _write_json_file(path: str, payload: Any) -> None:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        def _safe_binary_label(value: Any) -> Optional[int]:
+            try:
+                label = int(value)
+            except Exception:
+                return None
+            if label not in (0, 1):
+                return None
+            return label
+
+        def _safe_probability(value: Any) -> Optional[float]:
+            try:
+                prob = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(prob):
+                return None
+            return float(max(0.0, min(1.0, prob)))
+
+        def _apply_loso_pooled_rev_opt(exp_name: str, fold_dirs: List[str]) -> None:
+            fold_payloads: List[Dict[str, Any]] = []
+            pooled_y: List[int] = []
+            pooled_p: List[float] = []
+            rev_opt_enabled = False
+            fr_enabled = False
+
+            for fold_dir in fold_dirs:
+                cls_dir = os.path.join(fold_dir, "classification")
+                summary_path = os.path.join(cls_dir, "summary.json")
+                pred_path = os.path.join(cls_dir, "predictions.json")
+                artefacts_path = os.path.join(cls_dir, "artefacts.json")
+                meta_path = os.path.join(fold_dir, "metadata.json")
+
+                summary = _read_json_file(summary_path)
+                predictions = _read_json_file(pred_path)
+                if not isinstance(summary, dict) or not isinstance(predictions, list):
+                    continue
+
+                rev_opt_enabled = rev_opt_enabled or bool(summary.get("rev_opt_enabled", False))
+                fr_enabled = fr_enabled or bool(summary.get("fr_enabled", False))
+
+                parsed_rows: List[Tuple[Dict[str, Any], int, float]] = []
+                for row in predictions:
+                    if not isinstance(row, dict):
+                        continue
+                    yv = _safe_binary_label(row.get("label_true"))
+                    pv = _safe_probability(row.get("prob_positive"))
+                    if yv is None or pv is None:
+                        continue
+                    parsed_rows.append((row, yv, pv))
+                    pooled_y.append(yv)
+                    pooled_p.append(pv)
+
+                fold_payloads.append(
+                    {
+                        "summary": summary,
+                        "summary_path": summary_path,
+                        "predictions": predictions,
+                        "pred_path": pred_path,
+                        "artefacts_path": artefacts_path,
+                        "meta_path": meta_path,
+                        "rows": parsed_rows,
+                    }
+                )
+
+            if not fold_payloads or not rev_opt_enabled:
+                return
+            if fr_enabled:
+                self._log(
+                    f"[Classification] rev_opt pooled LOSO skipped for {exp_name}: fr is enabled.",
+                    to_console=True,
+                )
+                return
+
+            pooled_auc: Optional[float] = None
+            if len(pooled_y) >= 2 and len(set(pooled_y)) >= 2:
+                pooled_pred = [1 if p >= 0.5 else 0 for p in pooled_p]
+                pooled_metrics = summarise_classification(pooled_y, pooled_pred, pooled_p)
+                auc_raw = pooled_metrics.get("roc_auc")
+                if isinstance(auc_raw, (int, float)) and math.isfinite(float(auc_raw)):
+                    pooled_auc = float(auc_raw)
+
+            should_reverse = bool(pooled_auc is not None and pooled_auc < 0.5)
+            if pooled_auc is None:
+                self._log(
+                    f"[Classification] rev_opt pooled LOSO for {exp_name}: ROC AUC not computable; no reversal.",
+                    to_console=True,
+                )
+            else:
+                self._log(
+                    f"[Classification] rev_opt pooled LOSO for {exp_name}: "
+                    f"ROC AUC={pooled_auc:.4f} -> {'reverse' if should_reverse else 'keep'}",
+                    to_console=True,
+                )
+
+            for fold in fold_payloads:
+                summary = fold["summary"]
+                predictions = fold["predictions"]
+                parsed_rows = fold["rows"]
+
+                threshold_raw = summary.get("threshold_used", 0.5)
+                try:
+                    threshold = float(threshold_raw)
+                except Exception:
+                    threshold = 0.5
+                if not math.isfinite(threshold):
+                    threshold = 0.5
+
+                y_true: List[int] = []
+                y_pred: List[int] = []
+                y_prob: List[float] = []
+                for row, yv, pv in parsed_rows:
+                    prob = (1.0 - pv) if should_reverse else pv
+                    prob = float(max(0.0, min(1.0, prob)))
+                    pred = 1 if prob >= threshold else 0
+                    row["prob_positive"] = prob
+                    row["label_pred"] = int(pred)
+                    y_true.append(yv)
+                    y_pred.append(int(pred))
+                    y_prob.append(prob)
+
+                if y_true:
+                    fold_metrics = summarise_classification(y_true, y_pred, y_prob)
+                    for key, value in fold_metrics.items():
+                        summary[key] = value
+
+                summary["rev_opt_enabled"] = True
+                summary["rev_opt_scope"] = "loso_pooled_test_auc"
+                summary["rev_opt_applied"] = bool(should_reverse)
+                summary["rev_opt_pooled_auc"] = round(float(pooled_auc), 6) if pooled_auc is not None else None
+                summary["rev_opt_validation_auc"] = None
+
+                _write_json_file(fold["summary_path"], summary)
+                _write_json_file(fold["pred_path"], predictions)
+
+                artefacts = _read_json_file(fold["artefacts_path"])
+                if isinstance(artefacts, dict):
+                    artefacts["rev_opt_enabled"] = True
+                    artefacts["rev_opt_scope"] = "loso_pooled_test_auc"
+                    artefacts["rev_opt_applied"] = bool(should_reverse)
+                    artefacts["rev_opt_pooled_auc"] = (
+                        round(float(pooled_auc), 6) if pooled_auc is not None else None
+                    )
+                    artefacts["rev_opt_validation_auc"] = None
+                    _write_json_file(fold["artefacts_path"], artefacts)
+
+                meta = _read_json_file(fold["meta_path"])
+                if isinstance(meta, dict):
+                    metrics_obj = meta.setdefault("metrics", {})
+                    if isinstance(metrics_obj, dict):
+                        metrics_obj["classification"] = summary
+                    _write_json_file(fold["meta_path"], meta)
+
         for fold_idx, fold_data in enumerate(loso_folds):
             train_ds = fold_data["train"]
             test_ds = fold_data["test"]
@@ -561,6 +772,7 @@ class PipelineRunner:
 
             for exp in self.cfg.get("experiments", []):
                 exp_name = exp.get("name", "exp")
+                exp_detection_only = self._resolve_detection_only_mode(exp)
                 suffix = ""
                 if loso_enabled:
                     subj_tag = subject or f"fold{fold_idx+1}"
@@ -605,6 +817,7 @@ class PipelineRunner:
                         "fold": fold_idx + 1 if loso_enabled else None,
                         "total_folds": folds_total if loso_enabled else None,
                         "subject": subject,
+                        "detection_only": bool(exp_detection_only),
                     },
                     "metrics": {},
                     "artifacts": {},
@@ -829,6 +1042,20 @@ class PipelineRunner:
                             dedup.append(int(value))
                             seen.add(int(value))
                     return dedup
+
+                def _per_video_artifact_dir(root_dir: str, subject_id: Any, video_stem: str) -> str:
+                    """Build a stable per-video directory while avoiding duplicated path segments.
+
+                    Some datasets use the same token for subject and video stem
+                    (e.g. ``control101_left_68yo_female``). Writing under
+                    ``<root>/<subject>/<video>`` would duplicate the same folder name and can
+                    hit Windows MAX_PATH when file suffixes are appended.
+                    """
+                    stem = str(video_stem).strip() or "video"
+                    subj = str(subject_id).strip() if subject_id is not None else ""
+                    if not subj or subj.casefold() == stem.casefold():
+                        return os.path.join(root_dir, stem)
+                    return os.path.join(root_dir, subj, stem)
                 # Determine models used and initialize prediction collectors
                 use_models = models_list or models
                 for model_name, _m in use_models:
@@ -897,7 +1124,11 @@ class PipelineRunner:
                     try:
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
                         _subj_id_pred = dm.video_subjects.get(vp, "unknown")
-                        pred_dir = os.path.join(out_dir_base, "predictions_by_video", _subj_id_pred, vid_stem)
+                        pred_dir = _per_video_artifact_dir(
+                            os.path.join(out_dir_base, "predictions_by_video"),
+                            _subj_id_pred,
+                            vid_stem,
+                        )
                         os.makedirs(pred_dir, exist_ok=True)
                         for display_name, pl in pv_predictions.items():
                             outp_video = os.path.join(pred_dir, f"{display_name}.json")
@@ -965,7 +1196,7 @@ class PipelineRunner:
                         # per-video evaluation directory to avoid overwriting (split by subject)
                         vid_stem = os.path.splitext(os.path.basename(vp))[0]
                         _subj_id_met = dm.video_subjects.get(vp, "unknown")
-                        vid_met_dir = os.path.join(met_dir, _subj_id_met, vid_stem)
+                        vid_met_dir = _per_video_artifact_dir(met_dir, _subj_id_met, vid_stem)
                         os.makedirs(vid_met_dir, exist_ok=True)
                         res = evaluator.evaluate(eval_pv_predictions, gt, vid_met_dir)
                         # --- Debug: log coverage stats per model (from evaluator summary) ---
@@ -1445,12 +1676,59 @@ class PipelineRunner:
                     stage_entry.setdefault("artifacts", {})["metrics_dir"] = detection_metrics.get("metrics_dir")
                     stage_entry.setdefault("artifacts", {})["predictions_dir"] = detection_metrics.get("predictions_dir")
                 _dump_meta()
-            raw_test_predictions = copy.deepcopy(test_predictions)
+
+            if exp_detection_only:
+                self._log(
+                    "[Mode] detection_only enabled: skipping trajectory_filter, segmentation, and classification.",
+                    to_console=(tqdm is None),
+                )
+                _record_stage_skip("trajectory_filter", "trajectory_filter", "detection_only mode")
+                _record_stage_skip("segmentation_train", "segmentation", "detection_only mode")
+                _record_stage_skip("segmentation_infer", "segmentation", "detection_only mode")
+                _record_stage_skip(
+                    "classification",
+                    "classification",
+                    "detection_only mode",
+                    {"config": self.cfg.get("classification", {}) or {}},
+                )
+
+                metrics_section = meta.setdefault("metrics", {})
+                eval_meta_cfg = self.cfg.get("evaluation", {}) or {}
+                include_localization_debug = bool(eval_meta_cfg.get("include_localization_debug_metrics", False))
+                if stage_metrics_collector:
+                    test_summary = stage_metrics_collector.get("test", {}).get("summary")
+                    if test_summary:
+                        metrics_section["detection"] = test_summary
+                    if include_localization_debug:
+                        metrics_section["detection_phases"] = stage_metrics_collector
+                    detection_artifacts = meta.setdefault("artifacts", {}).setdefault("detection", {})
+                    test_info = stage_metrics_collector.get("test", {})
+                    for key in (
+                        "summary_path",
+                        "metrics_dir",
+                        "predictions_dir",
+                        "raw_summary_path",
+                        "corrected_summary_path",
+                        "filtered_candidate_summary_path",
+                    ):
+                        value = test_info.get(key)
+                        if value:
+                            detection_artifacts[key] = value
+
+                meta["runtime"]["finished_at"] = datetime.utcnow().isoformat() + "Z"
+                meta["runtime"]["duration_sec"] = max(0.0, time.perf_counter() - experiment_start)
+                meta["runtime"]["stages"] = len(stage_records)
+                _dump_meta()
+                continue
+
+            # Keep an immutable copy of detector outputs for diagnostics/visual comparison.
+            raw_test_predictions = copy.deepcopy(test_predictions) if test_predictions else {}
 
             # ── Trajectory Filter Stage ─────────────────────────────────
             # Detection → Trajectory Filtering → Re-cropping → Segmentation
-            # Use benchmark-aligned lw_tab_p for ROI trajectory repair:
-            # BiLOWESS detector -> delete outliers -> TabPFN fill -> Poisson glue-back.
+            # Default strategy:
+            # detector confidence/source gating -> mark low-confidence as missing
+            # -> PCHIP interpolate interior gaps only.
             traj_filter_cfg = self.cfg.get("trajectory_filter", {}) or {}
             traj_filter_enabled = bool(traj_filter_cfg.get("enabled", True))
             if traj_filter_enabled and test_predictions:
@@ -1458,83 +1736,50 @@ class PipelineRunner:
                 from ..classification.trajectory_filter import (
                     compute_trajectory_metrics as _compute_traj_metrics,
                 )
-                from ..classification.lw_tab_p import (
-                    LWTabPConfig as _LWTabPConfig,
-                    LWTabPFilter as _LWTabPFilter,
-                    build_dense_gt_from_frame_map as _lw_build_dense_gt,
+                from ..utils.prediction_interpolation import (
+                    cubic_clip_interpolate_predictions as _tf_pchip_fill,
                 )
 
-                _tf_confidence_threshold = float(traj_filter_cfg.get("confidence_threshold", 0.0))
-                _tf_trusted_sources_raw = traj_filter_cfg.get("trusted_bbox_sources", ["detector", "tracker"])
-                if isinstance(_tf_trusted_sources_raw, (list, tuple, set)):
-                    _tf_trusted_sources = {str(x).strip().lower() for x in _tf_trusted_sources_raw if str(x).strip()}
-                else:
-                    _tf_trusted_sources = {"detector", "tracker"}
-                if not _tf_trusted_sources:
-                    _tf_trusted_sources = {"detector", "tracker"}
+                _tf_confidence_threshold = float(traj_filter_cfg.get("confidence_threshold", 0.25))
+                _tf_max_gap = int(traj_filter_cfg.get("pchip_max_gap", 30))
+                if _tf_max_gap < 2:
+                    _tf_max_gap = 2
+                _tf_interpolated_source = str(
+                    traj_filter_cfg.get("interpolated_bbox_source", "trajectory_filter_pchip")
+                ).strip() or "trajectory_filter_pchip"
+                _tf_missing_source = str(
+                    traj_filter_cfg.get("missing_bbox_source", "missing_confidence")
+                ).strip() or "missing_confidence"
 
-                _lw_cfg = _LWTabPConfig(
-                    seed=int(traj_filter_cfg.get("seed", self.seed)),
-                    lowess_frac=float(traj_filter_cfg.get("lowess_frac", 0.5)),
-                    robust_iterations=int(traj_filter_cfg.get("robust_iterations", 3)),
-                    anomaly_residual_quantile=float(traj_filter_cfg.get("anomaly_residual_quantile", 0.80)),
-                    mild_sg_window=int(traj_filter_cfg.get("mild_sg_window", 5)),
-                    mild_sg_polyorder=int(traj_filter_cfg.get("mild_sg_polyorder", 2)),
-                    tabpfn_device=str(traj_filter_cfg.get("tabpfn_device", "auto")),
-                    tabpfn_max_train_rows=int(traj_filter_cfg.get("tabpfn_max_train_rows", 4096)),
-                )
                 with stage_scope(
                     "trajectory_filter",
                     "trajectory_filter",
                     {
-                        "method": "lw_tab_p",
+                        "method": "confidence_gap_pchip",
                         "non_observed_policy": "leave_empty_for_interpolation",
-                        "lowess_frac": float(_lw_cfg.lowess_frac),
+                        "observation_rule": "valid_bbox_and_confidence_only",
+                        "pchip_fill_all_missing": True,
                         "confidence_threshold": float(_tf_confidence_threshold),
-                        "trusted_bbox_sources": sorted(_tf_trusted_sources),
+                        "pchip_max_gap": int(_tf_max_gap),
+                        "interpolated_bbox_source": _tf_interpolated_source,
+                        "missing_bbox_source": _tf_missing_source,
                         "detector_models": list(test_predictions.keys()),
                     },
                 ) as stage_entry:
-                    _tf_train_trajectories: List[tuple[_np_tf.ndarray, _np_tf.ndarray]] = []
-                    for _ti in range(len(train_ds)):
-                        _tvp = train_ds[_ti].get("video_path")
-                        if not _tvp:
-                            continue
-                        _tjson = os.path.splitext(_tvp)[0] + ".json"
-                        if not os.path.exists(_tjson):
-                            continue
-                        try:
-                            _gt_payload = load_coco_vid(_tjson)
-                            _dense = _lw_build_dense_gt(
-                                _gt_payload.get("frames", {}),
-                                smooth_window=int(_lw_cfg.mild_sg_window),
-                                smooth_polyorder=int(_lw_cfg.mild_sg_polyorder),
-                            )
-                            if _dense is not None:
-                                _tf_train_trajectories.append(_dense)
-                        except Exception:
-                            continue
-
-                    if len(_tf_train_trajectories) < 2:
-                        raise RuntimeError(
-                            "lw_tab_p requires at least 2 usable GT trajectories in train split to fit TabPFN"
-                        )
-
-                    _lw_filter = _LWTabPFilter(_lw_cfg)
-                    _lw_filter.fit(_tf_train_trajectories)
-
                     _tf_metrics_all: Dict[str, Dict[str, Dict[str, Any]]] = {}
                     _tf_filtered: Dict[str, Dict[str, list]] = {}
+                    _tf_coverage = {
+                        "frames_total": 0,
+                        "observed_frames_total": 0,
+                        "interpolated_frames_total": 0,
+                        "missing_frames_total": 0,
+                    }
 
                     for _tf_mn, _tf_pbv in test_predictions.items():
                         _tf_filtered[_tf_mn] = {}
                         _tf_metrics_all[_tf_mn] = {}
 
                         for _tf_vp, _tf_preds in _tf_pbv.items():
-                            if len(_tf_preds) < 2:
-                                _tf_filtered[_tf_mn][_tf_vp] = list(_tf_preds)
-                                continue
-
                             # Deduplicate predictions with same frame_index (keep first)
                             _tf_seen_fi: set = set()
                             _tf_dedup: list = []
@@ -1544,7 +1789,7 @@ class PipelineRunner:
                                     _tf_dedup.append(_tp)
                             _tf_preds = _tf_dedup
 
-                            if len(_tf_preds) < 2:
+                            if not _tf_preds:
                                 _tf_filtered[_tf_mn][_tf_vp] = list(_tf_preds)
                                 continue
 
@@ -1557,18 +1802,6 @@ class PipelineRunner:
                                     and float(_tf_bb[_i][2]) > 0.0
                                     and float(_tf_bb[_i][3]) > 0.0
                                     for _i in range(len(_tf_preds))
-                                ],
-                                dtype=bool,
-                            )
-                            _tf_not_fallback = _np_tf.array(
-                                [not bool(getattr(p, "is_fallback", False)) for p in _tf_preds],
-                                dtype=bool,
-                            )
-                            _tf_source_ok = _np_tf.array(
-                                [
-                                    str(getattr(p, "bbox_source", "detector") or "detector").strip().lower()
-                                    in _tf_trusted_sources
-                                    for p in _tf_preds
                                 ],
                                 dtype=bool,
                             )
@@ -1588,63 +1821,48 @@ class PipelineRunner:
                                 if float(_tf_confidence_threshold) > 0.0
                                 else _np_tf.ones(len(_tf_preds), dtype=bool)
                             )
-                            # Only direct detector/tracker boxes that pass confidence are treated as observations.
-                            _tf_observed = _tf_valid_bbox & _tf_not_fallback & _tf_source_ok & _tf_conf_ok
+                            # Observed anchors are decided solely by bbox validity and confidence.
+                            # Fallback/source tags are ignored so this stage is the single interpolation gate.
+                            _tf_observed = _tf_valid_bbox & _tf_conf_ok
 
-                            _tf_proxy_before = _lw_filter.make_proxy_bbox(_tf_bb, _tf_fi)
-                            _tf_bcx = _tf_proxy_before[:, 0] + _tf_proxy_before[:, 2] / 2.0
-                            _tf_bcy = _tf_proxy_before[:, 1] + _tf_proxy_before[:, 3] / 2.0
-                            _tf_bw = _tf_proxy_before[:, 2]
-                            _tf_bh = _tf_proxy_before[:, 3]
-
-                            # Before-filtering metrics (sort first for correct time order)
-                            _tf_sort_b = _np_tf.argsort(_tf_fi)
-                            _tf_before = _compute_traj_metrics(
-                                _tf_bcx[_tf_sort_b], _tf_bcy[_tf_sort_b],
-                                _tf_bw[_tf_sort_b], _tf_bh[_tf_sort_b],
-                                _tf_fi[_tf_sort_b],
-                            )
-
-                            # Apply lw_tab_p (BiLOWESS detector + TabPFN + Poisson glue-back)
-                            _tf_result = _lw_filter.repair(
-                                _tf_bb,
-                                _tf_fi,
-                                observed_mask=_tf_observed,
-                            )
-
-                            _tf_rcx = _tf_result["center"][:, 0]
-                            _tf_rcy = _tf_result["center"][:, 1]
-                            _tf_rw = _tf_result["bbox"][:, 2]
-                            _tf_rh = _tf_result["bbox"][:, 3]
-
-                            # After-filtering metrics
-                            _tf_after = _compute_traj_metrics(
-                                _tf_rcx,
-                                _tf_rcy,
-                                _tf_rw,
-                                _tf_rh,
-                                _tf_fi,
-                            )
-
-                            _tf_vid_stem = os.path.splitext(os.path.basename(_tf_vp))[0]
-                            _tf_metrics_all[_tf_mn][_tf_vid_stem] = {
-                                "before": _tf_before,
-                                "after": _tf_after,
-                                "frames": int(len(_tf_fi)),
+                            _tf_observed_preds = [
+                                _tp for _tp, _obs in zip(_tf_preds, _tf_observed.tolist()) if _obs
+                            ]
+                            if _tf_observed_preds:
+                                _tf_interp_preds = _tf_pchip_fill(
+                                    _tf_observed_preds,
+                                    max_gap=int(_tf_max_gap),
+                                    interpolated_bbox_source=_tf_interpolated_source,
+                                    query_frame_indices=_tf_fi.tolist(),
+                                    fill_all_queries=True,
+                                )
+                            else:
+                                _tf_interp_preds = []
+                            _tf_interp_map = {
+                                int(_tp.frame_index): _tp for _tp in _tf_interp_preds
                             }
 
-                            # Map sorted results back to original prediction order
-                            # Use frame_index→result_index lookup for robustness
-                            _tf_fi_map = {int(fi): idx for idx, fi in enumerate(_tf_fi)}
-
                             _tf_new_preds: list = []
+                            _tf_interpolated_frames = 0
+                            _tf_missing_frames = 0
                             for _tf_i, _tf_pred in enumerate(_tf_preds):
-                                _tf_k = _tf_fi_map.get(int(_tf_pred.frame_index))
-                                if _tf_k is None:
-                                    # Frame was removed (shouldn't happen after dedup); keep original
+                                if bool(_tf_observed[_tf_i]):
                                     _tf_new_preds.append(_tf_pred)
                                     continue
-                                if not bool(_tf_observed[_tf_k]):
+                                _tf_ip = _tf_interp_map.get(int(_tf_pred.frame_index))
+                                if _tf_ip is not None:
+                                    _tf_new_preds.append(FramePrediction(
+                                        frame_index=_tf_pred.frame_index,
+                                        bbox=tuple(float(v) for v in list(_tf_ip.bbox)[:4]),
+                                        score=_tf_pred.score,
+                                        confidence=getattr(_tf_pred, "confidence", None),
+                                        confidence_components=getattr(_tf_pred, "confidence_components", None),
+                                        segmentation=getattr(_tf_pred, "segmentation", None),
+                                        is_fallback=True,
+                                        bbox_source=_tf_interpolated_source,
+                                    ))
+                                    _tf_interpolated_frames += 1
+                                else:
                                     _tf_new_preds.append(FramePrediction(
                                         frame_index=_tf_pred.frame_index,
                                         bbox=(0.0, 0.0, 0.0, 0.0),
@@ -1653,22 +1871,51 @@ class PipelineRunner:
                                         confidence_components=getattr(_tf_pred, "confidence_components", None),
                                         segmentation=getattr(_tf_pred, "segmentation", None),
                                         is_fallback=True,
-                                        bbox_source="missing",
+                                        bbox_source=_tf_missing_source,
                                     ))
-                                    continue
-                                _tf_nx, _tf_ny, _tf_nw, _tf_nh = [
-                                    float(v) for v in _tf_result["bbox"][_tf_k][:4]
-                                ]
-                                _tf_new_preds.append(FramePrediction(
-                                    frame_index=_tf_pred.frame_index,
-                                    bbox=(_tf_nx, _tf_ny, _tf_nw, _tf_nh),
-                                    score=_tf_pred.score,
-                                    confidence=getattr(_tf_pred, "confidence", None),
-                                    confidence_components=getattr(_tf_pred, "confidence_components", None),
-                                    segmentation=getattr(_tf_pred, "segmentation", None),
-                                    is_fallback=False,
-                                    bbox_source="lw_tab_p",
-                                ))
+                                    _tf_missing_frames += 1
+
+                            _tf_bcx = _tf_bb[:, 0] + _tf_bb[:, 2] / 2.0
+                            _tf_bcy = _tf_bb[:, 1] + _tf_bb[:, 3] / 2.0
+                            _tf_bw = _tf_bb[:, 2]
+                            _tf_bh = _tf_bb[:, 3]
+                            _tf_after_bb = _np_tf.array([list(p.bbox) for p in _tf_new_preds], dtype=_np_tf.float64)
+                            _tf_acx = _tf_after_bb[:, 0] + _tf_after_bb[:, 2] / 2.0
+                            _tf_acy = _tf_after_bb[:, 1] + _tf_after_bb[:, 3] / 2.0
+                            _tf_aw = _tf_after_bb[:, 2]
+                            _tf_ah = _tf_after_bb[:, 3]
+                            _tf_sort = _np_tf.argsort(_tf_fi)
+
+                            _tf_before = {}
+                            _tf_after = {}
+                            if len(_tf_fi) >= 2:
+                                _tf_before = _compute_traj_metrics(
+                                    _tf_bcx[_tf_sort], _tf_bcy[_tf_sort],
+                                    _tf_bw[_tf_sort], _tf_bh[_tf_sort],
+                                    _tf_fi[_tf_sort],
+                                )
+                                _tf_after = _compute_traj_metrics(
+                                    _tf_acx[_tf_sort],
+                                    _tf_acy[_tf_sort],
+                                    _tf_aw[_tf_sort],
+                                    _tf_ah[_tf_sort],
+                                    _tf_fi[_tf_sort],
+                                )
+
+                            _tf_vid_stem = os.path.splitext(os.path.basename(_tf_vp))[0]
+                            _tf_metrics_all[_tf_mn][_tf_vid_stem] = {
+                                "before": _tf_before,
+                                "after": _tf_after,
+                                "frames": int(len(_tf_fi)),
+                                "observed_frames": int(_np_tf.sum(_tf_observed)),
+                                "interpolated_frames": int(_tf_interpolated_frames),
+                                "missing_frames": int(_tf_missing_frames),
+                            }
+
+                            _tf_coverage["frames_total"] += int(len(_tf_fi))
+                            _tf_coverage["observed_frames_total"] += int(_np_tf.sum(_tf_observed))
+                            _tf_coverage["interpolated_frames_total"] += int(_tf_interpolated_frames)
+                            _tf_coverage["missing_frames_total"] += int(_tf_missing_frames)
                             _tf_filtered[_tf_mn][_tf_vp] = _tf_new_preds
 
                     # Replace test_predictions with filtered version for downstream stages
@@ -1697,147 +1944,34 @@ class PipelineRunner:
                         "after": {
                             k: float(_np_tf.mean(v)) for k, v in _tf_agg_a.items()
                         } if _tf_agg_a else {},
+                        "coverage": {
+                            "frames_total": int(_tf_coverage["frames_total"]),
+                            "observed_frames_total": int(_tf_coverage["observed_frames_total"]),
+                            "interpolated_frames_total": int(_tf_coverage["interpolated_frames_total"]),
+                            "missing_frames_total": int(_tf_coverage["missing_frames_total"]),
+                        },
                         "config": {
-                            "method": "lw_tab_p",
-                            "lowess_frac": float(_lw_cfg.lowess_frac),
-                            "robust_iterations": int(_lw_cfg.robust_iterations),
-                            "anomaly_residual_quantile": float(_lw_cfg.anomaly_residual_quantile),
-                            "mild_sg_window": int(_lw_cfg.mild_sg_window),
-                            "mild_sg_polyorder": int(_lw_cfg.mild_sg_polyorder),
-                            "tabpfn_device": str(_lw_cfg.tabpfn_device),
-                            "tabpfn_max_train_rows": int(_lw_cfg.tabpfn_max_train_rows),
+                            "method": "confidence_gap_pchip",
+                            "observation_rule": "valid_bbox_and_confidence_only",
+                            "pchip_fill_all_missing": True,
                             "confidence_threshold": float(_tf_confidence_threshold),
-                            "trusted_bbox_sources": sorted(_tf_trusted_sources),
-                            "n_train_trajectories": int(len(_tf_train_trajectories)),
+                            "pchip_max_gap": int(_tf_max_gap),
+                            "interpolated_bbox_source": _tf_interpolated_source,
+                            "missing_bbox_source": _tf_missing_source,
                         },
                     }
                     _tf_summary_path = os.path.join(_tf_out_dir, "summary.json")
                     with open(_tf_summary_path, "w", encoding="utf-8") as f:
                         json.dump(_tf_summary, f, ensure_ascii=False, indent=2)
 
-                    # ── Filtered-detection accuracy metrics (IoU / CE / SR) ──────
-                    # Re-evaluate the smoothed predictions against GT so the viewer
-                    # can show bbox accuracy *after* trajectory filtering.
-                    # This mirrors BasicEvaluator's exact IoU / CE / SR definitions.
-                    try:
-                        from ..utils.annotations import load_coco_vid as _tf_load_gt
-                        # restrict_to_gt_frames is defined inside run_on_dataset (local scope);
-                        # read it directly from config here so this outer-scope block is safe.
-                        _tf_eval_cfg = self.cfg.get("evaluation", {}) or {}
-                        restrict_to_gt_frames = bool(_tf_eval_cfg.get("restrict_to_gt_frames", True))
-
-                        def _tf_iou(px, py, pw, ph, gx, gy, gw, gh):
-                            ix1 = max(px, gx); iy1 = max(py, gy)
-                            ix2 = min(px + pw, gx + gw); iy2 = min(py + ph, gy + gh)
-                            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-                            union = pw * ph + gw * gh - inter
-                            return inter / union if union > 0 else 0.0
-
-                        _tf_fdet_agg: Dict[str, Dict] = {}
-                        for _fm, _fpbv in _tf_filtered.items():
-                            _fa = _tf_fdet_agg.setdefault(_fm, {
-                                "count": 0,
-                                "sum_iou": 0.0, "sum_iou_sq": 0.0,
-                                "sum_ce": 0.0, "sum_ce_sq": 0.0,
-                                "tp_50": 0, "fp_50": 0, "fn_50": 0,
-                                "tp_75": 0, "fp_75": 0, "fn_75": 0,
-                            })
-                            for _fvp, _fpreds in _fpbv.items():
-                                if not _fpreds:
-                                    continue
-                                _fgt_json = os.path.splitext(_fvp)[0] + ".json"
-                                if not os.path.exists(_fgt_json):
-                                    continue
-                                _fgt = _tf_load_gt(_fgt_json)
-                                _fgt_frames = _fgt.get("frames", {})
-                                if not _fgt_frames:
-                                    continue
-                                # Build prediction lookup by frame (first prediction wins)
-                                _fpred_map: Dict[int, tuple] = {}
-                                for _fp in _fpreds:
-                                    _fk = int(getattr(_fp, "frame_index", -1))
-                                    if _fk not in _fpred_map:
-                                        _fpred_map[_fk] = tuple(_fp.bbox)[:4]
-                                # Collect all GT frames with boxes
-                                _fgt_set = {int(fi) for fi, boxes in _fgt_frames.items() if boxes}
-                                # When restrict_to_gt_frames is on, only evaluate on GT frames
-                                # (matching how the detector was evaluated in BasicEvaluator)
-                                if restrict_to_gt_frames:
-                                    _fall_frames = _fgt_set
-                                else:
-                                    _fall_frames = _fgt_set | set(_fpred_map.keys())
-                                for _ffi in _fall_frames:
-                                    _has_gt = _ffi in _fgt_set
-                                    _has_pred = _ffi in _fpred_map
-                                    if _has_gt and _has_pred:
-                                        _px, _py, _pw, _ph = _fpred_map[_ffi]
-                                        _gbox = _fgt_frames.get(_ffi, [None])[0]
-                                        if _gbox is None:
-                                            _fa["fp_50"] += 1
-                                            _fa["fp_75"] += 1
-                                            continue
-                                        _gx, _gy, _gw, _gh = list(_gbox)[:4]
-                                        _fiou = _tf_iou(_px, _py, _pw, _ph, _gx, _gy, _gw, _gh)
-                                        _pce = float(_np_tf.sqrt(
-                                            (_px + _pw / 2.0 - (_gx + _gw / 2.0)) ** 2 +
-                                            (_py + _ph / 2.0 - (_gy + _gh / 2.0)) ** 2
-                                        ))
-                                        _fa["count"] += 1
-                                        _fa["sum_iou"] += _fiou
-                                        _fa["sum_iou_sq"] += _fiou * _fiou
-                                        _fa["sum_ce"] += _pce
-                                        _fa["sum_ce_sq"] += _pce * _pce
-                                        if _fiou >= 0.50:
-                                            _fa["tp_50"] += 1
-                                        else:
-                                            _fa["fp_50"] += 1
-                                        if _fiou >= 0.75:
-                                            _fa["tp_75"] += 1
-                                        else:
-                                            _fa["fp_75"] += 1
-                                    elif _has_gt and not _has_pred:
-                                        _fa["fn_50"] += 1
-                                        _fa["fn_75"] += 1
-                                    elif _has_pred and not _has_gt:
-                                        _fa["fp_50"] += 1
-                                        _fa["fp_75"] += 1
-
-                        _tf_fdet_out: Dict[str, Dict] = {}
-                        for _fm, _fa in _tf_fdet_agg.items():
-                            _fn = max(1, int(_fa["count"]))
-                            _fi_mu = _fa["sum_iou"] / _fn
-                            _fi_sd = max(0.0, _fa["sum_iou_sq"] / _fn - _fi_mu * _fi_mu) ** 0.5
-                            _fc_mu = _fa["sum_ce"] / _fn
-                            _fc_sd = max(0.0, _fa["sum_ce_sq"] / _fn - _fc_mu * _fc_mu) ** 0.5
-                            # SR = precision = tp / (tp + fp), same as BasicEvaluator
-                            _ft50 = int(_fa["tp_50"]); _ff50 = int(_fa["fp_50"])
-                            _ft75 = int(_fa["tp_75"]); _ff75 = int(_fa["fp_75"])
-                            _tf_fdet_out[_fm] = {
-                                "frames_count": int(_fa["count"]),
-                                "iou_mean": _fi_mu, "iou_std": _fi_sd,
-                                "ce_mean": _fc_mu, "ce_std": _fc_sd,
-                                "success_rate_50": (_ft50 / (_ft50 + _ff50)) if (_ft50 + _ff50) > 0 else 0.0,
-                                "success_rate_75": (_ft75 / (_ft75 + _ff75)) if (_ft75 + _ff75) > 0 else 0.0,
-                            }
-                        if _tf_fdet_out:
-                            _tf_fdet_path = os.path.join(_tf_out_dir, "filtered_detection_summary.json")
-                            with open(_tf_fdet_path, "w", encoding="utf-8") as f:
-                                json.dump(_tf_fdet_out, f, ensure_ascii=False, indent=2)
-                            self._log(
-                                f"[TrajectoryFilter] Filtered-detection accuracy saved → {_tf_fdet_path}",
-                                to_console=(tqdm is None),
-                            )
-                    except Exception as _tf_fdet_err:
-                        self._log(
-                            f"[TrajectoryFilter] WARNING: filtered detection accuracy metrics failed "
-                            f"({_tf_fdet_err})"
-                        )
+                    # Keep detection summary untouched. This stage only prepares
+                    # confidence-masked predictions for downstream segmentation/classification.
 
                     stage_entry["metrics"] = _tf_summary
                     stage_entry.setdefault("artifacts", {})["metrics_path"] = _tf_metrics_path
                     stage_entry.setdefault("artifacts", {})["summary_path"] = _tf_summary_path
                     self._log(
-                        f"[TrajectoryFilter] method=lw_tab_p | "
+                        f"[TrajectoryFilter] method=confidence_gap_pchip | "
                         f"videos_filtered={sum(len(v) for v in _tf_metrics_all.values())}",
                         to_console=(tqdm is None),
                     )
@@ -2467,14 +2601,24 @@ class PipelineRunner:
                 _record_stage_skip("classification", "classification", "disabled via config", {"config": clf_cfg})
 
             metrics_section = meta.setdefault("metrics", {})
+            eval_meta_cfg = self.cfg.get("evaluation", {}) or {}
+            include_localization_debug = bool(eval_meta_cfg.get("include_localization_debug_metrics", False))
             if stage_metrics_collector:
-                metrics_section["detection_phases"] = stage_metrics_collector
                 test_summary = stage_metrics_collector.get("test", {}).get("summary")
                 if test_summary:
                     metrics_section["detection"] = test_summary
+                if include_localization_debug:
+                    metrics_section["detection_phases"] = stage_metrics_collector
                 detection_artifacts = meta.setdefault("artifacts", {}).setdefault("detection", {})
                 test_info = stage_metrics_collector.get("test", {})
-                for key in ("summary_path", "metrics_dir", "predictions_dir"):
+                for key in (
+                    "summary_path",
+                    "metrics_dir",
+                    "predictions_dir",
+                    "raw_summary_path",
+                    "corrected_summary_path",
+                    "filtered_candidate_summary_path",
+                ):
                     value = test_info.get(key)
                     if value:
                         detection_artifacts[key] = value
@@ -2491,7 +2635,9 @@ class PipelineRunner:
             if os.path.exists(_tf_summary_file):
                 try:
                     with open(_tf_summary_file, "r", encoding="utf-8") as f:
-                        metrics_section["trajectory_filter"] = json.load(f)
+                        tf_summary_payload = json.load(f)
+                    if include_localization_debug:
+                        metrics_section["trajectory_filter"] = tf_summary_payload
                     tf_artifacts = meta.setdefault("artifacts", {}).setdefault("trajectory_filter", {})
                     tf_artifacts["summary_path"] = _tf_summary_file
                     tf_artifacts["metrics_path"] = os.path.join(test_dir, "trajectory_filter", "metrics.json")
@@ -2506,8 +2652,20 @@ class PipelineRunner:
                         metrics_section["classification"] = json.load(f)
                 except Exception:
                     pass
+                if loso_enabled:
+                    loso_clf_out_dirs.setdefault(exp_name, []).append(out_dir)
 
             meta["runtime"]["finished_at"] = datetime.utcnow().isoformat() + "Z"
             meta["runtime"]["duration_sec"] = max(0.0, time.perf_counter() - experiment_start)
             meta["runtime"]["stages"] = len(stage_records)
             _dump_meta()
+
+        if loso_enabled and loso_clf_out_dirs:
+            self._log(
+                "[Classification] Applying pooled LOSO rev_opt decision across completed folds.",
+                to_console=True,
+            )
+            for _exp_name, _fold_dirs in loso_clf_out_dirs.items():
+                if not _fold_dirs:
+                    continue
+                _apply_loso_pooled_rev_opt(_exp_name, _fold_dirs)
