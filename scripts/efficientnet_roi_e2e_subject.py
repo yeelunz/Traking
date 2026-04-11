@@ -11,13 +11,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import timm
 import torch
 from PIL import Image
 from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -334,11 +334,90 @@ class ROIFrameDataset(Dataset):
 
 
 def make_model(pretrained: bool) -> nn.Module:
-    weights = EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
-    model = efficientnet_b0(weights=weights)
-    in_features = model.classifier[1].in_features
-    model.classifier[1] = nn.Linear(in_features, 1)
-    return model
+    raise RuntimeError("Use make_model_with_head() instead.")
+
+
+def _infer_backbone_feature_dim(backbone: nn.Module, img_size: int) -> int:
+    feature_dim = int(getattr(backbone, "num_features", 0) or 0)
+    if feature_dim > 0:
+        return feature_dim
+    with torch.no_grad():
+        dummy = torch.zeros((1, 3, int(img_size), int(img_size)), dtype=torch.float32)
+        feature_dim = int(backbone(dummy).shape[-1])
+    return feature_dim
+
+
+class ROIBinaryModel(nn.Module):
+    def __init__(
+        self,
+        backbone_name: str,
+        pretrained: bool,
+        head_type: str,
+        img_size: int,
+        proj_dim: int,
+        head_hidden_dim: int,
+        head_dropout: float,
+    ):
+        super().__init__()
+        self.backbone_name = str(backbone_name)
+        self.head_type = str(head_type).strip().lower()
+
+        self.backbone = timm.create_model(
+            self.backbone_name,
+            pretrained=bool(pretrained),
+            num_classes=0,
+            global_pool="avg",
+        )
+        feature_dim = _infer_backbone_feature_dim(self.backbone, img_size=img_size)
+
+        if self.head_type == "linear":
+            self.classifier = nn.Linear(feature_dim, 1)
+        elif self.head_type == "projection_linear":
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dim, int(proj_dim)),
+                nn.LayerNorm(int(proj_dim)),
+                nn.GELU(),
+                nn.Linear(int(proj_dim), 1),
+            )
+        elif self.head_type == "projection_mlp":
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dim, int(proj_dim)),
+                nn.LayerNorm(int(proj_dim)),
+                nn.GELU(),
+                nn.Dropout(float(head_dropout)),
+                nn.Linear(int(proj_dim), int(head_hidden_dim)),
+                nn.GELU(),
+                nn.Dropout(float(head_dropout)),
+                nn.Linear(int(head_hidden_dim), 1),
+            )
+        else:
+            raise ValueError("head_type must be one of: linear, projection_linear, projection_mlp")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)
+        logits = self.classifier(feat)
+        return logits
+
+
+def make_model_with_head(
+    *,
+    backbone_name: str,
+    pretrained: bool,
+    head_type: str,
+    img_size: int,
+    proj_dim: int,
+    head_hidden_dim: int,
+    head_dropout: float,
+) -> nn.Module:
+    return ROIBinaryModel(
+        backbone_name=backbone_name,
+        pretrained=pretrained,
+        head_type=head_type,
+        img_size=img_size,
+        proj_dim=proj_dim,
+        head_hidden_dim=head_hidden_dim,
+        head_dropout=head_dropout,
+    )
 
 
 def select_best_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
@@ -426,10 +505,20 @@ def evaluate_loss(model: nn.Module, loader: DataLoader, criterion: nn.Module, de
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="EfficientNet ROI end-to-end test (single-frame, subject-level split).")
+    parser = argparse.ArgumentParser(description="ROI end-to-end test (single-frame, subject-level split).")
     parser.add_argument("--data-root", type=Path, default=Path("dataset/merged_extend"))
     parser.add_argument("--label-file", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/efficientnet_roi_e2e"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/roi_e2e"))
+    parser.add_argument("--backbone", type=str, default="convnext_tiny")
+    parser.add_argument(
+        "--head-type",
+        type=str,
+        default="linear",
+        choices=["linear", "projection_linear", "projection_mlp"],
+    )
+    parser.add_argument("--proj-dim", type=int, default=256)
+    parser.add_argument("--head-hidden-dim", type=int, default=256)
+    parser.add_argument("--head-dropout", type=float, default=0.2)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=8)
@@ -438,7 +527,15 @@ def main() -> None:
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--max-frames-per-video", type=int, default=24)
-    parser.add_argument("--roi-pad-ratio", type=float, default=0.0)
+    parser.add_argument(
+        "--roi-pad-ratio",
+        type=float,
+        default=None,
+        help=(
+            "ROI bbox padding ratio. Default is 0.15 when pretrained backbone is enabled, "
+            "otherwise 0.0."
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--invert-labels", action="store_true", help="Flip label mapping: 1<->0 (for sanity check).")
@@ -447,6 +544,9 @@ def main() -> None:
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    if args.roi_pad_ratio is None:
+        args.roi_pad_ratio = 0.0 if args.no_pretrained else 0.15
+    args.roi_pad_ratio = max(0.0, float(args.roi_pad_ratio))
 
     set_seed(args.seed)
     data_root = args.data_root.resolve()
@@ -508,7 +608,15 @@ def main() -> None:
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
         device = torch.device(args.device)
-        model = make_model(pretrained=not args.no_pretrained).to(device)
+        model = make_model_with_head(
+            backbone_name=args.backbone,
+            pretrained=not args.no_pretrained,
+            head_type=args.head_type,
+            img_size=args.img_size,
+            proj_dim=args.proj_dim,
+            head_hidden_dim=args.head_hidden_dim,
+            head_dropout=args.head_dropout,
+        ).to(device)
 
         train_y = np.asarray([s.label for s in train_samples], dtype=np.int64)
         pos = int((train_y == 1).sum())
@@ -566,7 +674,7 @@ def main() -> None:
         )
 
         run_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(model.state_dict(), run_dir / "efficientnet_roi_binary.pt")
+        torch.save(model.state_dict(), run_dir / "roi_binary_model.pt")
 
         frame_pred_rows = []
         for sample, prob, pred in zip(test_samples, y_test_prob.tolist(), y_test_pred.tolist()):
@@ -593,6 +701,11 @@ def main() -> None:
                 "data_root": str(data_root),
                 "label_file": str(label_file),
                 "img_size": args.img_size,
+                "backbone": str(args.backbone),
+                "head_type": str(args.head_type),
+                "proj_dim": int(args.proj_dim),
+                "head_hidden_dim": int(args.head_hidden_dim),
+                "head_dropout": float(args.head_dropout),
                 "batch_size": args.batch_size,
                 "epochs": args.epochs,
                 "lr": args.lr,
@@ -629,8 +742,10 @@ def main() -> None:
         with (run_dir / "report.json").open("w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
-        print("\n=== EfficientNet ROI E2E (single-frame) ===")
+        print("\n=== ROI E2E (single-frame) ===")
         print(f"Run dir: {run_dir}")
+        print(f"Backbone: {args.backbone}")
+        print(f"Head: {args.head_type}")
         print(f"Threshold: {val_threshold:.4f}")
         print("\n[Frame-level metrics]")
         for k in ["accuracy", "balanced_accuracy", "precision_positive", "recall_positive", "f1_positive", "roc_auc", "brier_score"]:
@@ -691,6 +806,11 @@ def main() -> None:
             "data_root": str(data_root),
             "label_file": str(label_file),
             "img_size": args.img_size,
+            "backbone": str(args.backbone),
+            "head_type": str(args.head_type),
+            "proj_dim": int(args.proj_dim),
+            "head_hidden_dim": int(args.head_hidden_dim),
+            "head_dropout": float(args.head_dropout),
             "batch_size": args.batch_size,
             "epochs": args.epochs,
             "lr": args.lr,
