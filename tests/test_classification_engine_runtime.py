@@ -267,7 +267,7 @@ def test_texture_roi_pad_default_for_pipeline_inference_pretrained_true():
 
     updated = _inject_texture_roi_pad_ratio_default(feature_cfg)
 
-    assert updated["params"]["roi_pad_ratio"] == 0.15
+    assert updated["params"]["roi_pad_ratio"] == 0.2
 
 
 def test_texture_roi_pad_default_for_pipeline_inference_pretrained_false():

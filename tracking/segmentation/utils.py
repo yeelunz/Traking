@@ -116,7 +116,24 @@ def place_mask_on_canvas(canvas_shape: Tuple[int, int], mask_roi: np.ndarray, bb
 
 
 def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    if not path:
+        return
+    target = os.path.abspath(path)
+    try:
+        os.makedirs(target, exist_ok=True)
+        return
+    except OSError:
+        if os.name != "nt":
+            raise
+
+    # Windows long-path fallback (when policy is not enabled globally).
+    if target.startswith("\\\\?\\"):
+        long_target = target
+    elif target.startswith("\\\\"):
+        long_target = "\\\\?\\UNC\\" + target.lstrip("\\")
+    else:
+        long_target = "\\\\?\\" + target
+    os.makedirs(long_target, exist_ok=True)
 
 
 def keep_largest_component(mask: np.ndarray) -> np.ndarray:

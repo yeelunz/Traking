@@ -8,20 +8,23 @@ import numpy as np
 try:  # Ultralytics YOLO for detections
     from ultralytics import YOLO  # type: ignore
 except Exception as e:  # pragma: no cover - optional dependency at runtime
-    _YOLO_IMPORT_ERROR = e
-    YOLO = None  # type: ignore
+    raise ImportError(
+        "Failed to import ultralytics for tracking.models.ocsort. Install ultralytics."
+    ) from e
 
 try:  # OC-SORT tracker core
     from ocsort import OCSort  # type: ignore
 except Exception as e:  # pragma: no cover - optional dependency at runtime
-    _OCSORT_IMPORT_ERROR = e
-    OCSort = None  # type: ignore
+    raise ImportError(
+        "Failed to import ocsort for tracking.models.ocsort. Install ocsort."
+    ) from e
 
 try:  # PyTorch tensors required by OC-SORT
     import torch
 except Exception as e:  # pragma: no cover
-    torch = None  # type: ignore
-    _TORCH_IMPORT_ERROR = e
+    raise ImportError(
+        "Failed to import torch for tracking.models.ocsort. Install torch."
+    ) from e
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model

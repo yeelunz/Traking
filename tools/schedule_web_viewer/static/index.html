@@ -15,6 +15,7 @@
       </div>
       <div class="actions">
         <button id="refresh-btn">重新整理索引</button>
+        <button id="force-refresh-btn" class="ghost-button">強制刷新</button>
       </div>
     </header>
     <div class="layout">
@@ -198,7 +199,7 @@
           <!-- Classification Section -->
           <section id="classification-section" class="hidden">
             <div class="section-header">
-              <h3>Classification 結果</h3>
+              <h3>影片層級分類結果</h3>
             </div>
             <p id="classification-summary-explain" class="hint"></p>
             <div id="classification-threshold-panel" class="threshold-panel hidden">
@@ -294,8 +295,9 @@
             </div>
             <canvas id="classification-chart" height="200"></canvas>
             <div class="summary-header" style="margin-top:1rem;">
-              <h4>Per-Subject 預測</h4>
+              <h4>影片層級預測</h4>
             </div>
+            <p id="classification-video-stats" class="hint"></p>
             <table id="classification-predictions-table"></table>
           </section>
 
@@ -381,6 +383,6 @@
         </section>
       </main>
     </div>
-    <script src="/assets/app.js?v=20260311a"></script>
+    <script src="/assets/app.js?v=20260415a"></script>
   </body>
 </html>

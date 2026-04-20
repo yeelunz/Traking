@@ -10,15 +10,22 @@ try:
     import torch.nn as nn
     from torch.utils.data import DataLoader, TensorDataset
 except Exception as exc:  # noqa: BLE001
-    torch = None  # type: ignore
-    nn = None  # type: ignore
-    DataLoader = None  # type: ignore
-    TensorDataset = None  # type: ignore
-    _TORCH_IMPORT_ERROR = exc
+    raise ImportError(
+        "Failed to import PyTorch dependencies for tracking.classification.classifiers.nn. "
+        "Install torch."
+    ) from exc
 else:
     _TORCH_IMPORT_ERROR = None
 
-from sklearn.model_selection import train_test_split
+try:  # pragma: no cover - optional dependency guard
+    from sklearn.model_selection import train_test_split
+except Exception as exc:  # noqa: BLE001
+    raise ImportError(
+        "Failed to import scikit-learn dependency train_test_split for "
+        "tracking.classification.classifiers.nn. Install scikit-learn."
+    ) from exc
+else:
+    _SKLEARN_IMPORT_ERROR = None
 
 from ...core.registry import register_classifier
 from ..interfaces import SubjectClassifier
@@ -40,7 +47,10 @@ def _resolve_device(pref: str) -> Any:
     return torch.device(pref)
 
 
-class _MLPLinearNet(nn.Module):
+_ModuleBase = nn.Module
+
+
+class _MLPLinearNet(_ModuleBase):
     def __init__(
         self,
         input_dim: int,

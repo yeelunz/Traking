@@ -19,14 +19,16 @@ import numpy as np
 try:
     import cv2  # type: ignore
 except Exception as ex:  # pragma: no cover - keep runtime error informative
-    cv2 = None  # type: ignore
-    _CV2_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.mixformerv2. Install opencv-python."
+    ) from ex
 
 try:
     import torch
 except Exception as ex:  # pragma: no cover
-    torch = None  # type: ignore
-    _TORCH_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import torch for tracking.models.mixformerv2. Install torch."
+    ) from ex
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model

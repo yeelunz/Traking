@@ -3,8 +3,10 @@ from typing import Dict, Any, List, Tuple, Optional
 
 try:
     import cv2  # type: ignore
-except Exception:
-    cv2 = None  # type: ignore
+except Exception as exc:
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.optical_flow_lk. Install opencv-python."
+    ) from exc
 import numpy as np
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule

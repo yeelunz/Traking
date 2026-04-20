@@ -68,7 +68,10 @@ class AttentionFusionModule(_NumpyFusionBase):
     name = "attention"
 
 
-class _TorchAttentionGatingFusion(nn.Module):
+_ModuleBase = nn.Module if nn is not None else object
+
+
+class _TorchAttentionGatingFusion(_ModuleBase):
     def __init__(self, dim: int):
         super().__init__()
         self.attn = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
@@ -83,7 +86,7 @@ class _TorchAttentionGatingFusion(nn.Module):
         return (weight.unsqueeze(-1) * x).sum(dim=1)
 
 
-class _TorchAttentionFusion(nn.Module):
+class _TorchAttentionFusion(_ModuleBase):
     def __init__(self, dim: int):
         super().__init__()
         self.attn = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
@@ -94,7 +97,7 @@ class _TorchAttentionFusion(nn.Module):
         return (attn.unsqueeze(-1) * x).sum(dim=1)
 
 
-class _TorchGatingFusion(nn.Module):
+class _TorchGatingFusion(_ModuleBase):
     def __init__(self, dim: int):
         super().__init__()
         self.gate = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
@@ -105,7 +108,7 @@ class _TorchGatingFusion(nn.Module):
         return (weight.unsqueeze(-1) * x).sum(dim=1)
 
 
-class _TorchConcatFusion(nn.Module):
+class _TorchConcatFusion(_ModuleBase):
     def __init__(self, dim: int, branches: int):
         super().__init__()
         self.dim = int(dim)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -13,6 +14,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ..core.interfaces import FramePrediction, MaskStats, SegmentationData, PreprocessingModule
+from ..utils.prediction_interpolation import repair_predictions_for_query_frames
 from ..utils.annotations import load_coco_vid
 from .utils import (
     BoundingBox,
@@ -46,6 +48,10 @@ class SegmentationCropDataset(Dataset):
         cache_annotations: Optional[Dict[str, Dict]] = None,
         jitter: float = 0.0,
         target_size: Optional[Tuple[int, int]] = None,
+        reuse_video_capture: bool = True,
+        cache_frames_in_ram: bool = False,
+        cache_masks_in_ram: bool = False,
+        mask_preprocess_workers: int = 0,
         preprocs: Optional[Sequence[PreprocessingModule]] = None,
         roi_preprocs: Optional[Sequence[PreprocessingModule]] = None,
     ) -> None:
@@ -65,6 +71,15 @@ class SegmentationCropDataset(Dataset):
         self.missing_annotations: List[str] = []
         self._mask_valid_cache: Dict[Tuple[str, str], bool] = {}
         self.empty_masks: List[Tuple[str, int]] = []
+        # Reuse cv2.VideoCapture per video path to reduce repeated open/close cost.
+        self.reuse_video_capture = bool(reuse_video_capture)
+        self.cache_frames_in_ram = bool(cache_frames_in_ram)
+        self.cache_masks_in_ram = bool(cache_masks_in_ram)
+        self.mask_preprocess_workers = max(0, int(mask_preprocess_workers))
+        self._video_caps: Dict[str, cv2.VideoCapture] = {}
+        self._video_cap_last_frame: Dict[str, int] = {}
+        self._frame_cache: Dict[Tuple[str, int], np.ndarray] = {}
+        self._mask_cache: Dict[Tuple[str, str], Optional[np.ndarray]] = {}
         # global preprocs apply to full frames before ROI cropping
         self.preprocs: List[PreprocessingModule] = list(preprocs or [])
         # roi preprocs apply to ROI crops after cropping
@@ -82,13 +97,19 @@ class SegmentationCropDataset(Dataset):
                 width = ann.get("raw", {}).get("images", [{}])[0].get("width", 0)
                 height = ann.get("raw", {}).get("images", [{}])[0].get("height", 0)
             image_shape = (int(height), int(width)) if width and height else None
+            frame_records: List[Tuple[int, Tuple[float, float, float, float], Optional[str]]] = []
             for frame_idx, items in frame_ann.items():
                 if not items:
                     continue
                 item = items[0]
                 bbox = tuple(item.get("bbox", (0.0, 0.0, 0.0, 0.0)))
                 mask_path = item.get("mask_path")
-                if not self._mask_has_content(video_path, mask_path):
+                frame_records.append((int(frame_idx), bbox, mask_path))
+
+            validity_map = self._prefetch_mask_validity_for_video(video_path, frame_records)
+            for frame_idx, bbox, mask_path in frame_records:
+                has_content = validity_map.get(mask_path) if mask_path else False
+                if not has_content:
                     self.empty_masks.append((video_path, int(frame_idx)))
                     continue
                 for _ in range(max(1, redundancy)):
@@ -104,6 +125,9 @@ class SegmentationCropDataset(Dataset):
                         )
                     )
 
+        if self.cache_frames_in_ram and self.entries:
+            self._preload_frames_to_ram()
+
     def __len__(self) -> int:
         return len(self.entries)
 
@@ -112,6 +136,8 @@ class SegmentationCropDataset(Dataset):
         frame = self._load_frame(entry.video_path, entry.frame_index)
         if frame is None:
             raise RuntimeError(f"Failed to read frame {entry.frame_index} from {entry.video_path}")
+        if self.cache_frames_in_ram:
+            frame = frame.copy()
         mask_full = self._load_mask(entry.video_path, entry.mask_path)
         if mask_full is None:
             # Mask file missing or empty on disk (e.g. zero-area annotation written
@@ -126,6 +152,8 @@ class SegmentationCropDataset(Dataset):
                 "This usually means the annotation has area=0 or the mask file "
                 "does not exist. Remove or re-annotate this frame."
             )
+        if self.cache_masks_in_ram:
+            mask_full = mask_full.copy()
         roi_bbox = entry.roi_bbox
         if self.preprocs:
             frame, mask_full, roi_bbox = self._apply_preprocs_frame_mask_bbox(
@@ -319,17 +347,87 @@ class SegmentationCropDataset(Dataset):
         return {}
 
     def _load_frame(self, video_path: str, frame_index: int) -> Optional[np.ndarray]:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
+        target_index = int(frame_index)
+        frame_key = (video_path, target_index)
+        if self.cache_frames_in_ram:
+            cached = self._frame_cache.get(frame_key)
+            if cached is not None:
+                return cached
+
+        cap, temporary = self._get_video_capture(video_path)
+        if cap is None:
             return None
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
-        ok, frame = cap.read()
-        cap.release()
+
+        prev_index = self._video_cap_last_frame.get(video_path, -1)
+        if not temporary and prev_index >= 0 and target_index == prev_index + 1:
+            ok, frame = cap.read()
+        else:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_index)
+            ok, frame = cap.read()
+
+        if temporary:
+            cap.release()
         if not ok:
+            if not temporary:
+                self._video_cap_last_frame[video_path] = -1
             return None
+        if not temporary:
+            self._video_cap_last_frame[video_path] = target_index
+        if self.cache_frames_in_ram:
+            self._frame_cache[frame_key] = frame
         return frame
 
-    def _load_mask(self, video_path: str, mask_path: Optional[str]) -> Optional[np.ndarray]:
+    def _preload_frames_to_ram(self) -> None:
+        # Preload unique (video, frame) keys once so epoch-1 avoids disk I/O stalls.
+        unique_keys = {(entry.video_path, int(entry.frame_index)) for entry in self.entries}
+        for video_path, frame_index in unique_keys:
+            if (video_path, frame_index) in self._frame_cache:
+                continue
+            _ = self._load_frame(video_path, frame_index)
+
+    def _get_video_capture(self, video_path: str) -> Tuple[Optional[cv2.VideoCapture], bool]:
+        if not self.reuse_video_capture:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return None, True
+            return cap, True
+
+        cap = self._video_caps.get(video_path)
+        if cap is not None and cap.isOpened():
+            return cap, False
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None, False
+        self._video_caps[video_path] = cap
+        self._video_cap_last_frame[video_path] = -1
+        return cap, False
+
+    def _release_video_captures(self) -> None:
+        for cap in self._video_caps.values():
+            try:
+                cap.release()
+            except Exception:
+                pass
+        self._video_caps.clear()
+        self._video_cap_last_frame.clear()
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = dict(self.__dict__)
+        # VideoCapture objects are not picklable (Windows DataLoader spawn).
+        state["_video_caps"] = {}
+        state["_video_cap_last_frame"] = {}
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._video_caps = {}
+        self._video_cap_last_frame = {}
+
+    def __del__(self) -> None:
+        self._release_video_captures()
+
+    def _resolve_mask_abs_path(self, video_path: str, mask_path: Optional[str]) -> Optional[str]:
         if not mask_path:
             return None
         mask_file = mask_path.replace("/", os.sep)
@@ -345,22 +443,100 @@ class SegmentationCropDataset(Dataset):
                     abs_path = alt_path
         if not os.path.isfile(abs_path):
             return None
-        # Guard against zero-byte files: Ultralytics patches cv2.imread to use
-        # np.fromfile + imdecode; empty files produce an assertion failure.
         if os.path.getsize(abs_path) == 0:
             return None
-        try:
-            mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
-        except Exception:
+        return abs_path
+
+    @staticmethod
+    def _clean_binary_mask(mask: np.ndarray) -> Optional[np.ndarray]:
+        if mask is None or mask.size == 0:
             return None
-        if mask is None:
-            return None
-        # ensure binary mask and fill interior holes to avoid ring-shaped annotations
         mask_bin = (mask > 0).astype(np.uint8) * 255
         mask_filled = fill_holes(mask_bin)
         mask_clean = keep_largest_component(mask_filled)
         if mask_clean is None or mask_clean.size == 0 or np.count_nonzero(mask_clean) == 0:
             return None
+        return mask_clean
+
+    def _mask_has_content_from_disk(self, video_path: str, mask_path: Optional[str]) -> bool:
+        if not mask_path:
+            return False
+        abs_path = self._resolve_mask_abs_path(video_path, mask_path)
+        if abs_path is None:
+            return False
+        try:
+            mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            return False
+        if mask is None:
+            return False
+        return self._clean_binary_mask(mask) is not None
+
+    def _prefetch_mask_validity_for_video(
+        self,
+        video_path: str,
+        frame_records: Sequence[Tuple[int, Tuple[float, float, float, float], Optional[str]]],
+    ) -> Dict[Optional[str], bool]:
+        unique_masks = sorted({mp for _, _, mp in frame_records if mp})
+        if not unique_masks:
+            return {}
+
+        validity: Dict[Optional[str], bool] = {}
+        pending: List[str] = []
+        for mp in unique_masks:
+            cache_key = (video_path, mp)
+            if cache_key in self._mask_valid_cache:
+                validity[mp] = bool(self._mask_valid_cache[cache_key])
+            else:
+                pending.append(mp)
+
+        worker_count = min(max(1, self.mask_preprocess_workers), len(pending)) if pending else 0
+        if worker_count <= 1:
+            for mp in pending:
+                validity[mp] = bool(self._mask_has_content_from_disk(video_path, mp))
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                fut_to_mask = {
+                    ex.submit(self._mask_has_content_from_disk, video_path, mp): mp
+                    for mp in pending
+                }
+                for fut in as_completed(fut_to_mask):
+                    mp = fut_to_mask[fut]
+                    try:
+                        validity[mp] = bool(fut.result())
+                    except Exception:
+                        validity[mp] = False
+
+        for mp, ok in validity.items():
+            if mp:
+                self._mask_valid_cache[(video_path, mp)] = bool(ok)
+        return validity
+
+    def _load_mask(self, video_path: str, mask_path: Optional[str]) -> Optional[np.ndarray]:
+        abs_path = self._resolve_mask_abs_path(video_path, mask_path)
+        if abs_path is None:
+            return None
+        cache_key = (video_path, abs_path)
+        if self.cache_masks_in_ram and cache_key in self._mask_cache:
+            return self._mask_cache[cache_key]
+
+        try:
+            mask = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            if self.cache_masks_in_ram:
+                self._mask_cache[cache_key] = None
+            return None
+        if mask is None:
+            if self.cache_masks_in_ram:
+                self._mask_cache[cache_key] = None
+            return None
+        mask_clean = self._clean_binary_mask(mask)
+        if mask_clean is None:
+            if self.cache_masks_in_ram:
+                self._mask_cache[cache_key] = None
+            return None
+        if self.cache_masks_in_ram:
+            self._mask_cache[cache_key] = mask_clean
         return mask_clean
 
     def _mask_has_content(self, video_path: str, mask_path: Optional[str]) -> bool:
@@ -376,6 +552,20 @@ class SegmentationCropDataset(Dataset):
         has_content = mask is not None
         self._mask_valid_cache[cache_key] = has_content
         return has_content
+
+    def estimate_ram_cache_bytes(self) -> int:
+        frame_bytes = int(sum(int(arr.nbytes) for arr in self._frame_cache.values()))
+        mask_bytes = int(
+            sum(int(arr.nbytes) for arr in self._mask_cache.values() if isinstance(arr, np.ndarray))
+        )
+        return frame_bytes + mask_bytes
+
+    def get_ram_cache_stats(self) -> Dict[str, int]:
+        return {
+            "cached_frames": int(len(self._frame_cache)),
+            "cached_masks": int(sum(1 for v in self._mask_cache.values() if isinstance(v, np.ndarray))),
+            "cache_bytes": int(self.estimate_ram_cache_bytes()),
+        }
 
     # ---------------- resize helpers -----------------
     @staticmethod
@@ -525,3 +715,86 @@ def attach_ground_truth_segmentation(
         frames.append(pred)
     frames.sort(key=lambda s: s.frame_index)
     return frames
+
+
+def attach_ground_truth_segmentation_full_trajectory(
+    annotation: Dict,
+    dataset_root: str,
+    video_path: Optional[str] = None,
+    *,
+    min_known_points: int = 3,
+    interpolated_bbox_source: str = "ground_truth_interpolated_pchip",
+    missing_bbox_source: str = "ground_truth_missing",
+) -> List[FramePrediction]:
+    """Build a full-length GT trajectory for classification training.
+
+    This helper keeps the original GT bbox annotations as anchors, attaches
+    segmentation only where a GT mask file exists, and uses PCHIP to fill the
+    complete frame timeline whenever the GT anchor count is sufficient.
+    """
+    video_dir: Optional[str] = os.path.dirname(os.path.abspath(video_path)) if video_path else None
+    raw_frames = annotation.get("frames", {}) or {}
+    frame_ann = annotation.get("frame_annotations", {}) or {}
+
+    query_frame_indices: List[int] = []
+    for frame_idx in raw_frames.keys():
+        try:
+            query_frame_indices.append(int(frame_idx))
+        except Exception:
+            continue
+    query_frame_indices = sorted(set(query_frame_indices))
+
+    observed: List[FramePrediction] = []
+    for frame_idx in query_frame_indices:
+        bbox_list = raw_frames.get(frame_idx) or raw_frames.get(str(frame_idx)) or []
+        if not bbox_list:
+            continue
+
+        bbox = tuple(map(float, bbox_list[0]))
+        ann_items = frame_ann.get(frame_idx) or frame_ann.get(str(frame_idx)) or []
+        segmentation: Optional[SegmentationData] = None
+        if ann_items:
+            ann_entry = ann_items[0]
+            mask_path = ann_entry.get("mask_path")
+            metadata = ann_entry.get("metadata") or {}
+            centroid = metadata.get("centroid", [0.0, 0.0])
+            resolved_mask = _resolve_gt_mask_path(mask_path, dataset_root, video_dir)
+            if resolved_mask is not None:
+                segmentation = SegmentationData(
+                    mask_path=resolved_mask,
+                    stats=MaskStats(
+                        area_px=float(
+                            metadata.get("area", metadata.get("area_px", 0.0) or ann_entry.get("area", 0.0))
+                        ),
+                        bbox=tuple(bbox),
+                        centroid=(float(centroid[0]), float(centroid[1])),
+                        perimeter_px=float(metadata.get("perimeter_px", 0.0)),
+                        equivalent_diameter_px=float(metadata.get("equivalent_diameter_px", 0.0)),
+                    ),
+                )
+
+        observed.append(
+            FramePrediction(
+                frame_index=int(frame_idx),
+                bbox=bbox,
+                score=1.0,
+                confidence=1.0,
+                segmentation=segmentation,
+                is_fallback=False,
+                bbox_source="ground_truth",
+            )
+        )
+
+    if not query_frame_indices:
+        return []
+
+    return repair_predictions_for_query_frames(
+        observed,
+        query_frame_indices=query_frame_indices,
+        confidence_threshold=0.0,
+        min_known_points=int(min_known_points),
+        min_bbox_wh=1e-6,
+        interpolated_bbox_source=interpolated_bbox_source,
+        missing_bbox_source=missing_bbox_source,
+        interpolation_max_gap=max(len(query_frame_indices), 1),
+    )

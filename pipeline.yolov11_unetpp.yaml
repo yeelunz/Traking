@@ -26,7 +26,7 @@ experiments:
       batch: 8
       lr0: 0.01
       patience: 50
-      workers: 0
+      workers: 8
       include_empty_frames: false
 evaluation:
   evaluator: BasicEvaluator
@@ -58,7 +58,7 @@ segmentation:
       encoder_weights: imagenet
   padding_min: 0.1
   padding_max: 0.15
-  padding_inference: 0.15
+  padding_inference: 0.20
   jitter: 0.05
   epochs: 5
   batch_size: 8
@@ -66,6 +66,7 @@ segmentation:
   lr: 0.001
   weight_decay: 1.0e-05
   threshold: 0.5
+  detection_conf_threshold: 0.5
   val_ratio: 0.0
   seed: 0
   redundancy: 1

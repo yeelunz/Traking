@@ -807,12 +807,45 @@ class ExperimentIndex:
         self.loso_groups: Dict[str, List[Dict]] = {}
         self.refresh()
 
+    @staticmethod
+    def _has_segmentation_visuals(exp_path: Path) -> bool:
+        seg_root = exp_path / "test" / "segmentation"
+        if not seg_root.exists():
+            return False
+
+        pred_root = seg_root / "predictions"
+        try:
+            if pred_root.exists():
+                quick_patterns = (
+                    "*/*/visualizations_roi",
+                    "*/*/*/visualizations_roi",
+                    "*/*/*/*/visualizations_roi",
+                )
+                for pattern in quick_patterns:
+                    for candidate in pred_root.glob(pattern):
+                        if candidate.is_dir():
+                            return True
+
+            for candidate in seg_root.rglob("visualizations_roi"):
+                if candidate.is_dir():
+                    return True
+        except Exception:
+            return False
+
+        return False
+
     def _experiment_dirs(self) -> List[Path]:
         """Find every directory under results root that contains an experiment metadata.json."""
         experiment_dirs: List[Path] = []
         seen: set[Path] = set()
-        for meta_path in sorted(self.root.rglob("metadata.json")):
-            exp_path = meta_path.parent
+
+        def _ignore_walk_error(_: OSError) -> None:
+            return None
+
+        for dir_path, _, files in os.walk(str(self.root), topdown=True, onerror=_ignore_walk_error):
+            if "metadata.json" not in files:
+                continue
+            exp_path = Path(dir_path)
             try:
                 exp_path.relative_to(self.root)
             except ValueError:
@@ -821,69 +854,75 @@ class ExperimentIndex:
                 continue
             seen.add(exp_path)
             experiment_dirs.append(exp_path)
+
+        experiment_dirs.sort()
         return experiment_dirs
 
     def refresh(self) -> None:
         entries: Dict[str, Dict] = {}
         loso_groups: Dict[str, List[Dict]] = {}
         for exp_path in self._experiment_dirs():
-            meta_path = exp_path / "metadata.json"
-            meta = load_json(meta_path)
-            if not meta or not isinstance(meta, dict):
-                continue
-            experiment_meta = meta.get("experiment") or {}
-            pipeline = experiment_meta.get("pipeline") or []
-            if not pipeline:
-                pipeline = meta.get("config", {}).get("pipeline", [])
-            preprocs = [step.get("name") for step in pipeline if step.get("type") == "preproc"]
-            models = [step.get("name") for step in pipeline if step.get("type") == "model"]
-            rel = self._relative_label(exp_path)
-            group_path = self._group_path(rel)
-            exp_name = experiment_meta.get("name") or exp_path.name
-            is_loso = _is_loso_run(meta)
-            split = (meta.get("dataset") or {}).get("split") or {}
-            fold_label = _format_loso_fold(split.get("subject"), fallback=None) if is_loso else None
-            aggregate_rel = _aggregate_id(group_path, str(exp_name)) if is_loso else None
-            det_summary = exp_path / "test" / "detection" / "metrics" / "summary.json"
-            seg_summary = exp_path / "test" / "segmentation" / "metrics_summary.json"
-            cls_summary_path = exp_path / "classification" / "summary.json"
-            det_preview = detection_summary_metrics(exp_path)
-            seg_preview = segmentation_summary_metrics(exp_path)
-            cls_preview = classification_summary_metrics(exp_path)
-            tf_preview = trajectory_filter_summary_metrics(exp_path)
-            fdet_preview = filtered_detection_summary_metrics(exp_path)
-            entry = {
-                "id": rel,
-                "path": exp_path,
-                "relative_path": rel,
-                "group_path": group_path,
-                "is_loso": is_loso,
-                "fold": fold_label,
-                "aggregate_id": aggregate_rel,
-                "name": exp_name,
-                "created_at": meta.get("created_at"),
-                "preprocs": preprocs,
-                "models": models,
-                "has_detection": det_summary.exists(),
-                "has_segmentation": seg_summary.exists(),
-                "has_classification": cls_summary_path.exists(),
-                "has_trajectory_filter": (exp_path / "test" / "trajectory_filter" / "summary.json").exists(),
-                "has_detection_visuals": (exp_path / "test" / "detection" / "visualizations").exists(),
-                "has_segmentation_visuals": bool(list((exp_path / "test" / "segmentation").rglob("visualizations_roi"))) if (exp_path / "test" / "segmentation").exists() else False,
-                "preview": {
-                    "detection": det_preview,
-                    "segmentation": seg_preview,
-                    "classification": cls_preview,
-                    "trajectory_filter": tf_preview,
-                    "filtered_detection": fdet_preview,
-                },
-            }
-            entries[rel] = entry
-            if is_loso and aggregate_rel and fold_label:
-                loso_groups.setdefault(aggregate_rel, []).append({
+            try:
+                meta_path = exp_path / "metadata.json"
+                meta = load_json(meta_path)
+                if not meta or not isinstance(meta, dict):
+                    continue
+                experiment_meta = meta.get("experiment") or {}
+                pipeline = experiment_meta.get("pipeline") or []
+                if not pipeline:
+                    pipeline = meta.get("config", {}).get("pipeline", [])
+                preprocs = [step.get("name") for step in pipeline if step.get("type") == "preproc"]
+                models = [step.get("name") for step in pipeline if step.get("type") == "model"]
+                rel = self._relative_label(exp_path)
+                group_path = self._group_path(rel)
+                exp_name = experiment_meta.get("name") or exp_path.name
+                is_loso = _is_loso_run(meta)
+                split = (meta.get("dataset") or {}).get("split") or {}
+                fold_label = _format_loso_fold(split.get("subject"), fallback=None) if is_loso else None
+                aggregate_rel = _aggregate_id(group_path, str(exp_name)) if is_loso else None
+                det_summary = exp_path / "test" / "detection" / "metrics" / "summary.json"
+                seg_summary = exp_path / "test" / "segmentation" / "metrics_summary.json"
+                cls_summary_path = exp_path / "classification" / "summary.json"
+                det_preview = detection_summary_metrics(exp_path)
+                seg_preview = segmentation_summary_metrics(exp_path)
+                cls_preview = classification_summary_metrics(exp_path)
+                tf_preview = trajectory_filter_summary_metrics(exp_path)
+                fdet_preview = filtered_detection_summary_metrics(exp_path)
+                has_seg_vis = self._has_segmentation_visuals(exp_path)
+                entry = {
+                    "id": rel,
+                    "path": exp_path,
+                    "relative_path": rel,
+                    "group_path": group_path,
+                    "is_loso": is_loso,
                     "fold": fold_label,
-                    "exp_id": rel,
-                })
+                    "aggregate_id": aggregate_rel,
+                    "name": exp_name,
+                    "created_at": meta.get("created_at"),
+                    "preprocs": preprocs,
+                    "models": models,
+                    "has_detection": det_summary.exists(),
+                    "has_segmentation": seg_summary.exists(),
+                    "has_classification": cls_summary_path.exists(),
+                    "has_trajectory_filter": (exp_path / "test" / "trajectory_filter" / "summary.json").exists(),
+                    "has_detection_visuals": (exp_path / "test" / "detection" / "visualizations").exists(),
+                    "has_segmentation_visuals": has_seg_vis,
+                    "preview": {
+                        "detection": det_preview,
+                        "segmentation": seg_preview,
+                        "classification": cls_preview,
+                        "trajectory_filter": tf_preview,
+                        "filtered_detection": fdet_preview,
+                    },
+                }
+                entries[rel] = entry
+                if is_loso and aggregate_rel and fold_label:
+                    loso_groups.setdefault(aggregate_rel, []).append({
+                        "fold": fold_label,
+                        "exp_id": rel,
+                    })
+            except Exception:
+                continue
         self.entries = entries
         self.loso_groups = loso_groups
 
@@ -1140,6 +1179,27 @@ def gather_segmentation_metrics(exp_path: Path) -> Dict:
         summary_metrics = first_value(first_model) if first_model else None
 
     per_video: List[Dict] = []
+
+    def _video_label_from_path_key(video_path: Any) -> str:
+        """Build stable ``subject/video`` label from metrics_per_video keys.
+
+        Handles mixed separators (``\\`` and ``/``) regardless of host OS.
+        """
+        raw = str(video_path or "").strip()
+        if not raw:
+            return "unknown"
+
+        normalized = raw.replace("\\", "/")
+        parts = [p for p in normalized.split("/") if p and p not in {".", ".."}]
+        if not parts:
+            return os.path.basename(raw) or "unknown"
+
+        file_name = parts[-1]
+        file_stem = Path(file_name).stem or file_name
+        if len(parts) >= 2:
+            return f"{parts[-2]}/{file_stem}"
+        return file_stem
+
     preds_root = exp_path / "test" / "segmentation" / "predictions"
     metrics_file = None
     if preds_root.exists():
@@ -1156,12 +1216,8 @@ def gather_segmentation_metrics(exp_path: Path) -> Dict:
     if metrics_file:
         data = load_json(metrics_file) or {}
         for video_path, metrics in data.items():
-            # Show subject_id/filename to distinguish videos across subjects
-            parts = Path(video_path).parts
-            if len(parts) >= 2:
-                label = f"{parts[-2]}/{Path(video_path).stem}"
-            else:
-                label = os.path.basename(video_path)
+            # Show subject_id/filename to distinguish videos across subjects.
+            label = _video_label_from_path_key(video_path)
             per_video.append({
                 "video": label,
                 "metrics": metrics,

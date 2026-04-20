@@ -1,0 +1,437 @@
+queue:
+  - label: "00_defs"
+    config:
+      seed: 42
+
+      dataset: &dataset_extendclen_loso
+        root: "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\extendclen"
+        split:
+          method: loso
+          loso: true
+          ratios: [0.8, 0.2]
+          k_fold: 1
+
+      experiments: []
+
+      evaluation: &evaluation_defaults
+        evaluator: BasicEvaluator
+        restrict_to_gt_frames: true
+        visualize:
+          enabled: true
+          samples: 12
+          strategy: even_spread
+          include_detection: true
+          include_segmentation: true
+          ensure_first_last: true
+
+      output: &output_defaults
+        results_root: "results/extendclen_nnunet_loso_revopt"
+
+      trajectory_filter: &trajectory_filter_defaults
+        bbox_strategy: area_constraint
+        filter_bbox_size: true
+        anchor_keep_ratio: 0.0
+        no_harm_guard: true
+        bbox_params:
+          macro_ratio: 0.08
+          macro_sigma: 2.0
+          micro_hw: 1
+          micro_sigma: 2.0
+          max_outlier_run: 1
+        traj_params:
+          macro_ratio: 0.08
+          macro_sigma: 2.0
+          micro_hw: 1
+          micro_sigma: 2.0
+          max_outlier_run: 1
+          sg_window: 1
+          sg_polyorder: 1
+
+      texture_pretrain: &texture_pretrain_defaults
+        backbone: convnext_tiny
+        input_size: 96
+        batch_size: 32
+        epochs: 15
+        lr: 1.0e-4
+        weight_decay: 1.0e-4
+        optimizer: adamw
+        scheduler: cosine
+        num_workers: 0
+        device: auto
+        amp: true
+        head_type: linear
+        hidden_dim: 256
+        dropout: 0.2
+        pretrained_imagenet: true
+        save_backbone_only: true
+        cache_enabled: true
+        cache_dir: "ckpt/texture_pretrain_cache"
+        seed: 42
+        max_frames_per_video: 16
+        val_ratio: 0.2
+
+      motion_pretrain: &motion_pretrain_defaults
+        epochs: 30
+        batch_size: 32
+        lr: 1.0e-3
+        weight_decay: 1.0e-4
+        device: auto
+        cache_enabled: true
+        cache_dir: "ckpt/motion_pretrain_cache"
+        seed: 42
+        val_ratio: 0.2
+
+      detector: &detector_yolo26l
+        weights: models/detection/yolo26l.pt
+        conf: 0.05
+        iou: 0.5
+        imgsz: 640
+        device: cuda
+        classes: null
+        max_det: 100
+        fallback_last_prediction: true
+        train_enabled: true
+        epochs: 30
+        batch: 8
+        lr0: 0.01
+        patience: 50
+        workers: 0
+        include_empty_frames: false
+        force_cpu_if_no_cuda: true
+
+      pipeline_clahe_yolo26l: &pipeline_clahe_yolo26l
+        - type: preproc
+          name: CLAHE
+          params: {}
+        - type: model
+          name: YOLOv11
+          params: *detector_yolo26l
+
+      segmentation_nnunet: &seg_nnunet
+        model:
+          name: nnunet
+          params:
+            in_channels: 3
+            classes: 1
+            dimension: 2
+            n_stages: 5
+            base_features: 32
+            max_features: 320
+            deep_supervision: false
+            return_highres_only: true
+        padding_min: 0.1
+        padding_max: 0.15
+        padding_inference: 0.15
+        jitter: 0.02
+        redundancy: 1
+        target_size: [256, 256]
+        epochs: 15
+        batch_size: 2
+        num_workers: 0
+        lr: 0.0005
+        weight_decay: 1.0e-5
+        dice_weight: 1.0
+        bce_weight: 1.0
+        threshold: 0.5
+        val_ratio: 0.1
+        seed: 1337
+        device: auto
+        train: true
+        inference_checkpoint: null
+
+      label_file: &label_file
+        "C:\\Users\\User\\Desktop\\code\\Traking\\dataset\\extendclen\\ann.txt"
+
+      fusion_concat: &fusion_concat
+        name: concat
+        params: {}
+
+      fe_tab_v6_pretrain: &fe_tab_v6_pretrain
+        name: tab_v6
+        params:
+          motion_mode: freeze
+          texture_mode: pretrain
+          pretrained_backbone: true
+          n_texture_frames: 5
+          texture_image_size: 96
+          roi_pad_ratio: 0.15
+          moment_input_steps: 256
+          moment_device: auto
+          texture_device: auto
+
+      fe_tab_v6_lite_pretrain: &fe_tab_v6_lite_pretrain
+        name: tab_v6_lite
+        params:
+          motion_mode: freeze
+          texture_mode: pretrain
+          pretrained_backbone: true
+          n_texture_frames: 5
+          texture_image_size: 96
+          roi_pad_ratio: 0.15
+          moment_input_steps: 256
+          moment_device: auto
+          texture_device: auto
+
+      fe_tsc_v4_pretrain: &fe_tsc_v4_pretrain
+        name: tsc_v4
+        params:
+          texture_mode: pretrain
+          pretrained_backbone: true
+          n_steps: 256
+          frame_w: 640.0
+          frame_h: 480.0
+          interp_method: pchip
+          texture_image_size: 96
+          roi_pad_ratio: 0.2
+          texture_device: auto
+
+      clf_tab_v6_rf: &clf_tab_v6_rf
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tab_v6_pretrain
+        classifier:
+          name: random_forest
+          params:
+            n_estimators: 200
+            max_depth: null
+            min_samples_leaf: 1
+            class_weight: balanced
+            random_state: 42
+            n_jobs: -1
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tab_v6_xgboost: &clf_tab_v6_xgboost
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tab_v6_pretrain
+        classifier:
+          name: xgboost
+          params:
+            n_estimators: 200
+            max_depth: 4
+            learning_rate: 0.05
+            subsample: 0.8
+            colsample_bytree: 0.8
+            gamma: 0.0
+            reg_lambda: 1.0
+            reg_alpha: 0.0
+            eval_metric: logloss
+            n_jobs: -1
+            random_state: 42
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tab_v6_tabpfn: &clf_tab_v6_tabpfn
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tab_v6_pretrain
+        classifier:
+          name: tabpfn_v2
+          params:
+            n_ensemble_configurations: 32
+            device: cpu
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tab_v6_lite_rf: &clf_tab_v6_lite_rf
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tab_v6_lite_pretrain
+        classifier:
+          name: random_forest
+          params:
+            n_estimators: 200
+            max_depth: null
+            min_samples_leaf: 1
+            class_weight: balanced
+            random_state: 42
+            n_jobs: -1
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tab_v6_lite_xgboost: &clf_tab_v6_lite_xgboost
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tab_v6_lite_pretrain
+        classifier:
+          name: xgboost
+          params:
+            n_estimators: 200
+            max_depth: 4
+            learning_rate: 0.05
+            subsample: 0.8
+            colsample_bytree: 0.8
+            gamma: 0.0
+            reg_lambda: 1.0
+            reg_alpha: 0.0
+            eval_metric: logloss
+            n_jobs: -1
+            random_state: 42
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tab_v6_lite_tabpfn: &clf_tab_v6_lite_tabpfn
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tab_v6_lite_pretrain
+        classifier:
+          name: tabpfn_v2
+          params:
+            n_ensemble_configurations: 32
+            device: cpu
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tsc_v4_multirocket: &clf_tsc_v4_multirocket
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tsc_v4_pretrain
+        classifier:
+          name: multirocket
+          params:
+            n_kernels: 6250
+            ridge_alpha: 1.0e-3
+            seed: 42
+            n_vars: 15
+            n_steps: 256
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      clf_tsc_v4_patchtst: &clf_tsc_v4_patchtst
+        enabled: true
+        rev_opt: true
+        fr: true
+        feature_extractor: *fe_tsc_v4_pretrain
+        classifier:
+          name: patchtst
+          params:
+            patch_len: 16
+            stride: 8
+            d_model: 32
+            ridge_alpha: 1.0e-3
+            seed: 42
+            n_vars: 15
+            n_steps: 256
+        fusion_module: *fusion_concat
+        segmentation:
+          enabled: true
+        label_file: *label_file
+        level: video
+
+      common_run: &common_run
+        seed: 42
+        dataset: *dataset_extendclen_loso
+        evaluation: *evaluation_defaults
+        output: *output_defaults
+        trajectory_filter: *trajectory_filter_defaults
+        texture_pretrain: *texture_pretrain_defaults
+        motion_pretrain: *motion_pretrain_defaults
+
+  - label: "01_nnunet_tabv6_rf"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tabv6_rf"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tab_v6_rf
+      segmentation: *seg_nnunet
+
+  - label: "02_nnunet_tabv6_xgboost"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tabv6_xgboost"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tab_v6_xgboost
+      segmentation: *seg_nnunet
+
+  - label: "03_nnunet_tabv6_tabpfn"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tabv6_tabpfn"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tab_v6_tabpfn
+      segmentation: *seg_nnunet
+
+  - label: "04_nnunet_tabv6lite_rf"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tabv6lite_rf"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tab_v6_lite_rf
+      segmentation: *seg_nnunet
+
+  - label: "05_nnunet_tabv6lite_xgboost"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tabv6lite_xgboost"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tab_v6_lite_xgboost
+      segmentation: *seg_nnunet
+
+  - label: "06_nnunet_tabv6lite_tabpfn"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tabv6lite_tabpfn"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tab_v6_lite_tabpfn
+      segmentation: *seg_nnunet
+
+  - label: "07_nnunet_tscv4_multirocket"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tscv4_multirocket"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tsc_v4_multirocket
+      segmentation: *seg_nnunet
+
+  - label: "08_nnunet_tscv4_patchtst"
+    config:
+      <<: *common_run
+      experiments:
+        - name: "nnunet_clahe_default_tscv4_patchtst"
+          preproc_scheme: "A"
+          pipeline: *pipeline_clahe_yolo26l
+      classification: *clf_tsc_v4_patchtst
+      segmentation: *seg_nnunet

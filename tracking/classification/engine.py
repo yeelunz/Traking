@@ -24,7 +24,8 @@ from . import classifiers as _load_classifiers  # noqa: F401
 from . import classifiers_limix as _load_classifiers_limix  # noqa: F401
 from . import fusion_modules as _load_fusion_modules  # noqa: F401
 from .fusion_modules import create_fusion_module, is_learnable_fusion_module
-from ..segmentation.dataset import attach_ground_truth_segmentation
+from .feature_extractors.v6 import precompute_depth_scale_lookup_for_videos
+from ..segmentation.dataset import attach_ground_truth_segmentation_full_trajectory
 from ..utils.annotations import load_coco_vid
 
 
@@ -35,6 +36,10 @@ _TEXTURE_BACKBONE_FEATURES = {
     "tab_v5_lite",
     "tab_v6",
     "tab_v6_lite",
+    "tab_v7",
+    "tab_v7_gd",
+    "tab_v7_dm",
+    "tab_v7_d",
     "tab_v2",
     "tab_v2_extend",
     "tsc_v2",
@@ -48,7 +53,52 @@ _MOTION_PRETRAIN_FEATURES = {
     "tab_v5_lite",
     "tab_v6",
     "tab_v6_lite",
+    "tab_v7",
+    "tab_v7_gm",
+    "tab_v7_dm",
+    "tab_v7_m",
 }
+
+_FEATURE_EXTRACTOR_ALIAS_MAP = {
+    "tab_latest": "tab_v7",
+    "tsc_latest": "tsc_v4",
+}
+
+_DATASET_DEPTH_SCALE_FEATURES = {
+    "tab_v7",
+    "tab_v7_gd",
+    "tab_v7_gm",
+    "tab_v7_dm",
+    "tab_v7_g",
+    "tab_v7_d",
+    "tab_v7_m",
+}
+
+
+def _canonical_feature_extractor_name(name: Any) -> str:
+    token = str(name or "basic").strip().lower()
+    if not token:
+        token = "basic"
+    return _FEATURE_EXTRACTOR_ALIAS_MAP.get(token, token)
+
+
+def _collect_video_paths_for_depth_scale_precompute(
+    train_video_paths: Sequence[str],
+    test_predictions: Dict[str, Dict[str, List[FramePrediction]]],
+) -> List[str]:
+    all_paths: set[str] = set()
+    for video_path in train_video_paths:
+        if video_path:
+            all_paths.add(str(video_path))
+
+    for per_model in (test_predictions or {}).values():
+        if not isinstance(per_model, dict):
+            continue
+        for video_path in per_model.keys():
+            if video_path:
+                all_paths.add(str(video_path))
+
+    return sorted(all_paths)
 
 
 def _normalise_subject_token(token: Optional[str]) -> Optional[str]:
@@ -69,6 +119,8 @@ def _normalise_subject_token(token: Optional[str]) -> Optional[str]:
 
 
 def _infer_texture_embedding_dim(feature_name: str, params: Dict[str, Any], tp_cfg: Dict[str, Any]) -> int:
+    feature_name = _canonical_feature_extractor_name(feature_name)
+
     if "embedding_dim" in tp_cfg:
         return int(tp_cfg.get("embedding_dim", 32))
     if "texture_dim" in params:
@@ -118,6 +170,10 @@ def _infer_texture_embedding_dim(feature_name: str, params: Dict[str, Any], tp_c
             return int(TAB_V5_LITE_TOTAL_DIM - len(TAB_V5_LITE_MOTION_KEYS))
         except Exception:
             return 15
+    if feature_name in {"tab_v7", "tab_v7_gd", "tab_v7_dm", "tab_v7_d"}:
+        return 8
+    if feature_name in {"tab_v7_gm", "tab_v7_g", "tab_v7_m"}:
+        return 0
     if feature_name == "tsc_v3_pro":
         try:
             from .feature_extractors_v3pro_tsc import N_TEX_CHANNELS_V3PRO
@@ -127,11 +183,11 @@ def _infer_texture_embedding_dim(feature_name: str, params: Dict[str, Any], tp_c
             return 3
     if feature_name == "tsc_v4":
         try:
-            from .feature_extractors_v3pro_tsc import N_TEX_CHANNELS_V3PRO
+            from .feature_extractors_v4_tsc import N_TEX_CHANNELS_V4
 
-            return int(N_TEX_CHANNELS_V3PRO)
+            return int(N_TEX_CHANNELS_V4)
         except Exception:
-            return 3
+            return 5
     if feature_name == "tab_v2":
         try:
             from .feature_extractors import MOTION_FEATURE_KEYS
@@ -386,7 +442,7 @@ def _collect_feature_importance_payload(
     return payload or None
 
 
-def _crop_roi_safe(frame, bbox, pad_ratio: float = 0.15):
+def _crop_roi_safe(frame, bbox, pad_ratio: float = 0.2):
     if frame is None or bbox is None or len(bbox) != 4:
         return None
     h_img, w_img = frame.shape[:2]
@@ -480,7 +536,8 @@ def _inject_runtime_preprocessing_into_feature_cfg(
     classification config.
     """
     cfg = dict(feature_cfg or {})
-    feature_name = str(cfg.get("name", "")).strip().lower()
+    feature_name = _canonical_feature_extractor_name(cfg.get("name", ""))
+    cfg["name"] = feature_name
     if feature_name not in _TEXTURE_BACKBONE_FEATURES:
         return cfg
 
@@ -507,7 +564,7 @@ def _normalise_texture_mode_engine(mode: Any) -> str:
 def _infer_texture_roi_pad_ratio_default(params: Dict[str, Any]) -> float:
     mode = _normalise_texture_mode_engine(params.get("texture_mode", "freeze"))
     pretrained_enabled = mode == "pretrain" or bool(params.get("pretrained_backbone", True))
-    return 0.15 if pretrained_enabled else 0.0
+    return 0.2 if pretrained_enabled else 0.0
 
 
 def _resolve_texture_roi_pad_ratio(
@@ -529,7 +586,8 @@ def _resolve_texture_roi_pad_ratio(
 
 def _inject_texture_roi_pad_ratio_default(feature_cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg = dict(feature_cfg or {})
-    feature_name = str(cfg.get("name", "")).strip().lower()
+    feature_name = _canonical_feature_extractor_name(cfg.get("name", ""))
+    cfg["name"] = feature_name
     if feature_name not in _TEXTURE_BACKBONE_FEATURES:
         return cfg
 
@@ -601,20 +659,22 @@ def _ensure_texture_pretrain_ckpt(
     results_dir: str,
     logger: Callable[[str], None],
 ) -> Dict[str, any]:  # noqa: ANN001
-    feature_name = str((feature_cfg or {}).get("name", "")).strip().lower()
-    params = dict((feature_cfg or {}).get("params") or {})
+    cfg = dict(feature_cfg or {})
+    feature_name = _canonical_feature_extractor_name(cfg.get("name", ""))
+    cfg["name"] = feature_name
+    params = dict(cfg.get("params") or {})
 
     if feature_name not in _TEXTURE_BACKBONE_FEATURES:
-        return feature_cfg
+        return cfg
 
     mode = str(params.get("texture_mode", "")).strip().lower()
 
     if mode != "pretrain":
-        return feature_cfg
+        return cfg
 
     ckpt = params.get("texture_pretrain_ckpt")
     if isinstance(ckpt, str) and ckpt.strip() and os.path.exists(ckpt):
-        return feature_cfg
+        return cfg
 
     logger(
         "[Classification] texture_mode=pretrain detected without valid checkpoint; "
@@ -802,7 +862,7 @@ def _ensure_texture_pretrain_ckpt(
     if summary.get("cache_key"):
         logger(f"[Classification] Auto texture pretrain cache_key={summary.get('cache_key')}")
 
-    updated = dict(feature_cfg)
+    updated = dict(cfg)
     updated["params"] = params
     return updated
 
@@ -1017,10 +1077,12 @@ def _ensure_motion_pretrain_ckpt(
     results_dir: str,
     logger: Callable[[str], None],
 ) -> Dict[str, any]:  # noqa: ANN001
-    feature_name = str((feature_cfg or {}).get("name", "")).strip().lower()
-    params = dict((feature_cfg or {}).get("params") or {})
+    cfg = dict(feature_cfg or {})
+    feature_name = _canonical_feature_extractor_name(cfg.get("name", ""))
+    cfg["name"] = feature_name
+    params = dict(cfg.get("params") or {})
     if feature_name not in _MOTION_PRETRAIN_FEATURES:
-        return feature_cfg
+        return cfg
 
     feature_cls = FEATURE_EXTRACTOR_REGISTRY.get(feature_name)
     if feature_cls is None:
@@ -1030,11 +1092,11 @@ def _ensure_motion_pretrain_ckpt(
 
     mode = _normalise_motion_mode_engine(effective_params.get("motion_mode", "freeze"))
     if mode != "pretrain":
-        return feature_cfg
+        return cfg
 
     ckpt = params.get("motion_pretrain_ckpt")
     if isinstance(ckpt, str) and ckpt.strip() and os.path.exists(ckpt):
-        return feature_cfg
+        return cfg
 
     mp_cfg = dict((classification_cfg or {}).get("motion_pretrain") or {})
     cache_enabled = bool(mp_cfg.get("cache_enabled", True))
@@ -1054,7 +1116,7 @@ def _ensure_motion_pretrain_ckpt(
     if cache_enabled and cache_path.exists():
         params["motion_mode"] = "pretrain"
         params["motion_pretrain_ckpt"] = str(cache_path)
-        updated = dict(feature_cfg)
+        updated = dict(cfg)
         updated["params"] = params
         logger(f"[Classification] Auto MOMENT motion pretrain cache hit: ckpt={cache_path}")
         logger(f"[Classification] Auto MOMENT motion pretrain cache_key={cache_key}")
@@ -1164,7 +1226,7 @@ def _ensure_motion_pretrain_ckpt(
 
     params["motion_mode"] = "pretrain"
     params["motion_pretrain_ckpt"] = str(cache_path)
-    updated = dict(feature_cfg)
+    updated = dict(cfg)
     updated["params"] = params
     logger(
         "[Classification] Auto MOMENT motion pretrain ready: "
@@ -1630,7 +1692,9 @@ def _run_subject_classification_impl(
     feature_cfg = config.get("feature_extractor", {"name": "basic", "params": {}})
     feature_cfg = _inject_runtime_preprocessing_into_feature_cfg(config, feature_cfg)
     feature_cfg = _inject_texture_roi_pad_ratio_default(feature_cfg)
-    feature_name = feature_cfg.get("name", "basic")
+    feature_name = _canonical_feature_extractor_name(feature_cfg.get("name", "basic"))
+    feature_cfg = dict(feature_cfg)
+    feature_cfg["name"] = feature_name
     feature_cls = FEATURE_EXTRACTOR_REGISTRY.get(feature_name)
     if feature_cls is None:
         raise KeyError(f"Unknown feature extractor: {feature_name}")
@@ -1746,6 +1810,27 @@ def _run_subject_classification_impl(
         video_path = item.get("video_path")
         if video_path:
             train_video_paths.append(video_path)
+
+    if feature_name in _DATASET_DEPTH_SCALE_FEATURES:
+        depth_scale_video_paths = _collect_video_paths_for_depth_scale_precompute(
+            train_video_paths,
+            test_predictions,
+        )
+        depth_scale_lookup = precompute_depth_scale_lookup_for_videos(
+            depth_scale_video_paths,
+            logger=logger,
+        )
+        feature_params = dict(feature_cfg.get("params") or {})
+        feature_params["depth_scale_lookup"] = depth_scale_lookup
+        feature_params["depth_scale_lookup_strict"] = True
+        feature_cfg = dict(feature_cfg)
+        feature_cfg["params"] = feature_params
+        feature_extractor = feature_cls(feature_params)
+        logger(
+            "[Classification] tab_v7 dataset scale-lookup enabled "
+            f"(entries={len(depth_scale_lookup)}, strict=True)"
+        )
+
     train_annotations = _load_annotations_for_videos(train_video_paths)
 
     # The classification stage does NOT train its own segmentation model.
@@ -1758,10 +1843,16 @@ def _run_subject_classification_impl(
 
     train_videos: Dict[str, List[FramePrediction]] = {}
     for video_path, annotation in train_annotations.items():
-        samples = attach_ground_truth_segmentation(annotation, dataset_root, video_path=video_path)
+        samples = attach_ground_truth_segmentation_full_trajectory(
+            annotation,
+            dataset_root,
+            video_path=video_path,
+        )
         if samples:
             train_videos[video_path] = samples
-    logger(f"[Classification] Prepared GT segmentation trajectories for {len(train_videos)} train videos")
+    logger(
+        f"[Classification] Prepared GT full-trajectory training samples for {len(train_videos)} train videos"
+    )
 
     # ── GT trajectory smoothing ──────────────────────────────────────────
     # Ground-truth bboxes are clean (no tracking noise), so we skip the

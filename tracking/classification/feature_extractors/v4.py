@@ -281,7 +281,7 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "n_texture_frames": 5,
         "texture_image_size": 96,
-        "roi_pad_ratio": 0.15,
+        "roi_pad_ratio": 0.2,
         "texture_pooling": "score_weighted",  # mean | score_weighted
         "texture_pooling_weight_source": "detection_score",  # detection_score | confidence | iou_pred
         "texture_mode": "freeze",  # freeze | learnable | pretrain
@@ -295,7 +295,7 @@ class MotionStaticV4FeatureExtractor(TrajectoryFeatureExtractor):
         cfg = {**self.DEFAULT_CONFIG, **(params or {})}
         self._n_texture_frames = int(cfg.get("n_texture_frames", 5))
         self._texture_image_size = int(cfg.get("texture_image_size", 96))
-        self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.15))
+        self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.2))
         self._texture_pooling = _normalize_texture_pooling(str(cfg.get("texture_pooling", "score_weighted")))
         self._texture_pooling_weight_source = _normalize_texture_weight_source(
             str(cfg.get("texture_pooling_weight_source", "detection_score"))

@@ -122,7 +122,7 @@ class TimeSeriesV3ProFeatureExtractor(TrajectoryFeatureExtractor):
         "texture_dim": 32,
         "texture_pretrain_ckpt": None,
         "texture_image_size": 96,
-        "roi_pad_ratio": 0.15,
+        "roi_pad_ratio": 0.2,
         "texture_batch_size": 64,
         "texture_device": "auto",
     }
@@ -152,7 +152,7 @@ class TimeSeriesV3ProFeatureExtractor(TrajectoryFeatureExtractor):
             self._texture_dim = N_TEX_CHANNELS_V3PRO
         self._texture_pretrain_ckpt = cfg.get("texture_pretrain_ckpt")
         self._texture_image_size = int(cfg.get("texture_image_size", 96))
-        self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.15))
+        self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.2))
         self._texture_batch_size = int(cfg.get("texture_batch_size", 64))
         self._texture_device = str(cfg.get("texture_device", "auto"))
         _runtime_pp = dict(cfg.get("_runtime_texture_preprocessing") or {})

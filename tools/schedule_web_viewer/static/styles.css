@@ -18,6 +18,12 @@ header {
   background: #151822;
 }
 
+header .actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
 header h1 {
   margin: 0;
   font-size: 1.5rem;
@@ -59,6 +65,15 @@ button.ghost-button.compact {
 button.ghost-button:hover {
   background: rgba(63, 140, 255, 0.12);
   color: #ffffff;
+}
+
+button#force-refresh-btn {
+  border-color: #66dfc5;
+  color: #b9fff0;
+}
+
+button#force-refresh-btn:hover {
+  background: rgba(102, 223, 197, 0.12);
 }
 
 .layout {
@@ -977,6 +992,11 @@ table td {
   padding: 0.4rem 0.5rem;
 }
 
+#classification-video-stats {
+  margin-top: 0.2rem;
+  margin-bottom: 0.45rem;
+}
+
 .pred-correct td:last-child {
   color: #51cf66;
   font-weight: 600;
@@ -989,4 +1009,8 @@ table td {
 
 .pred-wrong {
   background: rgba(255, 107, 107, 0.06);
+}
+
+.pred-correct {
+  background: rgba(81, 207, 102, 0.05);
 }

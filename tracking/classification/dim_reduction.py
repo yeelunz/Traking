@@ -51,7 +51,7 @@ try:
     import torch
     import torch.nn as nn
     _TORCH_OK = True
-except ImportError:
+except Exception:  # noqa: BLE001
     torch = None   # type: ignore[assignment]
     nn = None      # type: ignore[assignment]
 

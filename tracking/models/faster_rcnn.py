@@ -10,9 +10,10 @@ try:
     import torch
     import torchvision
 except Exception as e:
-    _TORCH_TV_IMPORT_ERROR = e
-    torch = None  # type: ignore
-    torchvision = None  # type: ignore
+    raise ImportError(
+        "Failed to import torch/torchvision for tracking.models.faster_rcnn. "
+        "Install torch and torchvision."
+    ) from e
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule, Dataset
 from ..core.registry import register_model
@@ -54,9 +55,6 @@ class FasterRCNNModel(TrackingModel):
     }
 
     def __init__(self, config: Dict[str, Any]):
-        if torch is None or torchvision is None:
-            detail = f" underlying import error: {_TORCH_TV_IMPORT_ERROR!r}" if _TORCH_TV_IMPORT_ERROR else ""
-            raise RuntimeError(f"PyTorch and torchvision are required for FasterRCNN model.{detail}")
         self.score_thresh = float(config.get("score_thresh", self.DEFAULT_CONFIG["score_thresh"]))
         self.device = str(config.get("device", self.DEFAULT_CONFIG["device"]))
         self.pretrained = bool(config.get("pretrained", self.DEFAULT_CONFIG["pretrained"]))

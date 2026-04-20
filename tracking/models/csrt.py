@@ -4,8 +4,10 @@ import os
 
 try:
     import cv2  # type: ignore
-except Exception:
-    cv2 = None  # type: ignore
+except Exception as exc:
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.csrt. Install opencv-python (or opencv-contrib-python for CSRT)."
+    ) from exc
 import numpy as np
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
@@ -30,8 +32,6 @@ class CSRTTracker(TrackingModel):
     }
 
     def __init__(self, config: Dict[str, Any]):
-        if cv2 is None:
-            raise RuntimeError("OpenCV is required for CSRT tracker.")
         # CSRT requires contrib tracker; check presence of any known factory variant
         has_any = (
             (hasattr(cv2, "legacy") and (hasattr(cv2.legacy, "TrackerCSRT_create") or hasattr(cv2.legacy, "TrackerCSRT")))

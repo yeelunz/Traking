@@ -226,7 +226,7 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
 
         self.seg_padding_min = NoWheelDoubleSpinBox(); self.seg_padding_min.setRange(0.0, 0.5); self.seg_padding_min.setDecimals(3); self.seg_padding_min.setValue(0.10); self.seg_padding_min.valueChanged.connect(self._on_builder_changed)
         self.seg_padding_max = NoWheelDoubleSpinBox(); self.seg_padding_max.setRange(0.0, 0.5); self.seg_padding_max.setDecimals(3); self.seg_padding_max.setValue(0.15); self.seg_padding_max.valueChanged.connect(self._on_builder_changed)
-        self.seg_padding_inf = NoWheelDoubleSpinBox(); self.seg_padding_inf.setRange(0.0, 0.5); self.seg_padding_inf.setDecimals(3); self.seg_padding_inf.setValue(0.15); self.seg_padding_inf.valueChanged.connect(self._on_builder_changed)
+        self.seg_padding_inf = NoWheelDoubleSpinBox(); self.seg_padding_inf.setRange(0.0, 0.5); self.seg_padding_inf.setDecimals(3); self.seg_padding_inf.setValue(0.20); self.seg_padding_inf.valueChanged.connect(self._on_builder_changed)
         self.seg_jitter = NoWheelDoubleSpinBox(); self.seg_jitter.setRange(0.0, 0.5); self.seg_jitter.setDecimals(3); self.seg_jitter.setValue(0.05); self.seg_jitter.valueChanged.connect(self._on_builder_changed)
         seg_form.addRow("Train padding min", self.seg_padding_min)
         seg_form.addRow("Train padding max", self.seg_padding_max)
@@ -359,6 +359,11 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
             self.combo_class_classifier.addItem(name)
         self.combo_class_classifier.currentIndexChanged.connect(self._on_class_classifier_index_changed)
         form_class_basic.addRow("Classifier", self.combo_class_classifier)
+
+        self.chk_class_rev_opt = QCheckBox("啟用 rev_opt")
+        self.chk_class_rev_opt.setChecked(True)
+        self.chk_class_rev_opt.stateChanged.connect(self._on_builder_changed)
+        form_class_basic.addRow("Rev Opt", self.chk_class_rev_opt)
 
         vb_class.addLayout(form_class_basic)
 
@@ -658,6 +663,7 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
         fallback_classifier = classifier_name or (self.combo_class_classifier.itemText(0) if self.combo_class_classifier.count() else 'random_forest')
         class_cfg: Dict[str, Any] = {
             'enabled': class_enabled,
+            'rev_opt': bool(self.chk_class_rev_opt.isChecked()),
             'feature_extractor': {
                 'name': fallback_feature,
                 'params': feature_params,
@@ -953,6 +959,10 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
         self.chk_class_enabled.blockSignals(True)
         self.chk_class_enabled.setChecked(bool(class_cfg.get('enabled', self.chk_class_enabled.isChecked())))
         self.chk_class_enabled.blockSignals(False)
+
+        self.chk_class_rev_opt.blockSignals(True)
+        self.chk_class_rev_opt.setChecked(bool(class_cfg.get('rev_opt', self.chk_class_rev_opt.isChecked())))
+        self.chk_class_rev_opt.blockSignals(False)
 
         label_file = class_cfg.get('label_file')
         self.edit_class_label.blockSignals(True)
@@ -1424,6 +1434,7 @@ class SimpleRunnerUI(QMainWindow, QueueMixin):
             getattr(self, 'btn_class_label', None),
             getattr(self, 'combo_class_feature', None),
             getattr(self, 'combo_class_classifier', None),
+            getattr(self, 'chk_class_rev_opt', None),
             getattr(self, 'gb_class_feat', None),
             getattr(self, 'gb_class_clf', None),
             getattr(self, 'chk_seg_enabled', None),

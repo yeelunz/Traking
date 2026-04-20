@@ -13,23 +13,20 @@ try:  # pragma: no cover - optional dependency guard
     from sklearn.svm import SVC
     from sklearn.tree import DecisionTreeClassifier
 except Exception as exc:  # noqa: BLE001
-    RandomForestClassifier = None  # type: ignore
-    BaseEstimator = object  # type: ignore
-    TransformerMixin = object  # type: ignore
-    KNNImputer = None  # type: ignore
-    SimpleImputer = None  # type: ignore
-    Pipeline = None  # type: ignore
-    SVC = None  # type: ignore
-    DecisionTreeClassifier = None  # type: ignore
-    _SKLEARN_IMPORT_ERROR = exc
+    raise ImportError(
+        "Failed to import scikit-learn dependencies for tracking.classification.classifiers.base. "
+        "Install scikit-learn."
+    ) from exc
 else:
     _SKLEARN_IMPORT_ERROR = None
 
 try:  # pragma: no cover - optional dependency guard
     from lightgbm import LGBMClassifier  # type: ignore[import-not-found]
 except Exception as exc:  # noqa: BLE001
-    LGBMClassifier = None  # type: ignore
-    _LIGHTGBM_IMPORT_ERROR = exc
+    raise ImportError(
+        "Failed to import lightgbm for tracking.classification.classifiers.base. "
+        "Install lightgbm."
+    ) from exc
 else:
     _LIGHTGBM_IMPORT_ERROR = None
 

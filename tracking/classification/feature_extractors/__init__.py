@@ -7,3 +7,6 @@ from . import v3pro as _load_v3pro  # noqa: F401
 from . import v3pro_tsc as _load_v3pro_tsc  # noqa: F401
 from . import v4 as _load_v4  # noqa: F401
 from . import v5 as _load_v5  # noqa: F401
+from . import v6 as _load_v6  # noqa: F401
+from . import v7 as _load_v7  # noqa: F401
+from . import v4_tsc as _load_v4_tsc  # noqa: F401

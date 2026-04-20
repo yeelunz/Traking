@@ -9,30 +9,33 @@ import math
 try:
     import cv2  # type: ignore
 except Exception as ex:  # pragma: no cover - ensure graceful failure in minimal environments
-    cv2 = None  # type: ignore
-    _CV2_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.strongsort. Install opencv-python."
+    ) from ex
 
 try:  # Ultralytics YOLO detector (for per-frame detections)
     from ultralytics import YOLO  # type: ignore
 except Exception as ex:  # pragma: no cover - optional dependency
-    YOLO = None  # type: ignore
-    _YOLO_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import ultralytics for tracking.models.strongsort. Install ultralytics."
+    ) from ex
 
 try:  # PyTorch is required by Ultralytics
     import torch
 except Exception as ex:  # pragma: no cover
-    torch = None  # type: ignore
-    _TORCH_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import torch for tracking.models.strongsort. Install torch."
+    ) from ex
 
 try:  # StrongSORT core components cloned under libs/
     from libs.StrongSORT.deep_sort import nn_matching  # type: ignore
     from libs.StrongSORT.deep_sort.detection import Detection  # type: ignore
     from libs.StrongSORT.deep_sort.tracker import Tracker as StrongSortCore  # type: ignore
 except Exception as ex:  # pragma: no cover - make failure explicit at runtime
-    nn_matching = None  # type: ignore
-    Detection = None  # type: ignore
-    StrongSortCore = None  # type: ignore
-    _STRONGSORT_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import StrongSORT dependencies for tracking.models.strongsort. "
+        "Ensure libs/StrongSORT is available and importable."
+    ) from ex
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model

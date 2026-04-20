@@ -58,3 +58,24 @@ dataset/
 .cache/
 tmp/
 temp/
+
+# --- Training intermediate outputs ---
+tmp_seg_writeback_check/
+tmp_seg_*/
+tmp_*/
+
+# --- Checkpoint / pretrain caches ---
+ckpt/motion_pretrain_cache/
+ckpt/texture_pretrain_cache/
+
+# --- Legacy data ---
+legacy_dataset/
+legacy_result/
+
+# --- Benchmark / analysis intermediate JSONs ---
+analysis/*_benchmark*.json
+analysis/*_merged*.json
+analysis/depth_scale_control*.json
+
+# --- Misc numeric/unnamed temp files ---
+1.26

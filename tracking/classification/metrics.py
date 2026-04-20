@@ -11,12 +11,10 @@ try:  # pragma: no cover - optional dependency guard
         roc_auc_score,
     )
 except Exception as exc:  # noqa: BLE001
-    accuracy_score = None  # type: ignore
-    balanced_accuracy_score = None  # type: ignore
-    confusion_matrix = None  # type: ignore
-    precision_recall_fscore_support = None  # type: ignore
-    roc_auc_score = None  # type: ignore
-    _IMPORT_ERROR = exc
+    raise ImportError(
+        "Failed to import scikit-learn metrics for tracking.classification.metrics. "
+        "Install scikit-learn."
+    ) from exc
 else:
     _IMPORT_ERROR = None
 

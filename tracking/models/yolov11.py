@@ -1,6 +1,10 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
+import copy
+import gc
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
@@ -9,8 +13,9 @@ _ULTRA_IMPORT_ERROR: Optional[Exception] = None
 try:
     from ultralytics import YOLO  # type: ignore
 except Exception as e:  # pragma: no cover - environment without ultralytics
-    _ULTRA_IMPORT_ERROR = e
-    YOLO = None  # type: ignore
+    raise ImportError(
+        "Failed to import ultralytics for tracking.models.yolov11. Install ultralytics."
+    ) from e
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
 from ..core.registry import register_model
@@ -45,15 +50,11 @@ class YOLOv11Model(TrackingModel):
         "batch": 8,
         "lr0": 0.01,
         "patience": 50,
-        "workers": 0,           # Windows 建議 0 以避免多程序問題
+        "workers": 8,
         "include_empty_frames": False,
     }
 
     def __init__(self, config: Dict[str, Any]):
-        if YOLO is None:
-            detail = f" underlying import error: {_ULTRA_IMPORT_ERROR!r}" if _ULTRA_IMPORT_ERROR else ""
-            raise RuntimeError(f"Ultralytics 'ultralytics' package is required for YOLOv11 model.{detail}")
-
         # --- Config params ---
         self.weights = str(config.get("weights", self.DEFAULT_CONFIG["weights"]))
         self._weights_path = resolve_weights_path(self.weights)
@@ -79,6 +80,8 @@ class YOLOv11Model(TrackingModel):
         self.patience = int(config.get("patience", self.DEFAULT_CONFIG["patience"]))
         self.workers = int(config.get("workers", self.DEFAULT_CONFIG["workers"]))
         self.train_enabled = bool(config.get("train_enabled", self.DEFAULT_CONFIG["train_enabled"]))
+        self.export_workers = int(config.get("export_workers", 0))
+        self.train_cache = bool(config.get("train_cache", False))
 
         # --- Runtime-injected preproc chain ---
         self.preprocs: List[PreprocessingModule] = []
@@ -222,16 +225,18 @@ class YOLOv11Model(TrackingModel):
         def _apply_preprocs_np_with_bboxes(
             frame_bgr: np.ndarray,
             bboxes: List[tuple],
+            preprocs_override: Optional[List[PreprocessingModule]] = None,
         ) -> tuple[np.ndarray, List[tuple]]:
             import cv2
             if frame_bgr is not None and frame_bgr.ndim == 3:
                 _g = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
                 frame_bgr = cv2.cvtColor(_g, cv2.COLOR_GRAY2BGR)
-            if not self.preprocs:
+            active_preprocs = self.preprocs if preprocs_override is None else preprocs_override
+            if not active_preprocs:
                 return frame_bgr, list(bboxes or [])
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             out_bboxes: List[tuple] = list(bboxes or [])
-            for p in self.preprocs:
+            for p in active_preprocs:
                 if hasattr(p, "apply_to_frame_and_bboxes"):
                     rgb, out_bboxes = p.apply_to_frame_and_bboxes(rgb, out_bboxes)
                 elif hasattr(p, "apply_to_frame_and_bbox"):
@@ -240,6 +245,30 @@ class YOLOv11Model(TrackingModel):
                 else:
                     rgb = p.apply_to_frame(rgb)
             return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), out_bboxes
+
+        def _clone_preprocs_for_worker() -> Optional[List[PreprocessingModule]]:
+            if not self.preprocs:
+                return []
+            cloned: List[PreprocessingModule] = []
+            for p in self.preprocs:
+                try:
+                    # OpenCV CLAHE objects are not reliably deepcopy-able.
+                    if p.__class__.__name__.lower() == "clahe" and hasattr(p, "clahe"):
+                        clip_limit = float(p.clahe.getClipLimit())
+                        tile_grid = p.clahe.getTilesGridSize()
+                        cloned.append(
+                            p.__class__(
+                                {
+                                    "clipLimit": clip_limit,
+                                    "tileGridSize": [int(tile_grid[0]), int(tile_grid[1])],
+                                }
+                            )
+                        )
+                    else:
+                        cloned.append(copy.deepcopy(p))
+                except Exception:
+                    return None
+            return cloned
 
         def _coco_to_yolo(bbox, w: int, h: int):
             # bbox: (x,y,w,h) in pixels -> YOLO normalized (xc,yc,w,h)
@@ -264,29 +293,76 @@ class YOLOv11Model(TrackingModel):
             import cv2
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                return []
-            out = []
+                return
+            prev_fi = -2
             try:
                 for fi in sorted(set(int(i) for i in frame_indices)):
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+                    if fi != (prev_fi + 1):
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
                     ok, frame = cap.read()
                     if not ok:
+                        prev_fi = int(fi)
                         continue
-                    out.append((fi, frame))
+                    prev_fi = int(fi)
+                    yield (fi, frame)
             finally:
                 cap.release()
-            return out
 
-        def _export_split(dataset, img_dir: str, lbl_dir: str) -> int:
+        def _resolve_mask_abs_path(
+            video_path: str,
+            ann_info: Optional[Dict[str, Any]],
+            mask_path: Optional[str],
+        ) -> Optional[str]:
+            if not isinstance(mask_path, str) or not mask_path.strip():
+                return None
+
+            raw_mask = mask_path.strip()
+            norm_mask = raw_mask.replace("/", os.sep).replace("\\", os.sep)
+
+            candidates: List[str] = []
+            if os.path.isabs(norm_mask):
+                candidates.append(os.path.normpath(norm_mask))
+
+            info = ann_info or {}
+            info_mask_root = info.get("mask_root") if isinstance(info, dict) else None
+            bases: List[str] = [os.path.dirname(os.path.abspath(video_path))]
+            if isinstance(info_mask_root, str) and info_mask_root.strip():
+                bases.append(info_mask_root.strip())
+
+            for base in bases:
+                candidates.append(os.path.normpath(os.path.join(base, norm_mask)))
+
+            # Also try dropping leading path components in case stored mask_path
+            # includes a dataset-level prefix not present in the current workspace.
+            parts = [p for p in norm_mask.replace("\\", "/").split("/") if p and p != "."]
+            if len(parts) > 1:
+                for skip in range(1, len(parts)):
+                    tail = os.path.join(*parts[skip:])
+                    for base in bases:
+                        candidates.append(os.path.normpath(os.path.join(base, tail)))
+
+            seen = set()
+            for candidate in candidates:
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                if os.path.isfile(candidate):
+                    return candidate
+            return None
+
+        def _export_split(dataset, img_dir: str, lbl_dir: str) -> Tuple[int, int]:
             from ..utils.annotations import load_coco_vid
             import cv2
             count = 0
+            skipped_missing_mask = 0
             include_empty = bool(getattr(self, "include_empty_frames", False))
+            jobs: List[Tuple[str, Dict[int, List[Dict[str, Any]]]]] = []
+
             for i in range(len(dataset)):
                 item = dataset[i]
                 vp: str = item["video_path"]
                 # Load annotations (prefer in-memory)
-                frames = {}
+                frames: Dict[int, List[Dict[str, Any]]] = {}
                 ann_raw = item.get("annotation") if isinstance(item, dict) else None
                 if isinstance(ann_raw, dict) and ann_raw:
                     try:
@@ -306,7 +382,15 @@ class YOLOv11Model(TrackingModel):
                             fi = img_to_frame.get(img_id)
                             if fi is None:
                                 continue
-                            frames.setdefault(fi, []).append(tuple(bbox))
+                            mask_path = ann.get("mask_path")
+                            if mask_path is not None and _resolve_mask_abs_path(
+                                vp,
+                                ann_raw.get("info") if isinstance(ann_raw.get("info"), dict) else None,
+                                mask_path,
+                            ) is None:
+                                skipped_missing_mask += 1
+                                continue
+                            frames.setdefault(fi, []).append({"bbox": tuple(bbox), "mask_path": mask_path})
                     except Exception:
                         frames = {}
                 if not frames:
@@ -314,21 +398,81 @@ class YOLOv11Model(TrackingModel):
                     if not os.path.exists(j):
                         continue
                     ann = load_coco_vid(j)
-                    frames = ann.get("frames", {})
-                    if not include_empty:
-                        frames = {int(k): v for k, v in frames.items() if v}
+                    raw_info = {}
+                    try:
+                        raw_info = (ann.get("raw") or {}).get("info") or {}
+                    except Exception:
+                        raw_info = {}
+
+                    frame_ann = ann.get("frame_annotations", {}) or {}
+                    for fi_raw, records in frame_ann.items():
+                        try:
+                            fi_int = int(fi_raw)
+                        except Exception:
+                            continue
+                        if include_empty:
+                            frames.setdefault(fi_int, [])
+                        for rec in records or []:
+                            bbox = rec.get("bbox")
+                            if bbox is None:
+                                continue
+                            mask_path = rec.get("mask_path")
+                            if mask_path is not None and _resolve_mask_abs_path(vp, raw_info, mask_path) is None:
+                                skipped_missing_mask += 1
+                                continue
+                            frames.setdefault(fi_int, []).append({"bbox": tuple(bbox), "mask_path": mask_path})
+
+                    # Compatibility fallback for annotations without frame_annotations.
+                    if not frames:
+                        raw_frames = ann.get("frames", {}) or {}
+                        if include_empty:
+                            for fi_raw in raw_frames.keys():
+                                try:
+                                    frames.setdefault(int(fi_raw), [])
+                                except Exception:
+                                    continue
+                        for fi_raw, bboxes in raw_frames.items():
+                            try:
+                                fi_int = int(fi_raw)
+                            except Exception:
+                                continue
+                            if not bboxes and not include_empty:
+                                continue
+                            for bbox in bboxes or []:
+                                frames.setdefault(fi_int, []).append({"bbox": tuple(bbox), "mask_path": None})
 
                 # Extract and write
                 if not frames:
                     continue
-                # Collect desired frame indices
-                fids = list(frames.keys())
-                # Read frames
-                read = _iter_video_frames(vp, fids)
-                for (fi, frame) in read:
+                jobs.append((vp, frames))
+
+            worker_count = int(getattr(self, "export_workers", 0) or 0)
+            if worker_count <= 0:
+                worker_count = min(16, max(1, int(os.cpu_count() or 1)))
+            worker_count = min(worker_count, max(1, len(jobs)))
+
+            preprocs_threadlocal = threading.local()
+
+            def _resolve_thread_preprocs() -> Optional[List[PreprocessingModule]]:
+                cached = getattr(preprocs_threadlocal, "preprocs", None)
+                if cached is not None:
+                    return cached
+                cloned = _clone_preprocs_for_worker()
+                preprocs_threadlocal.preprocs = cloned
+                return cloned
+
+            def _export_job(vp: str, frames: Dict[int, List[Dict[str, Any]]]) -> int:
+                local_count = 0
+                thread_preprocs = _resolve_thread_preprocs()
+                for (fi, frame) in _iter_video_frames(vp, list(frames.keys())):
                     # apply preproc and save image (+ update bboxes if needed)
-                    bboxes = frames.get(fi) or []
-                    frame, bboxes = _apply_preprocs_np_with_bboxes(frame, list(bboxes))
+                    frame_records = frames.get(fi) or []
+                    bboxes = [tuple(rec.get("bbox")) for rec in frame_records if rec.get("bbox") is not None]
+                    frame, bboxes = _apply_preprocs_np_with_bboxes(
+                        frame,
+                        list(bboxes),
+                        preprocs_override=thread_preprocs,
+                    )
                     h, w = frame.shape[:2]
                     stem = f"{os.path.splitext(os.path.basename(vp))[0]}_f{int(fi):06d}"
                     img_path = os.path.join(img_dir, stem + ".jpg")
@@ -351,14 +495,34 @@ class YOLOv11Model(TrackingModel):
                             f.write("\n".join(lines))
                     except Exception:
                         pass
-                    count += 1
-            return count
+                    local_count += 1
+                    del frame
+                return local_count
 
-        n_train = _export_split(train_dataset, train_img_dir, train_lbl_dir)
+            if worker_count <= 1:
+                for vp, frames in jobs:
+                    count += _export_job(vp, frames)
+            else:
+                # If preprocessing modules cannot be cloned safely, fall back to
+                # serial export to avoid shared-state races.
+                if self.preprocs and _clone_preprocs_for_worker() is None:
+                    for vp, frames in jobs:
+                        count += _export_job(vp, frames)
+                else:
+                    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                        futures = [ex.submit(_export_job, vp, frames) for vp, frames in jobs]
+                        for fut in as_completed(futures):
+                            try:
+                                count += int(fut.result())
+                            except Exception:
+                                continue
+            return count, skipped_missing_mask
+
+        n_train, n_train_skipped_missing_mask = _export_split(train_dataset, train_img_dir, train_lbl_dir)
         if val_dataset is None:
             # fallback: use train as val to keep training loop valid
             val_dataset = train_dataset
-        n_val = _export_split(val_dataset, val_img_dir, val_lbl_dir)
+        n_val, n_val_skipped_missing_mask = _export_split(val_dataset, val_img_dir, val_lbl_dir)
 
         # Build data.yaml for Ultralytics
         data_yaml = os.path.join(ds_root, "data.yaml")
@@ -418,6 +582,7 @@ class YOLOv11Model(TrackingModel):
                 lr0=lr0,
                 patience=patience,
                 workers=workers,
+                cache=bool(getattr(self, "train_cache", False)),
                 project=base_out,
                 name=run_name,
                 exist_ok=True,
@@ -437,10 +602,25 @@ class YOLOv11Model(TrackingModel):
         except Exception:
             pass
 
+        # Explicit cleanup after training to reduce peak RSS/VRAM retention.
+        try:
+            del results
+        except Exception:
+            pass
+        gc.collect()
+        try:
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         return {
             "status": "ok",
             "train_images": n_train,
             "val_images": n_val,
+            "train_skipped_missing_mask_boxes": int(n_train_skipped_missing_mask),
+            "val_skipped_missing_mask_boxes": int(n_val_skipped_missing_mask),
             "best_ckpt": best_ckpt,
         }
 

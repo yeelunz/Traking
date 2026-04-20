@@ -13,14 +13,16 @@ import numpy as np
 try:
     import cv2  # type: ignore
 except Exception as ex:  # pragma: no cover - ensure graceful failure where OpenCV is unavailable
-    cv2 = None  # type: ignore
-    _CV2_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.tomp. Install opencv-python."
+    ) from ex
 
 try:
     import torch
 except Exception as ex:  # pragma: no cover - keep explicit error messaging if Torch missing
-    torch = None  # type: ignore
-    _TORCH_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import torch for tracking.models.tomp. Install torch."
+    ) from ex
 
 # Ensure the bundled pytracking checkout is importable
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -34,10 +36,10 @@ try:  # pytracking runtime
     from pytracking.utils.params import TrackerParams as _TrackerParams  # type: ignore
     from pytracking.evaluation.environment import env_settings as _env_settings  # type: ignore
 except Exception as ex:  # pragma: no cover - keep failure explicit until runtime
-    _PyTrackingToMP = None  # type: ignore
-    _TrackerParams = None  # type: ignore
-    _env_settings = None  # type: ignore
-    _PYTRACKING_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import pytracking dependencies for tracking.models.tomp. "
+        "Ensure libs/pytracking is present and importable."
+    ) from ex
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
@@ -111,14 +113,11 @@ class ToMPTracker(TrackingModel):
 
     def __init__(self, config: Dict[str, Any]):
         if cv2 is None:
-            detail = f" (import error: {_CV2_IMPORT_ERROR!r})" if '_CV2_IMPORT_ERROR' in globals() else ""
-            raise RuntimeError("OpenCV is required for ToMP tracker." + detail)
+            raise RuntimeError("OpenCV is required for ToMP tracker.")
         if torch is None:
-            detail = f" (import error: {_TORCH_IMPORT_ERROR!r})" if '_TORCH_IMPORT_ERROR' in globals() else ""
-            raise RuntimeError("PyTorch is required for ToMP tracker." + detail)
+            raise RuntimeError("PyTorch is required for ToMP tracker.")
         if _PyTrackingToMP is None or _TrackerParams is None:
-            detail = f" (import error: {_PYTRACKING_IMPORT_ERROR!r})" if '_PYTRACKING_IMPORT_ERROR' in globals() else ""
-            raise RuntimeError("Bundled pytracking package is required for ToMP tracker." + detail)
+            raise RuntimeError("Bundled pytracking package is required for ToMP tracker.")
 
         self.parameter_name = str(config.get("parameter", self.DEFAULT_CONFIG["parameter"]))
         self.device_preference = str(config.get("device", self.DEFAULT_CONFIG["device"])).lower()
@@ -323,8 +322,7 @@ class ToMPTracker(TrackingModel):
 
     def predict(self, video_path: str) -> List[FramePrediction]:
         if cv2 is None:
-            detail = f" (import error: {_CV2_IMPORT_ERROR!r})" if '_CV2_IMPORT_ERROR' in globals() else ""
-            raise RuntimeError("OpenCV is required for ToMP tracker." + detail)
+            raise RuntimeError("OpenCV is required for ToMP tracker.")
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():

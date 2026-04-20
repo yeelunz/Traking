@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -7,8 +8,10 @@ import numpy as np
 
 try:
     import torch
+    import torch.nn as nn
 except Exception:  # noqa: BLE001
     torch = None  # type: ignore
+    nn = None  # type: ignore
 
 from ...core.interfaces import FramePrediction
 from ...core.registry import register_feature_extractor
@@ -39,6 +42,7 @@ TAB_V5_LITE_TOTAL_DIM: int = 30
 TAB_V5_LITE_TEXTURE_DIM: int = TAB_V5_LITE_TOTAL_DIM - len(TAB_V5_LITE_MOTION_KEYS)
 
 _MOMENT_PIPELINE_CACHE: Dict[Tuple[str, str], Any] = {}
+_MOTION_MODES = {"freeze", "learnable", "pretrain"}
 
 
 def _resample_centers_v5(
@@ -83,10 +87,18 @@ def _positions_to_step_displacements_v5(values: np.ndarray) -> np.ndarray:
 def _trajectory_to_moment_input_v5(
     samples: Sequence[FramePrediction],
     target_steps: int,
+    displacement_scale: float = 1.0,
 ) -> np.ndarray:
     centers = _resample_centers_v5(samples, target_steps=target_steps)
     dx = _positions_to_step_displacements_v5(centers[:, 0])
     dy = _positions_to_step_displacements_v5(centers[:, 1])
+    try:
+        scale = float(displacement_scale)
+    except Exception:  # noqa: BLE001
+        scale = 1.0
+    if np.isfinite(scale) and not np.isclose(scale, 1.0):
+        dx = dx * scale
+        dy = dy * scale
     return np.stack([dx, dy], axis=0).astype(np.float32)
 
 
@@ -97,6 +109,117 @@ def _resolve_moment_device_v5(device: str) -> str:
             return "cuda"
         return "cpu"
     return dev
+
+
+def _normalize_motion_mode_v5(mode: str) -> str:
+    mode_lc = str(mode or "freeze").strip().lower()
+    aliases = {
+        "freez": "freeze",
+        "frozen": "freeze",
+        "pretrained": "pretrain",
+    }
+    mode_lc = aliases.get(mode_lc, mode_lc)
+    if mode_lc not in _MOTION_MODES:
+        return "freeze"
+    return mode_lc
+
+
+def _extract_projection_state_dict_v5(payload: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        for key in (
+            "projection_state_dict",
+            "projection",
+            "proj_state_dict",
+            "projector_state_dict",
+            "proj",
+        ):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return value
+    return None
+
+
+def _strip_projection_prefixes_v5(state: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, value in state.items():
+        clean = str(key)
+        for prefix in ("module.", "projection.", "proj.", "projector.", "model."):
+            if clean.startswith(prefix):
+                clean = clean[len(prefix) :]
+        out[clean] = value
+    return out
+
+
+_ModuleBase = nn.Module if nn is not None else object
+
+
+class MomentProjectionWrapper(_ModuleBase):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        motion_dim: int,
+        mode: str,
+        pretrain_ckpt: Optional[str] = None,
+        seed: int = 42,
+    ):
+        if torch is None or nn is None:
+            raise RuntimeError("PyTorch is required for motion projection wrapper.")
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.motion_dim = int(motion_dim)
+        self.motion_mode = _normalize_motion_mode_v5(mode)
+
+        with torch.random.fork_rng():
+            torch.manual_seed(int(seed))
+            self.proj = nn.Sequential(
+                nn.Linear(self.input_dim, self.motion_dim),
+                nn.LayerNorm(self.motion_dim),
+                nn.GELU(),
+            )
+
+        if self.motion_mode == "pretrain":
+            if not pretrain_ckpt:
+                raise ValueError("motion_mode='pretrain' requires motion_pretrain_ckpt.")
+            self._load_pretrain_ckpt(pretrain_ckpt)
+
+        self.eval()
+        self.requires_grad_(False)
+
+    def _load_pretrain_ckpt(self, ckpt_path: str) -> None:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"motion_pretrain_ckpt not found: {ckpt_path}")
+        payload = torch.load(ckpt_path, map_location="cpu")
+
+        ckpt_input_dim = None
+        ckpt_motion_dim = None
+        if isinstance(payload, dict):
+            ckpt_input_dim = payload.get("motion_input_dim")
+            ckpt_motion_dim = payload.get("motion_embedding_dim")
+        if ckpt_input_dim is not None and int(ckpt_input_dim) != self.input_dim:
+            raise ValueError(
+                f"Motion checkpoint input_dim mismatch: ckpt={ckpt_input_dim}, requested={self.input_dim}"
+            )
+        if ckpt_motion_dim is not None and int(ckpt_motion_dim) != self.motion_dim:
+            raise ValueError(
+                f"Motion checkpoint embedding_dim mismatch: ckpt={ckpt_motion_dim}, requested={self.motion_dim}"
+            )
+
+        proj_state = _extract_projection_state_dict_v5(payload)
+        if not isinstance(proj_state, dict) or not proj_state:
+            raise ValueError("motion pretrain ckpt has no projection_state_dict.")
+        proj_clean = _strip_projection_prefixes_v5(proj_state)
+        incompatible = self.proj.load_state_dict(proj_clean, strict=False)
+        missing = list(getattr(incompatible, "missing_keys", []) or [])
+        unexpected = list(getattr(incompatible, "unexpected_keys", []) or [])
+        if missing or unexpected:
+            raise ValueError(
+                "Motion projection checkpoint loaded with key mismatch: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+
+    def forward(self, x: Any) -> Any:
+        return self.proj(x)
 
 
 def _load_moment_pipeline_v5(model_name: str, device: str):  # noqa: ANN001
@@ -132,7 +255,7 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
     DEFAULT_CONFIG: Dict[str, Any] = {
         "n_texture_frames": 5,
         "texture_image_size": 96,
-        "roi_pad_ratio": 0.15,
+        "roi_pad_ratio": 0.2,
         "texture_pooling": "score_weighted",
         "texture_pooling_weight_source": "detection_score",
         "texture_mode": "freeze",
@@ -143,6 +266,9 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
         "moment_model_name": "AutonLab/MOMENT-1-base",
         "moment_input_steps": 256,
         "moment_pca_dim": len(TAB_V5_MOTION_KEYS),
+        "motion_mode": "freeze",
+        "motion_pretrain_ckpt": None,
+        "motion_projection_seed": 42,
         "moment_device": "auto",
     }
 
@@ -150,7 +276,7 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
         cfg = {**self.DEFAULT_CONFIG, **(params or {})}
         self._n_texture_frames = int(cfg.get("n_texture_frames", 5))
         self._texture_image_size = int(cfg.get("texture_image_size", 96))
-        self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.15))
+        self._roi_pad_ratio = float(cfg.get("roi_pad_ratio", 0.2))
         self._texture_pooling = _normalize_texture_pooling(str(cfg.get("texture_pooling", "score_weighted")))
         self._texture_pooling_weight_source = _normalize_texture_weight_source(
             str(cfg.get("texture_pooling_weight_source", "detection_score"))
@@ -169,8 +295,12 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
         self._moment_model_name = str(cfg.get("moment_model_name", "AutonLab/MOMENT-1-base"))
         self._moment_input_steps = int(cfg.get("moment_input_steps", 256))
         self._moment_pca_dim = int(cfg.get("moment_pca_dim", len(TAB_V5_MOTION_KEYS)))
+        self._motion_mode = _normalize_motion_mode_v5(str(cfg.get("motion_mode", "freeze")))
+        self._motion_pretrain_ckpt = cfg.get("motion_pretrain_ckpt")
+        self._motion_projection_seed = int(cfg.get("motion_projection_seed", 42))
         self._moment_device = _resolve_moment_device_v5(str(cfg.get("moment_device", "auto")))
         self._moment_pipeline = None
+        self._motion_wrapper: Optional[MomentProjectionWrapper] = None
 
         self._motion_keys = list(TAB_V5_MOTION_KEYS)
         self._static_keys = list(TAB_V5_STATIC_KEYS)
@@ -183,6 +313,8 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
         self._motion_pca_mean: Optional[np.ndarray] = None
         self._motion_pca_components: Optional[np.ndarray] = None
         self._moment_raw_dim: Optional[int] = None
+        self._motion_projection_state_dict: Optional[Dict[str, Any]] = None
+        self._motion_projection_input_dim: Optional[int] = None
         self._tex_pca_mean: Optional[np.ndarray] = None
         self._tex_pca_components: Optional[np.ndarray] = None
         self._feat_mean: Optional[np.ndarray] = None
@@ -211,6 +343,46 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
             return self._moment_pipeline
         self._moment_pipeline = _load_moment_pipeline_v5(self._moment_model_name, self._moment_device)
         return self._moment_pipeline
+
+    def _ensure_motion_wrapper(self, input_dim: int) -> MomentProjectionWrapper:
+        if torch is None or nn is None:
+            raise RuntimeError("PyTorch is required for non-freeze motion_mode.")
+        if self._motion_mode == "freeze":
+            raise RuntimeError("Motion projection wrapper should not be used in freeze mode.")
+        if self._motion_wrapper is not None:
+            if int(input_dim) != int(self._motion_projection_input_dim or input_dim):
+                raise RuntimeError(
+                    "Existing motion projection wrapper input_dim does not match new MOMENT embedding size."
+                )
+            return self._motion_wrapper
+
+        pretrain_ckpt = None
+        if self._motion_mode == "pretrain" and self._motion_projection_state_dict is None:
+            pretrain_ckpt = self._motion_pretrain_ckpt
+        wrapper = MomentProjectionWrapper(
+            input_dim=int(input_dim),
+            motion_dim=int(self._moment_pca_dim),
+            mode=self._motion_mode,
+            pretrain_ckpt=pretrain_ckpt,
+            seed=self._motion_projection_seed,
+        )
+        if self._motion_projection_state_dict is not None:
+            incompatible = wrapper.proj.load_state_dict(self._motion_projection_state_dict, strict=False)
+            missing = list(getattr(incompatible, "missing_keys", []) or [])
+            unexpected = list(getattr(incompatible, "unexpected_keys", []) or [])
+            if missing or unexpected:
+                raise RuntimeError(
+                    "Saved motion projection state could not be restored cleanly: "
+                    f"missing={missing}, unexpected={unexpected}"
+                )
+        wrapper = wrapper.to(self._moment_device)
+        wrapper.eval()
+        self._motion_wrapper = wrapper
+        self._motion_projection_input_dim = int(input_dim)
+        self._motion_projection_state_dict = {
+            k: v.detach().cpu() for k, v in wrapper.proj.state_dict().items()
+        }
+        return wrapper
 
     @staticmethod
     def _pca_fit_transform(X: np.ndarray, target_dim: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -258,7 +430,12 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
             )
         return reduced
 
-    def _extract_moment_motion_vector(self, samples: Sequence[FramePrediction]) -> Dict[str, Any]:
+    def _extract_moment_motion_vector(
+        self,
+        samples: Sequence[FramePrediction],
+        *,
+        displacement_scale: float = 1.0,
+    ) -> Dict[str, Any]:
         zeros = np.zeros((self._moment_pca_dim,), dtype=np.float32)
         if not samples:
             return {"motion": zeros}
@@ -274,6 +451,7 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
         motion_input = _trajectory_to_moment_input_v5(
             samples,
             target_steps=self._moment_input_steps,
+            displacement_scale=displacement_scale,
         )
         x_enc = torch.tensor(motion_input[None, ...], dtype=torch.float32, device=dev)
         input_mask = torch.ones((1, self._moment_input_steps), dtype=torch.float32, device=dev)
@@ -298,6 +476,24 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
 
         pooled = np.asarray(pooled, dtype=np.float64).reshape(-1)
         self._moment_raw_dim = int(pooled.size)
+        if self._motion_mode != "freeze":
+            wrapper = self._ensure_motion_wrapper(pooled.size)
+            try:
+                dev = next(wrapper.parameters()).device
+            except Exception:  # noqa: BLE001
+                dev = torch.device("cpu")
+            x_proj = torch.tensor(pooled[None, ...], dtype=torch.float32, device=dev)
+            with torch.no_grad():
+                proj = wrapper(x_proj).detach().cpu().numpy().astype(np.float64).reshape(-1)
+            motion = np.zeros((self._moment_pca_dim,), dtype=np.float32)
+            motion[: min(self._moment_pca_dim, proj.shape[0])] = proj[: min(self._moment_pca_dim, proj.shape[0])]
+            self._motion_projection_state_dict = {
+                k: v.detach().cpu() for k, v in wrapper.proj.state_dict().items()
+            }
+            return {
+                "motion": motion,
+                "_raw_moment_embedding": pooled,
+            }
         return {
             "motion": zeros,
             "_raw_moment_embedding": pooled,
@@ -394,26 +590,27 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
             return []
 
         motion_rows: List[np.ndarray] = []
-        for feat in features_list:
-            raw_motion = feat.get("_raw_moment_embedding")
-            if raw_motion is None:
-                continue
-            arr = np.asarray(raw_motion, dtype=np.float64).reshape(1, -1)
-            if arr.shape[1] > 0:
-                motion_rows.append(arr)
+        if self._motion_mode == "freeze":
+            for feat in features_list:
+                raw_motion = feat.get("_raw_moment_embedding")
+                if raw_motion is None:
+                    continue
+                arr = np.asarray(raw_motion, dtype=np.float64).reshape(1, -1)
+                if arr.shape[1] > 0:
+                    motion_rows.append(arr)
 
-        if motion_rows:
-            X_motion = np.vstack(motion_rows)
-            if fit:
-                _, self._motion_pca_mean, self._motion_pca_components = self._pca_fit_transform(
-                    X_motion,
-                    self._moment_pca_dim,
-                )
-                self._moment_raw_dim = int(X_motion.shape[1])
-            elif self._motion_pca_mean is None or self._motion_pca_components is None:
-                raise RuntimeError(
-                    "tab_v5 MOMENT PCA state is not fitted. finalize_batch(..., fit=True) must run first."
-                )
+            if motion_rows:
+                X_motion = np.vstack(motion_rows)
+                if fit:
+                    _, self._motion_pca_mean, self._motion_pca_components = self._pca_fit_transform(
+                        X_motion,
+                        self._moment_pca_dim,
+                    )
+                    self._moment_raw_dim = int(X_motion.shape[1])
+                elif self._motion_pca_mean is None or self._motion_pca_components is None:
+                    raise RuntimeError(
+                        "tab_v5 MOMENT PCA state is not fitted. finalize_batch(..., fit=True) must run first."
+                    )
 
         result: List[Dict[str, float]] = []
         if self._texture_mode != "freeze":
@@ -446,22 +643,25 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
         for feat in features_list:
             out = OrderedDict()
 
-            motion_vec = np.zeros((self._moment_pca_dim,), dtype=np.float64)
-            raw_motion = feat.get("_raw_moment_embedding")
-            if raw_motion is not None:
-                arr = np.asarray(raw_motion, dtype=np.float64).reshape(1, -1)
-                if arr.shape[1] > 0:
-                    if self._motion_pca_mean is None or self._motion_pca_components is None:
-                        if fit and motion_rows:
-                            raise RuntimeError("tab_v5 could not build MOMENT PCA state.")
-                    else:
-                        reduced = self._pca_transform(
-                            arr,
-                            self._motion_pca_mean,
-                            self._motion_pca_components,
-                            self._moment_pca_dim,
-                        )
-                        motion_vec[: min(self._moment_pca_dim, reduced.shape[1])] = reduced[0, : self._moment_pca_dim]
+            if self._motion_mode == "freeze":
+                motion_vec = np.zeros((self._moment_pca_dim,), dtype=np.float64)
+                raw_motion = feat.get("_raw_moment_embedding")
+                if raw_motion is not None:
+                    arr = np.asarray(raw_motion, dtype=np.float64).reshape(1, -1)
+                    if arr.shape[1] > 0:
+                        if self._motion_pca_mean is None or self._motion_pca_components is None:
+                            if fit and motion_rows:
+                                raise RuntimeError("tab_v5 could not build MOMENT PCA state.")
+                        else:
+                            reduced = self._pca_transform(
+                                arr,
+                                self._motion_pca_mean,
+                                self._motion_pca_components,
+                                self._moment_pca_dim,
+                            )
+                            motion_vec[: min(self._moment_pca_dim, reduced.shape[1])] = reduced[0, : self._moment_pca_dim]
+            else:
+                motion_vec = np.array([feat.get(k, 0.0) for k in self._motion_keys], dtype=np.float64)
 
             for i, k in enumerate(self._motion_keys):
                 out[k] = float(motion_vec[i]) if i < motion_vec.shape[0] else 0.0
@@ -513,8 +713,14 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
             self._feat_mean = mats.mean(axis=0)
             self._feat_std = mats.std(axis=0)
             self._feat_std = np.where(self._feat_std < 1e-9, 1.0, self._feat_std)
-            self._feat_mean[self._non_deep_dim:] = 0.0
-            self._feat_std[self._non_deep_dim:] = 1.0
+            motion_dim = len(self._motion_keys)
+            static_dim = len(self._static_keys)
+            texture_start = motion_dim + static_dim
+            if self._motion_mode != "freeze":
+                self._feat_mean[:motion_dim] = 0.0
+                self._feat_std[:motion_dim] = 1.0
+            self._feat_mean[texture_start:] = 0.0
+            self._feat_std[texture_start:] = 1.0
         else:
             if self._feat_mean is None or self._feat_std is None:
                 raise RuntimeError(
@@ -549,10 +755,13 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
             "texture_pooling_weight_source": self._texture_pooling_weight_source,
             "moment_model_name": self._moment_model_name,
             "moment_input_steps": self._moment_input_steps,
+            "motion_mode": self._motion_mode,
             "moment_pca_dim": self._moment_pca_dim,
             "moment_pca_mean": self._motion_pca_mean,
             "moment_pca_components": self._motion_pca_components,
             "moment_raw_dim": self._moment_raw_dim,
+            "motion_projection_input_dim": self._motion_projection_input_dim,
+            "motion_projection_state_dict": self._motion_projection_state_dict,
             "tex_pca_mean": self._tex_pca_mean,
             "tex_pca_components": self._tex_pca_components,
             "feat_mean": self._feat_mean,
@@ -574,9 +783,14 @@ class MotionStaticV5FeatureExtractor(TrajectoryFeatureExtractor):
             self._moment_model_name = str(state.get("moment_model_name"))
         if "moment_input_steps" in state:
             self._moment_input_steps = int(state.get("moment_input_steps"))
+        if "motion_mode" in state:
+            self._motion_mode = _normalize_motion_mode_v5(str(state.get("motion_mode")))
         self._motion_pca_mean = state.get("moment_pca_mean")
         self._motion_pca_components = state.get("moment_pca_components")
         self._moment_raw_dim = state.get("moment_raw_dim")
+        self._motion_projection_input_dim = state.get("motion_projection_input_dim")
+        self._motion_projection_state_dict = state.get("motion_projection_state_dict")
+        self._motion_wrapper = None
         self._tex_pca_mean = state.get("tex_pca_mean")
         self._tex_pca_components = state.get("tex_pca_components")
         self._feat_mean = state.get("feat_mean")

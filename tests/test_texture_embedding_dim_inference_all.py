@@ -6,7 +6,10 @@ def test_infer_texture_embedding_dims_for_all_pretrain_extractors_defaults():
     assert _infer_texture_embedding_dim("tab_v4", {}, {}) == 11
     assert _infer_texture_embedding_dim("tab_v5", {}, {}) == 11
     assert _infer_texture_embedding_dim("tab_v5_lite", {}, {}) == 15
+    assert _infer_texture_embedding_dim("tab_v7", {}, {}) == 8
+    assert _infer_texture_embedding_dim("tab_latest", {}, {}) == 8
     assert _infer_texture_embedding_dim("tsc_v3_pro", {}, {}) == 3
+    assert _infer_texture_embedding_dim("tsc_latest", {}, {}) == 5
 
     assert _infer_texture_embedding_dim("tab_v2", {}, {}) == 64
     assert _infer_texture_embedding_dim("tab_v2_extend", {}, {}) == 88

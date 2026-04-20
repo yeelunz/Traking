@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 import tracking.classification.feature_extractors_v5  # noqa: F401
 from tracking.core.interfaces import FramePrediction
@@ -76,3 +77,72 @@ def test_tab_v5_lite_keeps_15_motion_15_texture_and_no_static_keys():
 
     for k in TAB_V4_STATIC_KEYS:
         assert k not in video_keys
+
+
+def test_tab_v5_motion_mode_alias_normalizes_frezz_to_freeze():
+    ext = _build_extractor({"motion_mode": "frezz"})
+    assert ext._motion_mode == "freeze"
+
+
+def test_tab_v5_learnable_motion_mode_uses_projection_and_skips_motion_pca():
+    ext = _build_extractor({"motion_mode": "learnable", "texture_mode": "freeze"})
+    samples = [
+        FramePrediction(frame_index=0, bbox=(10.0, 10.0, 8.0, 8.0)),
+        FramePrediction(frame_index=1, bbox=(13.0, 11.0, 8.0, 8.0)),
+    ]
+
+    class _FakeMomentModel:
+        def __init__(self):
+            self._param = torch.nn.Parameter(torch.zeros(1))
+
+        def parameters(self):
+            yield self._param
+
+        def __call__(self, **_kwargs):
+            return type(
+                "MomentOutput",
+                (),
+                {"embeddings": torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=torch.float32)},
+            )()
+
+    ext._moment_pipeline = _FakeMomentModel()
+    info = ext._extract_moment_motion_vector(samples)
+
+    motion = np.asarray(info["motion"], dtype=np.float32)
+    assert motion.shape == (len(ext._motion_keys),)
+    assert np.any(np.abs(motion) > 0.0)
+
+    feat_a = _zero_video_feature_dict(ext)
+    for i, key in enumerate(ext._motion_keys):
+        feat_a[key] = float(motion[i])
+    feat_a["_raw_texture_backbone_batch"] = np.array([[1.0, 2.0, 3.0]], dtype=np.float64)
+    feat_a["_raw_texture_weights"] = np.array([1.0], dtype=np.float64)
+
+    feat_b = _zero_video_feature_dict(ext)
+    for i, key in enumerate(ext._motion_keys):
+        feat_b[key] = float(motion[i] + 0.1 * (i + 1))
+    feat_b["_raw_texture_backbone_batch"] = np.array([[3.0, 2.0, 1.0]], dtype=np.float64)
+    feat_b["_raw_texture_weights"] = np.array([1.0], dtype=np.float64)
+
+    fitted = ext.finalize_batch([feat_a, feat_b], fit=True)
+    assert len(fitted) == 2
+    assert ext._motion_pca_mean is None
+    assert ext._motion_pca_components is None
+    assert ext._motion_projection_state_dict is not None
+    assert any(abs(fitted[0][key]) > 0.0 for key in ext._motion_keys)
+
+
+def test_tab_v5_learnable_motion_state_restores_projection_consistently():
+    ext = _build_extractor({"motion_mode": "learnable", "moment_device": "cpu"})
+    wrapper = ext._ensure_motion_wrapper(4)
+    state = ext.get_state()
+
+    ext2 = _build_extractor({"motion_mode": "learnable", "moment_device": "cpu"})
+    ext2.set_state(state)
+    wrapper2 = ext2._ensure_motion_wrapper(4)
+
+    x = torch.tensor([[0.1, 0.2, 0.3, 0.4]], dtype=torch.float32)
+    with torch.no_grad():
+        y1 = wrapper(x).detach().cpu().numpy()
+        y2 = wrapper2(x).detach().cpu().numpy()
+    assert np.allclose(y1, y2)

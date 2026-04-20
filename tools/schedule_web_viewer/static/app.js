@@ -1,4 +1,5 @@
 const STANDALONE_GROUP_KEY = '__standalone__';
+const SHOW_LOCALIZATION_DEBUG = false;
 
 const state = {
   experiments: [],
@@ -73,8 +74,18 @@ const TRAJECTORY_FILTER_FIELDS = [
 
 const SUMMARY_COLORS = ['#6aa5ff', '#f8c146', '#66dfc5', '#ff8ba7', '#bd93f9', '#94f7c5'];
 
-async function fetchJSON(url, options) {
-  const res = await fetch(url, options);
+function withCacheBust(url, cacheBust) {
+  if (!cacheBust) return url;
+  const joiner = url.includes('?') ? '&' : '?';
+  return `${url}${joiner}_=${Date.now()}`;
+}
+
+async function fetchJSON(url, options = {}) {
+  const { cacheBust, ...fetchOptions } = options || {};
+  const res = await fetch(withCacheBust(url, cacheBust), {
+    ...fetchOptions,
+    ...(cacheBust ? { cache: 'no-store' } : {}),
+  });
   if (!res.ok) {
     throw new Error(await res.text());
   }
@@ -141,6 +152,10 @@ function formatPercentWithStd(value, std, digits = 2) {
 function formatPercentValue(value, digits = 2) {
   if (value === null || value === undefined) return '—';
   return `${Number(value).toFixed(digits)}%`;
+}
+
+function hasChartJs() {
+  return typeof Chart !== 'undefined';
 }
 
 function clamp01(value) {
@@ -471,7 +486,7 @@ function normalizeGroupLabel(key) {
   if (!key || key === STANDALONE_GROUP_KEY) {
     return '單一實驗';
   }
-  return key.replace(/ /g, '').split('/').filter(Boolean).join(' / ');
+  return key.replace(/\0/g, '').split('/').filter(Boolean).join(' / ');
 }
 
 function buildGroups() {
@@ -993,8 +1008,8 @@ function renderGroupOverview() {
   updateGroupCharts(group);
 }
 
-async function loadExperiments() {
-  const data = await fetchJSON('/api/experiments');
+async function loadExperiments(options = {}) {
+  const data = await fetchJSON('/api/experiments', { cacheBust: !!options.cacheBust });
   state.experiments = data.experiments;
   state.groupChartSelections = {};
   state.current = null;
@@ -1006,6 +1021,15 @@ async function loadExperiments() {
   const searchInput = document.getElementById('search');
   applySearch(searchInput ? searchInput.value : '');
   showWelcome();
+}
+
+async function forceRefreshViewer() {
+  const currentExpId = state.currentView?.expId || state.current?.id || null;
+  await fetchJSON('/api/experiments/refresh', { method: 'POST', cacheBust: true });
+  await loadExperiments({ cacheBust: true });
+  if (currentExpId) {
+    await selectExperiment(currentExpId, { cacheBust: true });
+  }
 }
 
 function buildCards(metrics) {
@@ -1020,7 +1044,7 @@ function buildCards(metrics) {
     entries.push({ label: 'Detection IoU', value: formatPercentWithStd(detection.iou_mean, detection.iou_std) });
     entries.push({ label: 'Detection FPS', value: formatWithStd(detection.fps || detection.fps_mean, detection.fps_std) });
   }
-  if (tf) {
+  if (SHOW_LOCALIZATION_DEBUG && tf) {
     const beforeJ = tf.before?.jitter_cx;
     const afterJ = tf.after?.jitter_cx;
     if (beforeJ != null && afterJ != null) {
@@ -1065,7 +1089,8 @@ function clearPerVideoTablesAndCharts() {
   state.segmentationChart = buildChart('segmentation-chart', state.segmentationChart, [], []);
 }
 
-async function renderDetailSections(payload, expIdForAssets) {
+async function renderDetailSections(payload, expIdForAssets, options = {}) {
+  const cacheBust = !!options.cacheBust;
   // Keep track of which experiment id owns the currently displayed visuals.
   state.assetExpId = expIdForAssets || null;
 
@@ -1122,13 +1147,13 @@ async function renderDetailSections(payload, expIdForAssets) {
     return;
   }
 
-  await loadGallery('detection-gallery', expIdForAssets, state.detectionCategory);
-  await loadGallery('segmentation-gallery', expIdForAssets, state.segmentationCategory);
+  await loadGallery('detection-gallery', expIdForAssets, state.detectionCategory, { cacheBust });
+  await loadGallery('segmentation-gallery', expIdForAssets, state.segmentationCategory, { cacheBust });
   renderVisualTabs('detection-gallery', 'detectionCategory');
   renderVisualTabs('segmentation-gallery', 'segmentationCategory');
 }
 
-async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
+async function renderExperimentPayload(payload, expIdForAssets, viewLabel, options = {}) {
   document.getElementById('exp-name').textContent = payload.experiment?.name || viewLabel || expIdForAssets || '';
   document.getElementById('exp-path').textContent = payload.experiment?.output_dir || '';
 
@@ -1136,41 +1161,81 @@ async function renderExperimentPayload(payload, expIdForAssets, viewLabel) {
   // section (e.g. classification) does NOT prevent subsequent sections
   // (e.g. detection per-video tables) from rendering.
   try { buildCards(payload); } catch (e) { console.error('[Viewer] buildCards error:', e); }
+  try {
+    const detTitle = document.querySelector('#detection-summary-table')?.closest('div')?.querySelector('h3');
+    if (detTitle) detTitle.textContent = 'Detection 彙總';
+  } catch (e) { console.error('[Viewer] detection title error:', e); }
   try { renderSummaryTable('detection-summary-table', payload.detection?.summary, DETECTION_SUMMARY_FIELDS); } catch (e) { console.error('[Viewer] detection summary error:', e); }
   try { renderSummaryTable('segmentation-summary-table', payload.segmentation?.summary, SEGMENTATION_SUMMARY_FIELDS); } catch (e) { console.error('[Viewer] segmentation summary error:', e); }
   try {
     const _fdSec = document.getElementById('filtered-detection-section');
     const _fdData = payload.filtered_detection?.summary;
-    if (_fdData) {
+    if (SHOW_LOCALIZATION_DEBUG && _fdData) {
       renderSummaryTable('filtered-detection-summary-table', _fdData, DETECTION_SUMMARY_FIELDS);
       if (_fdSec) _fdSec.classList.remove('hidden');
     } else {
       if (_fdSec) _fdSec.classList.add('hidden');
     }
   } catch (e) { console.error('[Viewer] filtered detection summary error:', e); }
-  try { renderTrajectoryFilterSection(payload.trajectory_filter); } catch (e) { console.error('[Viewer] trajectory filter section error:', e); }
+  try { renderTrajectoryFilterSection(SHOW_LOCALIZATION_DEBUG ? payload.trajectory_filter : null); } catch (e) { console.error('[Viewer] trajectory filter section error:', e); }
   try { renderClassificationSection(payload.classification); } catch (e) { console.error('[Viewer] classification section error:', e); }
 
   try {
-    await renderDetailSections(payload, expIdForAssets);
+    await renderDetailSections(payload, expIdForAssets, { cacheBust: !!options.cacheBust });
   } catch (e) {
     console.error('[Viewer] renderDetailSections error:', e);
   }
 }
 
 function normalizeClassificationPredictions(predictions) {
-  const rows = [];
-  (predictions || []).forEach((p) => {
+  const grouped = new Map();
+  (predictions || []).forEach((p, index) => {
+    const rawVideoId = p.video_id || p.video || p.subject_id || p.entity_id || `video_${index + 1}`;
+    const videoId = String(rawVideoId);
+    if (!grouped.has(videoId)) {
+      grouped.set(videoId, {
+        video: videoId,
+        label_true: null,
+        probs: [],
+        preds: [],
+        rows: [],
+      });
+    }
+    const row = grouped.get(videoId);
+    if (p.label_true !== null && p.label_true !== undefined && row.label_true === null) {
+      row.label_true = Number(p.label_true);
+    }
     const prob = clamp01(p.prob_positive);
-    const labelTrue = p.label_true;
-    if (prob === null || labelTrue === null || labelTrue === undefined) return;
-    rows.push({
-      id: p.subject_id || p.entity_id || `row_${rows.length + 1}`,
-      label_true: Number(labelTrue),
-      prob_positive: prob,
-    });
+    if (prob !== null) {
+      row.probs.push(prob);
+    }
+    if (p.label_pred !== null && p.label_pred !== undefined) {
+      row.preds.push(Number(p.label_pred));
+    }
+    row.rows.push(p);
   });
-  return rows;
+
+  return Array.from(grouped.values())
+    .sort((a, b) => a.video.localeCompare(b.video))
+    .map((row) => {
+      const avgProb = row.probs.length
+        ? row.probs.reduce((sum, value) => sum + value, 0) / row.probs.length
+        : null;
+      const vote = row.preds.length
+        ? (row.preds.reduce((acc, value) => acc + value, 0) >= (row.preds.length / 2) ? 1 : 0)
+        : (avgProb !== null ? (avgProb >= 0.5 ? 1 : 0) : null);
+      const labelTrue = row.label_true;
+      const correct = (vote !== null && labelTrue !== null) ? vote === labelTrue : null;
+      return {
+        id: row.video,
+        video: row.video,
+        label_true: labelTrue,
+        label_pred: vote,
+        prob_positive: avgProb,
+        correct,
+        sample_count: row.rows.length,
+      };
+    });
 }
 
 function classificationMetricsAtThreshold(rows, threshold) {
@@ -1344,6 +1409,7 @@ function renderClassificationSection(classification) {
   const section = document.getElementById('classification-section');
   const thresholdPanel = document.getElementById('classification-threshold-panel');
   const explain = document.getElementById('classification-summary-explain');
+  const stats = document.getElementById('classification-video-stats');
   if (!section) return;
   // For LOSO aggregate, use combined (summed) data which has integer TP/FP/FN/TN
   // and overall accuracy computed from all predictions. Fall back to summary for
@@ -1358,6 +1424,7 @@ function renderClassificationSection(classification) {
     renderFeatureImportanceSection(null);
     if (thresholdPanel) thresholdPanel.classList.add('hidden');
     if (explain) explain.textContent = '';
+    if (stats) stats.textContent = '';
     // Destroy any lingering chart
     if (state.classificationChart && state.classificationChart.destroy) {
       state.classificationChart.destroy();
@@ -1366,6 +1433,16 @@ function renderClassificationSection(classification) {
     return;
   }
   section.classList.remove('hidden');
+
+  const videoRows = normalizeClassificationPredictions(predictions);
+  const correctCount = videoRows.filter((row) => row.correct === true).length;
+  const wrongCount = videoRows.filter((row) => row.correct === false).length;
+  if (stats) {
+    const accuracy = videoRows.length ? (correctCount / videoRows.length) : null;
+    stats.textContent = videoRows.length
+      ? `影片數：${videoRows.length}，正確：${correctCount}，錯誤：${wrongCount}，影片層級準確率：${formatPercent(accuracy)}`
+      : '沒有可顯示的影片層級預測。';
+  }
 
   // Ensure specificity is always available for the summary table, even when
   // old summary.json files do not explicitly store it.
@@ -1385,9 +1462,9 @@ function renderClassificationSection(classification) {
     const methodText = method ? String(method) : 'unknown';
     const thText = (th !== null && th !== undefined) ? Number(th).toFixed(3) : 'N/A';
     if (isCombined) {
-      explain.textContent = `分類彙總使用 LOSO 各 fold 的原始預測結果加總（主報告值），不是用單一閾值重算。Threshold 分析區塊則是把 pooled predictions 以單一閾值重算（例如訓練閾值平均 ${thText}，method=${methodText}，或固定 0.500）。`;
+      explain.textContent = `分類彙總使用 LOSO 各 fold 的原始影片預測結果加總（主報告值），不是用單一閾值重算。Threshold 分析區塊則是把 pooled video predictions 以單一閾值重算（例如訓練閾值平均 ${thText}，method=${methodText}，或固定 0.500）。`;
     } else {
-      explain.textContent = `本實驗主報告值來自 summary.json（訓練/推論流程輸出）。Threshold 分析區塊為同一批 predictions 的事後單一閾值重算（訓練閾值 ${thText}，method=${methodText}，或固定 0.500）。`;
+      explain.textContent = `本實驗主報告值來自 summary.json（訓練/推論流程輸出）。Threshold 分析區塊為同一批影片預測的事後單一閾值重算（訓練閾值 ${thText}，method=${methodText}，或固定 0.500）。`;
     }
   }
 
@@ -1442,43 +1519,29 @@ function renderConfusionMatrix(containerId, summary) {
 function renderPredictionsTable(tableId, predictions) {
   const table = document.getElementById(tableId);
   if (!table) return;
-  if (!predictions || predictions.length === 0) {
+  const rows = normalizeClassificationPredictions(predictions);
+  if (!rows.length) {
     table.innerHTML = '<tr><td>無預測資料</td></tr>';
     return;
   }
-  // Group predictions by subject
-  const bySubject = new Map();
-  predictions.forEach((p) => {
-    const sid = p.subject_id || p.entity_id;
-    if (!bySubject.has(sid)) {
-      bySubject.set(sid, { subject_id: sid, label_true: p.label_true, preds: [] });
-    }
-    bySubject.get(sid).preds.push(p);
-  });
-  const subjects = Array.from(bySubject.values());
-  subjects.sort((a, b) => (a.subject_id || '').localeCompare(b.subject_id || ''));
-  const header = '<tr><th>Subject</th><th>True Label</th><th>Pred Label</th><th>Prob (Positive)</th><th>Correct</th></tr>';
-  const rows = subjects.map((s) => {
-    // For each subject use majority vote or first prediction
-    const majorityPred = s.preds.length === 1
-      ? s.preds[0].label_pred
-      : (() => {
-          const counts = {};
-          s.preds.forEach((p) => { counts[p.label_pred] = (counts[p.label_pred] || 0) + 1; });
-          return Number(Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]);
-        })();
-    const avgProb = s.preds.reduce((sum, p) => sum + (p.prob_positive || 0), 0) / s.preds.length;
-    const correct = majorityPred === s.label_true;
-    const labelMap = { 0: '健康 (0)', 1: '患病 (1)' };
+  const header = '<tr><th>影片</th><th>真實標籤</th><th>預測標籤</th><th>P(Positive)</th><th>是否正確</th><th>樣本數</th></tr>';
+  const labelMap = { 0: '健康 (0)', 1: '患病 (1)' };
+  const body = rows.map((row) => {
+    const correct = row.correct === true;
+    const predLabel = row.label_pred === null || row.label_pred === undefined ? '—' : (labelMap[row.label_pred] ?? row.label_pred);
+    const trueLabel = row.label_true === null || row.label_true === undefined ? '—' : (labelMap[row.label_true] ?? row.label_true);
+    const probText = row.prob_positive === null || row.prob_positive === undefined ? '—' : `${(row.prob_positive * 100).toFixed(1)}%`;
+    const correctText = row.correct === null ? '—' : (correct ? '✓' : '✗');
     return `<tr class="${correct ? 'pred-correct' : 'pred-wrong'}">
-      <td>${escapeHtml(s.subject_id)}</td>
-      <td>${labelMap[s.label_true] ?? s.label_true}</td>
-      <td>${labelMap[majorityPred] ?? majorityPred}</td>
-      <td>${(avgProb * 100).toFixed(1)}%</td>
-      <td>${correct ? '✓' : '✗'}</td>
+      <td>${escapeHtml(row.video)}</td>
+      <td>${trueLabel}</td>
+      <td>${predLabel}</td>
+      <td>${probText}</td>
+      <td>${correctText}</td>
+      <td>${row.sample_count}</td>
     </tr>`;
   }).join('');
-  table.innerHTML = header + rows;
+  table.innerHTML = header + body;
 }
 
 function renderFeatureImportanceSection(featureImportance) {
@@ -1527,26 +1590,16 @@ function buildClassificationProbChart(canvasId, chartRef, predictions) {
   if (chartRef && chartRef.destroy) {
     chartRef.destroy();
   }
-  if (!predictions || predictions.length === 0) return null;
+  const rows = normalizeClassificationPredictions(predictions);
+  if (!rows.length) return null;
+  if (!hasChartJs()) {
+    console.warn('[Viewer] Chart.js not available; skip classification probability chart.');
+    return null;
+  }
 
-  // Group by subject and compute avg probability
-  const bySubject = new Map();
-  predictions.forEach((p) => {
-    const sid = p.subject_id || p.entity_id;
-    if (!bySubject.has(sid)) {
-      bySubject.set(sid, { subject_id: sid, label_true: p.label_true, probs: [] });
-    }
-    bySubject.get(sid).probs.push(p.prob_positive || 0);
-  });
-  const subjects = Array.from(bySubject.values()).sort((a, b) =>
-    (a.subject_id || '').localeCompare(b.subject_id || '')
-  );
-  const labels = subjects.map((s) => s.subject_id);
-  const probs = subjects.map((s) => {
-    const avg = s.probs.reduce((a, b) => a + b, 0) / s.probs.length;
-    return avg * 100;
-  });
-  const colors = subjects.map((s) => s.label_true === 1 ? '#ff6b6b' : '#51cf66');
+  const labels = rows.map((row) => row.video);
+  const probs = rows.map((row) => (row.prob_positive === null ? null : row.prob_positive * 100));
+  const colors = rows.map((row) => row.correct === false ? '#ff6b6b' : '#51cf66');
 
   return new Chart(canvas, {
     type: 'bar',
@@ -1566,7 +1619,13 @@ function buildClassificationProbChart(canvasId, chartRef, predictions) {
         tooltip: {
           callbacks: {
             label: (ctx) => `P(Positive): ${ctx.parsed.y.toFixed(1)}%`,
-            afterLabel: (ctx) => `True: ${subjects[ctx.dataIndex].label_true === 1 ? '患病' : '健康'}`
+            afterLabel: (ctx) => {
+              const row = rows[ctx.dataIndex];
+              const trueLabel = row.label_true === 1 ? '患病' : '健康';
+              const predLabel = row.label_pred === 1 ? '患病' : '健康';
+              const correct = row.correct ? '正確' : '錯誤';
+              return `影片：${row.video}\nTrue: ${trueLabel} | Pred: ${predLabel} | ${correct}`;
+            }
           }
         },
         annotation: undefined,
@@ -1579,7 +1638,7 @@ function buildClassificationProbChart(canvasId, chartRef, predictions) {
           title: { display: true, text: '預測機率 (%)' }
         },
         x: {
-          title: { display: true, text: 'Subject' }
+          title: { display: true, text: '影片' }
         }
       }
     }
@@ -1638,6 +1697,11 @@ function renderGroupSummaryChart(canvasId, experiments, sectionKey, fields, char
   }
   const validExperiments = experiments.filter((exp) => exp.preview?.[sectionKey]);
   if (!validExperiments.length) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+  if (!hasChartJs()) {
+    console.warn('[Viewer] Chart.js not available; skip group summary chart render.');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     return;
   }
@@ -1704,6 +1768,10 @@ function buildChart(ctxId, chartRef, rows, metricKeys, options = {}) {
     chartRef.destroy();
   }
   if (!rows || rows.length === 0) {
+    return null;
+  }
+  if (!hasChartJs()) {
+    console.warn('[Viewer] Chart.js not available; skip chart render.');
     return null;
   }
   const labels = rows.map((r) => r.video);
@@ -1790,7 +1858,7 @@ function renderVisualTabs(galleryId, categoryStateKey) {
   if (!tabsContainer) return;
   tabsContainer.querySelectorAll('button').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.category === state[categoryStateKey]);
-    btn.addEventListener('click', async () => {
+    btn.onclick = async () => {
       // In LOSO aggregate mode we don't have per-fold assets; visuals are only
       // available when a concrete experiment (single or fold) is selected.
       if (state.currentView?.mode === 'aggregate') {
@@ -1806,7 +1874,7 @@ function renderVisualTabs(galleryId, categoryStateKey) {
         return;
       }
       await loadGallery(galleryId, expIdForAssets, state[categoryStateKey]);
-    });
+    };
   });
 }
 
@@ -1851,12 +1919,12 @@ function deriveGalleryGroup(label) {
   return folders[folders.length - 1] || '未命名';
 }
 
-async function loadGallery(galleryId, expId, category) {
+async function loadGallery(galleryId, expId, category, options = {}) {
   const gallery = document.getElementById(galleryId);
   gallery.innerHTML = '讀取中…';
   try {
     const params = new URLSearchParams({ exp_id: expId, category });
-    const data = await fetchJSON(`/api/experiments/visuals?${params.toString()}`);
+    const data = await fetchJSON(`/api/experiments/visuals?${params.toString()}`, { cacheBust: !!options.cacheBust });
     if (!data.items.length) {
       gallery.innerHTML = '<p>沒有可用的影像。</p>';
       return;
@@ -2179,7 +2247,7 @@ function renderVotingSection(data) {
   renderVotingCombosTable(softCombosTable, data.soft_top_combos || softFallback?.soft_top_combos, { soft: true });
 }
 
-async function selectExperiment(expId) {
+async function selectExperiment(expId, options = {}) {
   const target = state.experiments.find((exp) => exp.id === expId);
   if (!target) {
     console.warn('Experiment not found in current index', expId);
@@ -2198,12 +2266,12 @@ async function selectExperiment(expId) {
   if (votingSection) votingSection.classList.add('hidden');
 
   const params = new URLSearchParams({ exp_id: expId });
-  const res = await fetchJSON(`/api/experiments/metrics?${params.toString()}`);
+  const res = await fetchJSON(`/api/experiments/metrics?${params.toString()}`, { cacheBust: !!options.cacheBust });
 
   // LOSO aggregated experiment: show folds big table + aggregate charts; click fold to drill down.
   if (res && res.mode === 'aggregate' && Array.isArray(res.folds) && res.folds.length) {
     state.currentView = { mode: 'aggregate', expId: expId, label: '' };
-    await renderExperimentPayload(res, null, `${res.experiment?.name || expId}`);
+    await renderExperimentPayload(res, null, `${res.experiment?.name || expId}`, { cacheBust: !!options.cacheBust });
     clearPerVideoTablesAndCharts();
     showLosoOverview();
     const subtitle = document.getElementById('loso-subtitle');
@@ -2220,7 +2288,7 @@ async function selectExperiment(expId) {
       // Fallback: fetch voting from the aggregate voting endpoint
       try {
         const vp = new URLSearchParams({ exp_id: expId });
-        const vr = await fetchJSON(`/api/experiments/voting?${vp.toString()}`);
+        const vr = await fetchJSON(`/api/experiments/voting?${vp.toString()}`, { cacheBust: !!options.cacheBust });
         renderVotingSection(vr);
       } catch (e) {
         console.warn('Aggregate voting unavailable:', e);
@@ -2235,9 +2303,9 @@ async function selectExperiment(expId) {
           if (!foldId) return;
           state.currentView = { mode: 'fold', expId: foldId, label: '' };
           const foldParams = new URLSearchParams({ exp_id: foldId });
-          const foldRes = await fetchJSON(`/api/experiments/metrics?${foldParams.toString()}`);
+          const foldRes = await fetchJSON(`/api/experiments/metrics?${foldParams.toString()}`, { cacheBust: !!options.cacheBust });
           // Update per-video tables/charts + visuals for the selected fold
-          await renderDetailSections(foldRes, foldId);
+          await renderDetailSections(foldRes, foldId, { cacheBust: !!options.cacheBust });
           // Also update the classification section (confusion matrix / predictions) for this fold
           if (foldRes.classification) {
             renderClassificationSection(foldRes.classification);
@@ -2245,7 +2313,7 @@ async function selectExperiment(expId) {
           // Load voting for this specific fold
           try {
             const fvp = new URLSearchParams({ exp_id: foldId });
-            const fvr = await fetchJSON(`/api/experiments/voting?${fvp.toString()}`);
+            const fvr = await fetchJSON(`/api/experiments/voting?${fvp.toString()}`, { cacheBust: !!options.cacheBust });
             renderVotingSection(fvr);
           } catch (e) {
             console.warn('Fold voting unavailable:', e);
@@ -2256,13 +2324,13 @@ async function selectExperiment(expId) {
       });
     }
   } else {
-    await renderExperimentPayload(res, expId, `${res.experiment?.name || expId}`);
+    await renderExperimentPayload(res, expId, `${res.experiment?.name || expId}`, { cacheBust: !!options.cacheBust });
 
     // Fetch and render voting analysis for single (non-aggregate) experiments
     if (target.has_classification) {
       try {
         const votingParams2 = new URLSearchParams({ exp_id: expId });
-        const votingRes = await fetchJSON(`/api/experiments/voting?${votingParams2.toString()}`);
+        const votingRes = await fetchJSON(`/api/experiments/voting?${votingParams2.toString()}`, { cacheBust: !!options.cacheBust });
         renderVotingSection(votingRes);
       } catch (e) {
         console.warn('Voting analysis unavailable:', e);
@@ -2306,7 +2374,22 @@ async function init() {
   if (refreshBtn) {
     refreshBtn.addEventListener('click', async () => {
       await fetchJSON('/api/experiments/refresh', { method: 'POST' });
-      await loadExperiments();
+      await loadExperiments({ cacheBust: true });
+    });
+  }
+
+  const forceRefreshBtn = document.getElementById('force-refresh-btn');
+  if (forceRefreshBtn) {
+    forceRefreshBtn.addEventListener('click', async () => {
+      forceRefreshBtn.disabled = true;
+      const originalText = forceRefreshBtn.textContent;
+      forceRefreshBtn.textContent = '刷新中…';
+      try {
+        await forceRefreshViewer();
+      } finally {
+        forceRefreshBtn.disabled = false;
+        forceRefreshBtn.textContent = originalText;
+      }
     });
   }
 }

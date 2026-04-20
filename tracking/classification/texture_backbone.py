@@ -55,7 +55,7 @@ def _extract_state_dict(payload: Any) -> Dict[str, Any]:
             value = payload.get(key)
             if isinstance(value, dict):
                 return value
-        if any(isinstance(v, torch.Tensor) for v in payload.values()):
+        if torch is not None and any(isinstance(v, torch.Tensor) for v in payload.values()):
             return payload
     raise ValueError("Could not locate a valid state_dict in checkpoint payload.")
 
@@ -96,7 +96,10 @@ def _has_official_pretrained(backbone_name: str) -> bool:
     return str(backbone_name) in set(models)
 
 
-class TextureBackboneWrapper(nn.Module):
+_ModuleBase = nn.Module if nn is not None else object
+
+
+class TextureBackboneWrapper(_ModuleBase):
     """Texture branch wrapper with explicit mode separation.
 
     Modes

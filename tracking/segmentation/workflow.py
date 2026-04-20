@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -32,6 +33,7 @@ except Exception:  # pragma: no cover
 
 from ..core.interfaces import FramePrediction, MaskStats, SegmentationData, PreprocessingModule
 from ..core.registry import SEGMENTATION_MODEL_REGISTRY
+from ..utils.prediction_interpolation import cubic_clip_interpolate_predictions
 from ..utils.annotations import load_coco_vid
 from .dataset import SegmentationCropDataset, attach_ground_truth_segmentation
 from .metrics import centroid_distance, dice_coefficient, intersection_over_union, summarise_metrics
@@ -85,6 +87,59 @@ _AUTO_MASK_SUPPORT = all(
 AUTO_MASK_RUNTIME_AVAILABLE = _AUTO_MASK_SUPPORT
 
 
+def _shorten_path_component(name: str, max_len: int = 40) -> str:
+    text = str(name or "").strip()
+    if os.sep:
+        text = text.replace(os.sep, "_")
+    if os.altsep:
+        text = text.replace(os.altsep, "_")
+    text = text.strip(" .")
+    if not text:
+        text = "unknown"
+    if len(text) <= int(max_len):
+        return text
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    keep = max(8, int(max_len) - len(digest) - 1)
+    head = text[:keep].rstrip(" ._") or "id"
+    return f"{head}_{digest}"
+
+
+def _build_prediction_output_dir(output_root: str, video_path: str) -> str:
+    """Build a Windows-safe per-video output directory.
+
+    Default layout remains {subject}/{video_stem}. On Windows, shorten when needed
+    to prevent WinError 3/206 for deep experiment roots.
+    """
+    subject_id = os.path.basename(os.path.dirname(video_path)) or "unknown_subject"
+    vid_stem = os.path.splitext(os.path.basename(video_path))[0] or "video"
+
+    # Avoid redundant duplicated leaf when subject and video stem are the same.
+    if subject_id.lower() == vid_stem.lower():
+        base_dir = os.path.join(output_root, subject_id)
+    else:
+        base_dir = os.path.join(output_root, subject_id, vid_stem)
+
+    if os.name != "nt":
+        return base_dir
+
+    # Keep headroom for frame-level filenames under output_dir.
+    if len(os.path.abspath(base_dir)) <= 220:
+        return base_dir
+
+    short_subject = _shorten_path_component(subject_id, max_len=36)
+    short_video = _shorten_path_component(vid_stem, max_len=36)
+    if short_subject.lower() == short_video.lower():
+        compact_dir = os.path.join(output_root, short_subject)
+    else:
+        compact_dir = os.path.join(output_root, short_subject, short_video)
+    if len(os.path.abspath(compact_dir)) <= 220:
+        return compact_dir
+
+    # Final fallback: a single stable hashed leaf derived from absolute video path.
+    digest = hashlib.sha1(os.path.abspath(video_path).encode("utf-8")).hexdigest()[:12]
+    return os.path.join(output_root, f"v_{digest}")
+
+
 def _build_empty_segmentation_from_bbox(
     bbox_raw: Sequence[float],
     frame_shape: Sequence[int],
@@ -119,13 +174,14 @@ class SegmentationConfig:
     model_params: Dict[str, Any] = field(default_factory=dict)
     padding_train_min: float = 0.10
     padding_train_max: float = 0.15
-    padding_inference: float = 0.15
+    padding_inference: float = 0.20
     batch_size: int = 8
     num_workers: int = 0
     epochs: int = 20
     lr: float = 1e-3
     weight_decay: float = 1e-5
     threshold: float = 0.5
+    detection_conf_threshold: float = 0.5
     redundancy: int = 1
     device: str = "auto"
     val_ratio: float = 0.0
@@ -138,6 +194,11 @@ class SegmentationConfig:
     jitter: float = 0.0
     auto_pretrained: bool = False
     target_size: Tuple[int, int] = (256, 256)
+    reuse_video_capture: bool = True
+    cache_frames_in_ram: bool = True
+    cache_masks_in_ram: bool = True
+    mask_preprocess_workers: int = -1
+    missing_roi_interpolation: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, cfg: Optional[Dict]) -> "SegmentationConfig":
@@ -215,18 +276,72 @@ class SegmentationConfig:
             jitter_val = float(jitter_raw)
         except Exception:
             jitter_val = 0.0
+        reuse_cap_raw = params.get("reuse_video_capture", params.get("video_capture_reuse", True))
+        if isinstance(reuse_cap_raw, str):
+            reuse_cap_norm = reuse_cap_raw.strip().lower()
+            reuse_cap_flag = reuse_cap_norm not in {"", "0", "false", "no", "off"}
+        else:
+            reuse_cap_flag = bool(reuse_cap_raw) if reuse_cap_raw is not None else True
+        cache_in_ram_raw = params.get("cache_in_ram", params.get("preload_to_ram", True))
+        if isinstance(cache_in_ram_raw, str):
+            cache_in_ram_norm = cache_in_ram_raw.strip().lower()
+            cache_in_ram_flag = cache_in_ram_norm not in {"", "0", "false", "no", "off"}
+        else:
+            cache_in_ram_flag = bool(cache_in_ram_raw) if cache_in_ram_raw is not None else False
+
+        cache_frames_raw = params.get("cache_frames_in_ram", cache_in_ram_flag)
+        if isinstance(cache_frames_raw, str):
+            cache_frames_norm = cache_frames_raw.strip().lower()
+            cache_frames_flag = cache_frames_norm not in {"", "0", "false", "no", "off"}
+        else:
+            cache_frames_flag = bool(cache_frames_raw) if cache_frames_raw is not None else cache_in_ram_flag
+
+        cache_masks_raw = params.get("cache_masks_in_ram", cache_in_ram_flag)
+        if isinstance(cache_masks_raw, str):
+            cache_masks_norm = cache_masks_raw.strip().lower()
+            cache_masks_flag = cache_masks_norm not in {"", "0", "false", "no", "off"}
+        else:
+            cache_masks_flag = bool(cache_masks_raw) if cache_masks_raw is not None else cache_in_ram_flag
+
+        mask_workers_raw = params.get("mask_preprocess_workers", params.get("mask_postprocess_workers", "auto"))
+        if isinstance(mask_workers_raw, str):
+            mask_workers_norm = mask_workers_raw.strip().lower()
+            if mask_workers_norm in {"", "auto", "default"}:
+                mask_workers_val = -1
+            else:
+                try:
+                    mask_workers_val = int(mask_workers_raw)
+                except Exception:
+                    mask_workers_val = -1
+        else:
+            try:
+                mask_workers_val = int(mask_workers_raw)
+            except Exception:
+                mask_workers_val = -1
+
+        missing_roi_interp_raw = params.get("missing_roi_interpolation", {})
+        missing_roi_interp_cfg = dict(missing_roi_interp_raw) if isinstance(missing_roi_interp_raw, dict) else {}
         return cls(
             model_name=name,
             model_params=model_params,
             padding_train_min=float(params.get("padding_min", 0.10)),
             padding_train_max=float(params.get("padding_max", 0.15)),
-            padding_inference=float(params.get("padding_inference", 0.15)),
+            padding_inference=float(params.get("padding_inference", 0.20)),
             batch_size=int(params.get("batch_size", 8)),
             num_workers=int(params.get("num_workers", 0)),
             epochs=int(params.get("epochs", 20)),
             lr=float(params.get("lr", 1e-3)),
             weight_decay=float(params.get("weight_decay", 1e-5)),
             threshold=float(params.get("threshold", 0.5)),
+            detection_conf_threshold=float(
+                params.get(
+                    "detection_conf_threshold",
+                    params.get(
+                        "detector_conf_threshold",
+                        params.get("confidence_threshold", params.get("tau_conf", 0.5)),
+                    ),
+                )
+            ),
             redundancy=int(params.get("redundancy", 1)),
             device=str(params.get("device", "auto")),
             val_ratio=float(params.get("val_ratio", 0.0)),
@@ -239,6 +354,11 @@ class SegmentationConfig:
             jitter=jitter_val,
             auto_pretrained=auto_flag,
             target_size=target_size_tuple,
+            reuse_video_capture=reuse_cap_flag,
+            cache_frames_in_ram=cache_frames_flag,
+            cache_masks_in_ram=cache_masks_flag,
+            mask_preprocess_workers=mask_workers_val,
+            missing_roi_interpolation=missing_roi_interp_cfg,
         )
 
     @staticmethod
@@ -316,6 +436,15 @@ class SegmentationWorkflow:
         except Exception:
             self.project_root = os.getcwd()
         self.device = _resolve_device(self.cfg.device)
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            try:
+                gpu_idx = self.device.index if self.device.index is not None else torch.cuda.current_device()
+                gpu_name = torch.cuda.get_device_name(gpu_idx)
+                self.logger(f"[Segmentation] Device: {self.device} ({gpu_name})")
+            except Exception:
+                self.logger(f"[Segmentation] Device: {self.device}")
+        else:
+            self.logger(f"[Segmentation] Device: {self.device}")
         model_key = str(self.cfg.model_name or "").strip().lower()
         model_params = dict(self.cfg.model_params)
         self.model_name = model_key or "unetpp"
@@ -553,6 +682,12 @@ class SegmentationWorkflow:
             else:
                 self.logger(f"[Segmentation] External pretrained weights not found: {self.pretrained_external}")
         train_seed = self.cfg.seed if seed is None else int(seed)
+        configured_mask_workers = int(getattr(self.cfg, "mask_preprocess_workers", -1))
+        if configured_mask_workers < 0:
+            mask_preprocess_workers = min(16, max(1, int(os.cpu_count() or 1)))
+        else:
+            mask_preprocess_workers = max(0, configured_mask_workers)
+        dataset_t0 = time.perf_counter()
         dataset = SegmentationCropDataset(
             train_videos,
             dataset_root=self.dataset_root,
@@ -561,8 +696,29 @@ class SegmentationWorkflow:
             seed=train_seed,
             jitter=self.cfg.jitter,
             target_size=self.input_size,
+            reuse_video_capture=self.cfg.reuse_video_capture,
+            cache_frames_in_ram=self.cfg.cache_frames_in_ram,
+            cache_masks_in_ram=self.cfg.cache_masks_in_ram,
+            mask_preprocess_workers=mask_preprocess_workers,
             preprocs=self.preprocs,
             roi_preprocs=self.roi_preprocs,
+        )
+        dataset_elapsed = time.perf_counter() - dataset_t0
+        cache_stats = dataset.get_ram_cache_stats()
+        cache_mb = float(cache_stats.get("cache_bytes", 0)) / (1024.0 * 1024.0)
+        self.logger(
+            "[Segmentation] Train dataset ready "
+            f"samples={len(dataset)} videos={len(train_videos)} elapsed={dataset_elapsed:.1f}s "
+            f"reuse_video_capture={self.cfg.reuse_video_capture} "
+            f"cache_frames_in_ram={self.cfg.cache_frames_in_ram} "
+            f"cache_masks_in_ram={self.cfg.cache_masks_in_ram} "
+            f"mask_preprocess_workers={mask_preprocess_workers}"
+        )
+        self.logger(
+            "[Segmentation] RAM cache(train) "
+            f"frames={cache_stats.get('cached_frames', 0)} "
+            f"masks={cache_stats.get('cached_masks', 0)} "
+            f"size={cache_mb:.1f}MB"
         )
         if getattr(dataset, "missing_annotations", None):
             missing = dataset.missing_annotations
@@ -576,15 +732,33 @@ class SegmentationWorkflow:
             self.logger("[Segmentation] No training samples available after filtering; skipping training stage.")
             return {"status": "no_data"}
 
+        effective_num_workers = max(0, self.cfg.num_workers)
+        if effective_num_workers > 0 and (self.cfg.cache_frames_in_ram or self.cfg.cache_masks_in_ram):
+            self.logger(
+                "[Segmentation] RAM cache is enabled; forcing num_workers=0 to avoid per-worker RAM duplication."
+            )
+            effective_num_workers = 0
+
         loader = DataLoader(
             dataset,
             batch_size=max(1, self.cfg.batch_size),
             shuffle=True,
-            num_workers=max(0, self.cfg.num_workers),
+            num_workers=effective_num_workers,
             pin_memory=self.device.type == "cuda",
         )
+        self.logger(
+            "[Segmentation] DataLoader(train) "
+            f"batch_size={max(1, self.cfg.batch_size)} num_workers={effective_num_workers} "
+            f"pin_memory={self.device.type == 'cuda'}"
+        )
+        if effective_num_workers == 0:
+            self.logger(
+                "[Segmentation] Note: num_workers=0, CPU video decode/mask prep runs on the training thread; "
+                "first epoch may look stalled before the first epoch-loss log."
+            )
         val_loader = None
         if val_videos:
+            val_t0 = time.perf_counter()
             val_dataset = SegmentationCropDataset(
                 val_videos,
                 dataset_root=self.dataset_root,
@@ -593,14 +767,31 @@ class SegmentationWorkflow:
                 seed=train_seed,
                 jitter=0.0,
                 target_size=self.input_size,
+                reuse_video_capture=self.cfg.reuse_video_capture,
+                cache_frames_in_ram=self.cfg.cache_frames_in_ram,
+                cache_masks_in_ram=self.cfg.cache_masks_in_ram,
+                mask_preprocess_workers=mask_preprocess_workers,
                 preprocs=self.preprocs,
                 roi_preprocs=self.roi_preprocs,
+            )
+            val_elapsed = time.perf_counter() - val_t0
+            val_cache_stats = val_dataset.get_ram_cache_stats()
+            val_cache_mb = float(val_cache_stats.get("cache_bytes", 0)) / (1024.0 * 1024.0)
+            self.logger(
+                "[Segmentation] Val dataset ready "
+                f"samples={len(val_dataset)} videos={len(val_videos)} elapsed={val_elapsed:.1f}s"
+            )
+            self.logger(
+                "[Segmentation] RAM cache(val) "
+                f"frames={val_cache_stats.get('cached_frames', 0)} "
+                f"masks={val_cache_stats.get('cached_masks', 0)} "
+                f"size={val_cache_mb:.1f}MB"
             )
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=max(1, self.cfg.batch_size),
                 shuffle=False,
-                num_workers=max(0, self.cfg.num_workers),
+                num_workers=effective_num_workers,
                 pin_memory=self.device.type == "cuda",
             )
         # Select parameters to optimize based on model type
@@ -621,9 +812,16 @@ class SegmentationWorkflow:
         best_val = math.inf
         history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
         for epoch in range(1, self.cfg.epochs + 1):
+            epoch_t0 = time.perf_counter()
             self.model.train()
             loss_epoch = 0.0
-            for batch in loader:
+            total_steps = len(loader)
+            self.logger(f"[Segmentation] Epoch {epoch}/{self.cfg.epochs} started | steps={total_steps}")
+            log_every = max(1, total_steps // 5)
+            wait_t0 = time.perf_counter()
+            for step_idx, batch in enumerate(loader, start=1):
+                data_wait_s = time.perf_counter() - wait_t0
+                step_t0 = time.perf_counter()
                 images = batch["image"].to(self.device)
                 masks = batch["mask"].to(self.device)
                 if images.shape[0] < 2 or images.shape[2] < 2 or images.shape[3] < 2:
@@ -639,9 +837,21 @@ class SegmentationWorkflow:
                 loss.backward()
                 optimiser.step()
                 loss_epoch += float(loss.detach().cpu()) * images.size(0)
+                step_s = time.perf_counter() - step_t0
+                if step_idx == 1:
+                    self.logger(
+                        f"[Segmentation] Epoch {epoch} first batch | data_wait={data_wait_s:.2f}s step={step_s:.2f}s"
+                    )
+                elif step_idx % log_every == 0 or step_idx == total_steps:
+                    self.logger(
+                        f"[Segmentation] Epoch {epoch} progress {step_idx}/{total_steps} "
+                        f"| data_wait={data_wait_s:.2f}s step={step_s:.2f}s"
+                    )
+                wait_t0 = time.perf_counter()
             loss_epoch /= len(loader.dataset)
             history["train_loss"].append(loss_epoch)
-            self.logger(f"[Segmentation] Epoch {epoch}/{self.cfg.epochs} loss={loss_epoch:.4f}")
+            epoch_s = time.perf_counter() - epoch_t0
+            self.logger(f"[Segmentation] Epoch {epoch}/{self.cfg.epochs} loss={loss_epoch:.4f} elapsed={epoch_s:.1f}s")
             if val_loader is not None:
                 val_loss = self._evaluate(val_loader)
                 history["val_loss"].append(val_loss)
@@ -743,11 +953,7 @@ class SegmentationWorkflow:
             gt = None
             if gt_annotations and video_path in gt_annotations:
                 gt = gt_annotations[video_path]
-            # Two-level layout: {subject_id}/{vid_stem} to avoid collision when
-            # different subjects share the same video filename.
-            subject_id = os.path.basename(os.path.dirname(video_path))
-            vid_stem = os.path.splitext(os.path.basename(video_path))[0]
-            out_dir = os.path.join(output_root, subject_id, vid_stem)
+            out_dir = _build_prediction_output_dir(output_root, video_path)
             ensure_dir(out_dir)
             metrics, raw_accum = self.predict_video(video_path, predictions, out_dir, gt, viz_settings)
             metrics_by_video[video_path] = metrics
@@ -812,28 +1018,197 @@ class SegmentationWorkflow:
         # If GT exists, we should evaluate ALL GT frames.
         # In addition, inference must still run on ALL prediction frames so
         # downstream classification can consume per-frame segmentation outputs.
-        # Missing bbox handling:
-        # 1) Use bbox at the same frame when it is valid
-        # 2) Otherwise mark the frame as missing and emit an empty ROI/mask
+        # Missing ROI policy (aligned with thesis method):
+        # 1) For each frame, select the highest-confidence candidate bbox.
+        # 2) Apply tau_conf; frames below threshold are marked missing.
+        # 3) Use PCHIP interpolation on bbox dimensions (x, y, w, h) for missing frames.
+        # 4) Expand final bbox with inference padding before ROI crop.
         gt_frame_indices: List[int] = sorted(int(i) for i in gt_by_frame.keys()) if gt_by_frame else []
-        pred_by_frame: Dict[int, FramePrediction] = {int(p.frame_index): p for p in predictions}
+        preds_by_frame: Dict[int, List[FramePrediction]] = {}
+        for pred in predictions:
+            preds_by_frame.setdefault(int(pred.frame_index), []).append(pred)
+
+        try:
+            tau_conf = float(getattr(self.cfg, "detection_conf_threshold", 0.5))
+        except Exception:
+            tau_conf = 0.5
+        if not math.isfinite(tau_conf):
+            tau_conf = 0.5
+
         work_predictions: List[FramePrediction] = []
+
+        min_raw_wh = 2.0
+        missing_roi_interp_cfg = dict(getattr(self.cfg, "missing_roi_interpolation", {}) or {})
+        try:
+            missing_roi_interp_max_gap = int(missing_roi_interp_cfg.get("max_gap", 30))
+        except Exception:
+            missing_roi_interp_max_gap = 30
+        if missing_roi_interp_max_gap < 2:
+            missing_roi_interp_max_gap = 2
+        missing_roi_interp_source = str(
+            missing_roi_interp_cfg.get("bbox_source", "missing_roi_interpolated")
+        ).strip() or "missing_roi_interpolated"
+
+        def _normalize_bbox(raw_bbox: Any) -> Optional[Tuple[float, float, float, float]]:
+            try:
+                x, y, w, h = map(float, raw_bbox)
+            except Exception:
+                return None
+            if not np.isfinite([x, y, w, h]).all():
+                return None
+            if w < float(min_raw_wh) or h < float(min_raw_wh):
+                return None
+            return (x, y, w, h)
+
+        def _prediction_confidence(pred: Optional[FramePrediction]) -> float:
+            if pred is None:
+                return float("-inf")
+            raw_conf = getattr(pred, "confidence", None)
+            if raw_conf is None:
+                raw_conf = getattr(pred, "score", None)
+            try:
+                conf_val = float(raw_conf)
+            except Exception:
+                return float("-inf")
+            if not math.isfinite(conf_val):
+                return float("-inf")
+            return conf_val
+
+        def _select_best_prediction_by_frame() -> Dict[int, FramePrediction]:
+            selected: Dict[int, FramePrediction] = {}
+            for frame_idx, frame_preds in preds_by_frame.items():
+                if not frame_preds:
+                    continue
+                best_pred = frame_preds[0]
+                best_conf = _prediction_confidence(best_pred)
+                best_bbox_ok = _normalize_bbox(getattr(best_pred, "bbox", None)) is not None
+                best_fallback = bool(getattr(best_pred, "is_fallback", False))
+                for cand in frame_preds[1:]:
+                    cand_conf = _prediction_confidence(cand)
+                    cand_bbox_ok = _normalize_bbox(getattr(cand, "bbox", None)) is not None
+                    cand_fallback = bool(getattr(cand, "is_fallback", False))
+                    if cand_conf > best_conf:
+                        best_pred = cand
+                        best_conf = cand_conf
+                        best_bbox_ok = cand_bbox_ok
+                        best_fallback = cand_fallback
+                        continue
+                    if cand_conf == best_conf:
+                        if cand_bbox_ok and not best_bbox_ok:
+                            best_pred = cand
+                            best_conf = cand_conf
+                            best_bbox_ok = cand_bbox_ok
+                            best_fallback = cand_fallback
+                            continue
+                        if cand_bbox_ok == best_bbox_ok and (not cand_fallback) and best_fallback:
+                            best_pred = cand
+                            best_conf = cand_conf
+                            best_bbox_ok = cand_bbox_ok
+                            best_fallback = cand_fallback
+                selected[int(frame_idx)] = best_pred
+            return selected
+
+        pred_by_frame: Dict[int, FramePrediction] = _select_best_prediction_by_frame()
+
+        def _is_valid_detection_anchor(pred: Optional[FramePrediction]) -> bool:
+            if pred is None:
+                return False
+            if bool(getattr(pred, "is_fallback", False)):
+                return False
+            if _prediction_confidence(pred) < float(tau_conf):
+                return False
+            return _normalize_bbox(getattr(pred, "bbox", None)) is not None
+
+        def _build_interpolated_bbox_map(query_frame_indices: Sequence[int]) -> Dict[int, FramePrediction]:
+            if not query_frame_indices:
+                return {}
+            anchor_preds: List[FramePrediction] = []
+            for frame_idx, pred in pred_by_frame.items():
+                if not _is_valid_detection_anchor(pred):
+                    continue
+                bbox_valid = _normalize_bbox(getattr(pred, "bbox", None))
+                if bbox_valid is None:
+                    continue
+                anchor_preds.append(
+                    FramePrediction(
+                        frame_index=int(frame_idx),
+                        bbox=bbox_valid,
+                        score=getattr(pred, "score", None),
+                        confidence=getattr(pred, "confidence", None),
+                        confidence_components=getattr(pred, "confidence_components", None),
+                        segmentation=getattr(pred, "segmentation", None),
+                        is_fallback=bool(getattr(pred, "is_fallback", False)),
+                        bbox_source=(str(getattr(pred, "bbox_source", "detector")).strip() or "detector"),
+                    )
+                )
+            if not anchor_preds:
+                return {}
+            interp_preds = cubic_clip_interpolate_predictions(
+                anchor_preds,
+                max_gap=int(missing_roi_interp_max_gap),
+                interpolated_bbox_source=missing_roi_interp_source,
+                query_frame_indices=[int(v) for v in query_frame_indices],
+                fill_all_queries=True,
+            )
+            return {int(p.frame_index): p for p in interp_preds}
+
         try:
             if gt_frame_indices:
                 infer_frame_indices = sorted(set(gt_frame_indices) | set(pred_by_frame.keys()))
+                interpolated_by_frame = _build_interpolated_bbox_map(infer_frame_indices)
                 for frame_idx in infer_frame_indices:
                     pred = pred_by_frame.get(int(frame_idx))
-                    use_bbox_raw: Optional[tuple] = None
+                    pred_bbox_valid = _normalize_bbox(getattr(pred, "bbox", None)) if _is_valid_detection_anchor(pred) else None
+                    interp_pred = interpolated_by_frame.get(int(frame_idx))
+                    interp_bbox_valid = _normalize_bbox(getattr(interp_pred, "bbox", None)) if interp_pred is not None else None
+
+                    use_bbox_raw: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
                     missing_bbox_input = False
+                    interpolated_bbox_used = False
                     bbox_source = "missing"
                     pad_fraction = float(self.cfg.padding_inference)
-                    pred_bbox_raw: Optional[tuple] = None
-                    min_raw_wh = 2.0
+
+                    if pred_bbox_valid is not None:
+                        use_bbox_raw = pred_bbox_valid
+                        bbox_source = str(getattr(pred, "bbox_source", "detector")).strip() or "detector"
+                    elif interp_bbox_valid is not None:
+                        use_bbox_raw = interp_bbox_valid
+                        bbox_source = str(getattr(interp_pred, "bbox_source", missing_roi_interp_source)).strip() or missing_roi_interp_source
+                        interpolated_bbox_used = True
+                    else:
+                        missing_bbox_input = True
+
                     if pred is not None:
                         try:
-                            pred_bbox_raw = tuple(map(float, pred.bbox))
+                            pred.bbox = use_bbox_raw
                         except Exception:
-                            pred_bbox_raw = None
+                            pass
+
+                    for same_frame_pred in preds_by_frame.get(int(frame_idx), []):
+                        try:
+                            same_frame_pred.bbox = use_bbox_raw
+                        except Exception:
+                            pass
+                        try:
+                            same_frame_pred.bbox_source = bbox_source
+                        except Exception:
+                            pass
+                        try:
+                            same_frame_pred.is_fallback = bool(
+                                getattr(same_frame_pred, "is_fallback", False) or missing_bbox_input or interpolated_bbox_used
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            pred.bbox_source = bbox_source
+                        except Exception:
+                            pass
+                        try:
+                            pred.is_fallback = bool(
+                                getattr(pred, "is_fallback", False) or missing_bbox_input or interpolated_bbox_used
+                            )
+                        except Exception:
+                            pass
 
                     cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
                     ok, frame = cap.read()
@@ -847,17 +1222,6 @@ class SegmentationWorkflow:
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
                     frame_h, frame_w = frame.shape[:2]
 
-                    pred_bbox_valid = None
-                    if pred_bbox_raw is not None and pred_bbox_raw[2] >= min_raw_wh and pred_bbox_raw[3] >= min_raw_wh:
-                        pred_bbox_valid = pred_bbox_raw
-
-                    if pred_bbox_valid is not None:
-                        use_bbox_raw = pred_bbox_valid
-                        bbox_source = str(getattr(pred, "bbox_source", "detector")).strip() or "detector"
-                    else:
-                        use_bbox_raw = (0.0, 0.0, 0.0, 0.0)
-                        missing_bbox_input = True
-
                     if pred is not None:
                         work_pred = FramePrediction(
                             frame_index=int(frame_idx),
@@ -866,7 +1230,7 @@ class SegmentationWorkflow:
                             confidence=getattr(pred, "confidence", None),
                             confidence_components=getattr(pred, "confidence_components", None),
                             segmentation=getattr(pred, "segmentation", None),
-                            is_fallback=bool(getattr(pred, "is_fallback", False) or missing_bbox_input),
+                            is_fallback=bool(getattr(pred, "is_fallback", False) or missing_bbox_input or interpolated_bbox_used),
                             bbox_source=bbox_source,
                         )
                     else:
@@ -874,7 +1238,7 @@ class SegmentationWorkflow:
                             frame_index=int(frame_idx),
                             bbox=use_bbox_raw,
                             score=None,
-                            is_fallback=missing_bbox_input,
+                            is_fallback=bool(missing_bbox_input or interpolated_bbox_used),
                             bbox_source=bbox_source,
                         )
                     work_predictions.append(work_pred)
@@ -1051,11 +1415,17 @@ class SegmentationWorkflow:
                     orig_pred = pred_by_frame.get(frame_idx)
                     if orig_pred is not None:
                         orig_pred.segmentation = _seg_data
+                    for same_frame_pred in preds_by_frame.get(int(frame_idx), []):
+                        same_frame_pred.segmentation = _seg_data
             else:
-                # Inference-only mode: only process frames where we have bbox predictions.
-                work_predictions = list(predictions)
-                for pred in predictions:
-                    frame_idx = int(pred.frame_index)
+                # Inference-only mode: process selected best candidate per frame.
+                infer_frame_indices = sorted(int(fi) for fi in pred_by_frame.keys())
+                work_predictions = [pred_by_frame[fi] for fi in infer_frame_indices]
+                interpolated_by_frame = _build_interpolated_bbox_map(infer_frame_indices)
+                for frame_idx in infer_frame_indices:
+                    pred = pred_by_frame.get(int(frame_idx))
+                    if pred is None:
+                        continue
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                     ok, frame = cap.read()
                     if not ok or frame is None:
@@ -1067,24 +1437,37 @@ class SegmentationWorkflow:
                         continue
                     frame = self._apply_preprocs_frame(frame, self.preprocs)
 
-                    # Segmentation consumes the current-frame bbox directly. Missing bboxes stay missing.
+                    # Segmentation uses the per-video interpolated bbox result first, then applies padding.
                     pad_fraction = float(self.cfg.padding_inference)
                     missing_bbox_input = False
-                    min_raw_wh = 2.0
-                    try:
-                        pred_bbox_raw = tuple(map(float, pred.bbox))
-                    except Exception:
-                        pred_bbox_raw = None
-                    use_bbox_raw = None
+                    interpolated_bbox_used = False
+                    pred_bbox_valid = _normalize_bbox(getattr(pred, "bbox", None)) if _is_valid_detection_anchor(pred) else None
+                    interp_pred = interpolated_by_frame.get(int(frame_idx))
+                    interp_bbox_valid = _normalize_bbox(getattr(interp_pred, "bbox", None)) if interp_pred is not None else None
+
+                    use_bbox_raw: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
                     bbox_source = "missing"
-                    if pred_bbox_raw is not None and pred_bbox_raw[2] >= min_raw_wh and pred_bbox_raw[3] >= min_raw_wh:
-                        use_bbox_raw = pred_bbox_raw
+                    if pred_bbox_valid is not None:
+                        use_bbox_raw = pred_bbox_valid
                         bbox_source = str(getattr(pred, "bbox_source", "detector")).strip() or "detector"
+                    elif interp_bbox_valid is not None:
+                        use_bbox_raw = interp_bbox_valid
+                        bbox_source = str(getattr(interp_pred, "bbox_source", missing_roi_interp_source)).strip() or missing_roi_interp_source
+                        interpolated_bbox_used = True
                     else:
-                        use_bbox_raw = (0.0, 0.0, 0.0, 0.0)
                         missing_bbox_input = True
 
+                    try:
+                        pred.bbox = use_bbox_raw  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
                     if missing_bbox_input:
+                        try:
+                            pred.is_fallback = True  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    elif interpolated_bbox_used:
                         try:
                             pred.is_fallback = True  # type: ignore[attr-defined]
                         except Exception:
@@ -1094,6 +1477,22 @@ class SegmentationWorkflow:
                         pred.bbox_source = bbox_source  # type: ignore[attr-defined]
                     except Exception:
                         pass
+
+                    for same_frame_pred in preds_by_frame.get(int(frame_idx), []):
+                        try:
+                            same_frame_pred.bbox = use_bbox_raw  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            same_frame_pred.bbox_source = bbox_source  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            same_frame_pred.is_fallback = bool(
+                                getattr(same_frame_pred, "is_fallback", False) or missing_bbox_input or interpolated_bbox_used
+                            )
+                        except Exception:
+                            pass
 
                     bbox = expand_bbox(use_bbox_raw, pad_fraction, frame.shape[:2])
                     if bbox.w < 2.0 or bbox.h < 2.0:
@@ -1244,6 +1643,8 @@ class SegmentationWorkflow:
                         roi_bbox=bbox.as_tuple(),
                         centroid_error_px=centroid_err,
                     )
+                    for same_frame_pred in preds_by_frame.get(int(frame_idx), []):
+                        same_frame_pred.segmentation = pred.segmentation
         finally:
             cap.release()
             if restore_training_state is not None and model_to_restore is not None:
@@ -1525,7 +1926,7 @@ class SegmentationWorkflow:
     ) -> None:
         if not bool(viz_settings.get("include_segmentation", True)):
             return
-        frame_indices = sorted(int(idx) for idx in mask_files.keys())
+        frame_indices = sorted({int(idx) for idx in mask_files.keys()} | {int(idx) for idx in gt_by_frame.keys()})
         if not frame_indices:
             return
         try:
@@ -1579,21 +1980,17 @@ class SegmentationWorkflow:
             if self.roi_preprocs:
                 roi_frame = self._apply_preprocs_frame(roi_frame, self.roi_preprocs)
             mask_path = mask_files.get(frame_idx)
-            if not mask_path or not os.path.exists(mask_path):
-                continue
-            # Guard against zero-byte files: Ultralytics patches cv2.imread to use
-            # np.fromfile + imdecode; empty files produce an assertion failure.
-            if os.path.getsize(mask_path) == 0:
-                continue
-            try:
-                pred_mask_full = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            except Exception:
-                continue
+            pred_mask_full = None
+            if mask_path and os.path.exists(mask_path) and os.path.getsize(mask_path) > 0:
+                try:
+                    pred_mask_full = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                except Exception:
+                    pred_mask_full = None
             if pred_mask_full is None:
-                continue
+                pred_mask_full = np.zeros((frame_h, frame_w), dtype=np.uint8)
             roi_pred_mask = crop_with_bbox(pred_mask_full, roi_bbox)
             if roi_pred_mask.size == 0:
-                continue
+                roi_pred_mask = np.zeros(roi_frame.shape[:2], dtype=np.uint8)
             has_gt_mask = False
             roi_gt_mask = None
             if gt_entry and gt_entry.segmentation:
@@ -1604,7 +2001,7 @@ class SegmentationWorkflow:
                         has_gt_mask = True
             pred_binary = self._to_binary_mask(roi_pred_mask)
             if pred_binary.size == 0:
-                continue
+                pred_binary = np.zeros(roi_frame.shape[:2], dtype=bool)
             dice_val = None
             iou_val = None
             if has_gt_mask and roi_gt_mask is not None:

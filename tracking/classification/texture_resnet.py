@@ -44,18 +44,22 @@ def _apply_preprocs_frame_like_segmentation(frame: np.ndarray, preprocs: Sequenc
 # ── Dependency checks ────────────────────────────────────────────────────────
 _TORCH_OK = False
 _TV_OK = False
+_TORCH_IMPORT_ERROR: Optional[BaseException] = None
+_TV_IMPORT_ERROR: Optional[BaseException] = None
 try:
     import torch
     import torch.nn as _tnn
     _TORCH_OK = True
-except ImportError:
+except Exception as exc:  # noqa: BLE001
+    _TORCH_IMPORT_ERROR = exc
     torch = None  # type: ignore[assignment]
     _tnn = None  # type: ignore[assignment]
 
 try:
     import torchvision.models as _tv_models  # type: ignore[import-not-found]
     _TV_OK = True
-except ImportError:
+except Exception as exc:  # noqa: BLE001
+    _TV_IMPORT_ERROR = exc
     _tv_models = None  # type: ignore[assignment]
 
 
@@ -178,8 +182,15 @@ class MaskedROIResNetExtractor:
         if self._model is not None:
             return
         if not self.available:
+            causes = []
+            if _TORCH_IMPORT_ERROR is not None:
+                causes.append(f"torch: {_TORCH_IMPORT_ERROR}")
+            if _TV_IMPORT_ERROR is not None:
+                causes.append(f"torchvision: {_TV_IMPORT_ERROR}")
+            detail = f" ({'; '.join(causes)})" if causes else ""
             raise RuntimeError(
-                "PyTorch / torchvision required for ResNet texture extraction."
+                "PyTorch / torchvision required for ResNet texture extraction"
+                f"{detail}."
             )
         self._device = torch.device(
             "cuda"

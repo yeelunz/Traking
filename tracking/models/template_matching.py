@@ -4,8 +4,10 @@ from typing import Dict, Any, List, Tuple, Optional
 
 try:
     import cv2  # type: ignore
-except Exception:
-    cv2 = None  # type: ignore
+except Exception as exc:
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.template_matching. Install opencv-python."
+    ) from exc
 import numpy as np
 
 from ..core.interfaces import TrackingModel, FramePrediction, PreprocessingModule
@@ -32,8 +34,6 @@ class TemplateMatching(TrackingModel):
     }
 
     def __init__(self, config: Dict[str, Any]):
-        if cv2 is None:
-            raise RuntimeError("OpenCV (opencv-python) is required for TemplateMatching model.")
         self.method = getattr(cv2, config.get("method", "TM_CCOEFF_NORMED"))
         self.template_size = tuple(config.get("template_size", [64, 64]))
         self.search_margin = int(config.get("search_margin", 32))

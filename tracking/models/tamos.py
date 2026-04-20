@@ -13,14 +13,16 @@ import numpy as np
 try:
     import cv2  # type: ignore
 except Exception as ex:  # pragma: no cover - surface clear error when OpenCV missing
-    cv2 = None  # type: ignore
-    _CV2_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import OpenCV for tracking.models.tamos. Install opencv-python."
+    ) from ex
 
 try:
     import torch
 except Exception as ex:  # pragma: no cover - keep torch import error explicit
-    torch = None  # type: ignore
-    _TORCH_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import torch for tracking.models.tamos. Install torch."
+    ) from ex
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -34,10 +36,10 @@ try:  # pragma: no cover - pytracking imports validated at runtime
     from pytracking.utils.params import TrackerParams as _TrackerParams  # type: ignore
     from pytracking.evaluation.environment import env_settings as _env_settings  # type: ignore
 except Exception as ex:  # pragma: no cover
-    _PyTrackingTaMOs = None  # type: ignore
-    _TrackerParams = None  # type: ignore
-    _env_settings = None  # type: ignore
-    _PYTRACKING_IMPORT_ERROR = ex
+    raise ImportError(
+        "Failed to import pytracking dependencies for tracking.models.tamos. "
+        "Ensure libs/pytracking is present and importable."
+    ) from ex
 
 from ..core.interfaces import FramePrediction, PreprocessingModule, TrackingModel
 from ..core.registry import register_model
